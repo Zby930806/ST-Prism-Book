@@ -1,0 +1,383 @@
+import { apiSettings, currentCharKey } from '@/api/settings';
+import { getContext, type STMessage } from '@/st/context';
+import { reactive } from 'vue';
+import { deriveMemory, getLeaf, leafValid } from './apply';
+import { isAiFloor, pendingAiFloors } from './engine';
+import { latestStoryTime } from './timeTag';
+import type { BaibaiMemory, LeafExtra, MemSummary, StoredDelta, VarTemplate, VarTier } from './types';
+import { createEmptyMemory, MEMORY_KEY, MEMORY_VERSION, normalizeTemplate } from './types';
+
+/**
+ * 响应式记忆镜像。
+ * 真源:① 压缩节点森林 = chat_metadata[MEMORY_KEY].summaries;② 叶子 = chat 各消息 extra.bbs_leaf。
+ * state / items / plans 是从 chat 重放出的派生缓存,供 Vue 渲染。
+ */
+export const memory = reactive<BaibaiMemory>(createEmptyMemory());
+
+/**
+ * 给页面读的派生元信息(chat 非 reactive,UI 必须经此 reactive 通道):
+ *  - hasLeaf:是否有任一有效叶子(无则禁用手动添加)。
+ *  - leaves:供 summary 页展示的叶子列表(含陈旧标记)。
+ */
+export interface LeafView {
+  id: string;
+  text: string;
+  timeStart?: string;
+  timeEnd?: string;
+  timeLabel?: string; // 旧数据回退
+  createdAt: number;
+  msgIndex: number;
+  active: boolean; // 所在消息已隐藏(is_system)
+  stale: boolean; // 正文已变、尚未重摘
+}
+export const derivedMeta = reactive<{ hasLeaf: boolean; leaves: LeafView[]; pendingFloors: number[]; latestStoryTime: string; rev: number }>({
+  hasLeaf: false,
+  leaves: [],
+  pendingFloors: [],
+  // 故事内最新时间:从正文标签实时读(不依赖是否已摘),供摘要页展示与相对时间参照
+  latestStoryTime: '',
+  // 递增版本号:每次 recomputeDerived 都 +1。chat 非 reactive,楼内面板等外部视图读它即可
+  // 追踪「派生已重算」——无论重算由 ST 事件、主界面摘要、还是楼内编辑触发,都能统一刷新。
+  rev: 0,
+});
+
+function scalarText(v: unknown): string {
+  if (typeof v === 'string') return v.trim();
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v).trim();
+  return '';
+}
+
+function optText(v: unknown): string | undefined {
+  return scalarText(v) || undefined;
+}
+
+/** 重放 chat 得到 state/items/plans,原地写回;并刷新 derivedMeta */
+export function recomputeDerived(): void {
+  const ctx = getContext();
+  // 欢迎页(未进入任何聊天)getCurrentChatId 为空,但 chat 里可能残留上次的 #0,
+  // 不属于任何聊天的楼层不该被判为「未摘要」,故此时视作无 chat。
+  const chat = ctx?.getCurrentChatId?.() ? ctx.chat ?? null : null;
+  const d = deriveMemory(chat);
+  memory.state.time = d.state.time;
+  memory.state.location = d.state.location;
+  memory.state.locationPath = d.state.locationPath;
+  memory.state.sceneFocus = d.state.sceneFocus;
+  // 年龄(age+ageTime 锚点对)也在 protagonist 上,漏拷会让 UI/注入永远读不到主角年龄
+  for (const key of ['gender', 'age', 'ageTime', 'identity', 'appearance', 'outfit', 'condition'] as const) {
+    memory.protagonist[key] = d.protagonist[key];
+  }
+  memory.items.splice(0, memory.items.length, ...d.items);
+  memory.plans.splice(0, memory.plans.length, ...d.plans);
+  memory.scenes.splice(0, memory.scenes.length, ...d.scenes);
+  memory.npcs.splice(0, memory.npcs.length, ...d.npcs);
+  memory.itemLog.splice(0, memory.itemLog.length, ...d.itemLog);
+  memory.lifeDetails.splice(0, memory.lifeDetails.length, ...d.lifeDetails);
+  // vars 是 JSON 对象:清空后按派生结果重填(不换 reactive 引用,保持页面响应式绑定)
+  for (const k of Object.keys(memory.vars)) delete memory.vars[k];
+  Object.assign(memory.vars, d.vars);
+
+  // derivedMeta:扫 chat 收集叶子(含陈旧)
+  const leaves: LeafView[] = [];
+  if (chat) {
+    for (let i = 0; i < chat.length; i++) {
+      const m = chat[i];
+      if (m?.extra?.bbs_omit) continue; // 番外楼:不进摘要页叶子列表
+      const leaf = getLeaf(m);
+      if (!leaf) continue;
+      const valid = leafValid(m);
+      leaves.push({
+        id: leaf.id,
+        text: scalarText(leaf.text),
+        timeStart: optText(leaf.timeStart),
+        timeEnd: optText(leaf.timeEnd),
+        timeLabel: optText(leaf.timeLabel),
+        createdAt: typeof leaf.createdAt === 'number' ? leaf.createdAt : Date.now(),
+        msgIndex: i,
+        active: m.is_system === true,
+        stale: !valid,
+      });
+    }
+  }
+  derivedMeta.leaves = leaves;
+  derivedMeta.hasLeaf = leaves.some(l => !l.stale);
+  derivedMeta.latestStoryTime = latestStoryTime(chat);
+  // 待摘要楼层(AI 楼且无有效叶子),供摘要页「未摘要楼层」列表逐楼补摘
+  derivedMeta.pendingFloors = chat ? pendingAiFloors(chat) : [];
+  derivedMeta.rev++; // 通知外部视图(楼内面板)派生已刷新
+}
+
+/* ============ 落盘:叶子在 chat 文件,森林在 metadata ============ */
+
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 防抖落盘叶子(写进 chat 文件)。合并连续多楼摘要为一次 saveChat。 */
+export function scheduleLeafFlush(): void {
+  const ctx = getContext();
+  if (!ctx?.saveChat) return;
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    void ctx.saveChat();
+  }, 1500);
+}
+
+/** 立即落盘(切聊天/卸载前调用,避免丢未落盘叶子) */
+export function flushLeavesNow(): void {
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  const ctx = getContext();
+  void ctx?.saveChat?.();
+}
+
+/**
+ * 把森林(压缩节点)+ **仅 chat 层**变量模板写回 chat_metadata 并持久化。
+ * 全局/角色层的模板不在这里(它们存 extension_settings,由 replaceVarsTemplate 落盘)。叶子也不在这里。
+ */
+export function saveMemory() {
+  const ctx = getContext();
+  if (!ctx?.chatMetadata) return;
+  const snapshot: { version: number; summaries: MemSummary[]; varsTemplate: VarTemplate } = {
+    version: MEMORY_VERSION,
+    summaries: JSON.parse(JSON.stringify(memory.summaries)),
+    varsTemplate: JSON.parse(JSON.stringify(memory.varTemplates.chat)),
+  };
+  (ctx.chatMetadata as Record<string, unknown>)[MEMORY_KEY] = snapshot;
+  ctx.saveMetadataDebounced?.();
+}
+
+/* ============ 迁移 v2 → v3 ============ */
+
+/**
+ * v2(叶子在森林、带 coveredIndices+delta)→ v3(叶子搬到消息 extra)。
+ * 需 chat 上下文;无 chat 时返回 null(延后,下次 CHAT_CHANGED 重跑)。
+ * 搬不动的叶子(索引越界/消息已删)其 delta 合并进一条兜底叶子挂到最后 AI 楼,保结构化 1:1。
+ */
+function migrateV2toV3(raw: Record<string, unknown>, chat: STMessage[] | null): BaibaiMemory | null {
+  if (!chat || chat.length === 0) return null; // 延后
+
+  const out = createEmptyMemory();
+  out.version = MEMORY_VERSION;
+  const oldSums = (Array.isArray(raw.summaries) ? raw.summaries : []) as Array<Record<string, unknown>>;
+
+  const orphanDeltas: StoredDelta[] = [];
+
+  // 1) 旧叶子(level0)→ 搬到对应 AI 楼的 extra(保留原 id)
+  for (const s of oldSums) {
+    if ((typeof s.level === 'number' ? s.level : 0) !== 0) continue;
+    const cov = (Array.isArray(s.coveredIndices) ? s.coveredIndices : []) as number[];
+    const delta = (s.delta ?? {}) as StoredDelta;
+
+    // 定位挂靠的 AI 楼:coveredIndices 里最后一个 isAiFloor;退而求其次取最后一个存在的
+    let target = -1;
+    for (let k = cov.length - 1; k >= 0; k--) {
+      if (isAiFloor(chat[cov[k]])) {
+        target = cov[k];
+        break;
+      }
+    }
+    if (target < 0) {
+      for (let k = cov.length - 1; k >= 0; k--) {
+        if (chat[cov[k]]) {
+          target = cov[k];
+          break;
+        }
+      }
+    }
+    if (target < 0 || !chat[target] || chat[target].extra?.bbs_leaf) {
+      orphanDeltas.push(delta); // 搬不动/目标已占用 → 兜底
+      continue;
+    }
+    const leaf: LeafExtra = {
+      id: String(s.id),
+      text: String(s.text ?? ''),
+      delta,
+      timeLabel: s.timeLabel as string | undefined,
+      createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(),
+      v: 1,
+    };
+    chat[target].extra = { ...(chat[target].extra ?? {}), bbs_leaf: leaf };
+  }
+
+  // 1b) 兜底叶子:把搬不动的 delta 合并挂到最后一条 AI 楼
+  if (orphanDeltas.length) {
+    let last = -1;
+    for (let i = chat.length - 1; i >= 0; i--) {
+      if (isAiFloor(chat[i])) {
+        last = i;
+        break;
+      }
+    }
+    if (last >= 0 && !chat[last].extra?.bbs_leaf) {
+      const merged: StoredDelta = {};
+      for (const d of orphanDeltas) mergeStoredDelta(merged, d);
+      chat[last].extra = {
+        ...(chat[last].extra ?? {}),
+        bbs_leaf: {
+          id: `leaf_migrate_${Date.now().toString(36)}`,
+          text: '(迁移:历史结构化状态)',
+          delta: merged,
+          createdAt: Date.now(),
+          v: 1,
+        },
+      };
+    }
+  }
+
+  // 2) 压缩节点(level≥1)原样保留进森林
+  for (const s of oldSums) {
+    if ((typeof s.level === 'number' ? s.level : 0) < 1) continue;
+    out.summaries.push({
+      id: String(s.id),
+      text: String(s.text ?? ''),
+      level: s.level as number,
+      createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(),
+      auto: s.auto !== false,
+      timeLabel: s.timeLabel as string | undefined,
+      childIds: Array.isArray(s.childIds) ? (s.childIds as string[]) : [],
+    });
+  }
+  return out;
+}
+
+/** 迁移辅助:把 delta b 合并进 a(用于兜底叶子,简单拼接 add/op 数组,resolve 用稳定 id) */
+function mergeStoredDelta(a: StoredDelta, b: StoredDelta): void {
+  if (b.time) a.time = b.time;
+  if (b.location) a.location = b.location;
+  if (b.protagonist) a.protagonist = { ...(a.protagonist ?? {}), ...b.protagonist };
+  if (b.items) {
+    const ai = (a.items ??= {});
+    if (b.items.add?.length) (ai.add ??= []).push(...b.items.add);
+    if (b.items.update?.length) (ai.update ??= []).push(...b.items.update);
+    if (b.items.remove?.length) (ai.remove ??= []).push(...b.items.remove);
+  }
+  if (b.scenes) {
+    const as = (a.scenes ??= {});
+    if (b.scenes.add?.length) (as.add ??= []).push(...b.scenes.add);
+    if (b.scenes.update?.length) (as.update ??= []).push(...b.scenes.update);
+    if (b.scenes.reparent?.length) (as.reparent ??= []).push(...b.scenes.reparent);
+    if (b.scenes.remove?.length) (as.remove ??= []).push(...b.scenes.remove);
+    if (b.scenes.ops?.length) (as.ops ??= []).push(...b.scenes.ops);
+  }
+  if (b.plans) {
+    const ap = (a.plans ??= {});
+    if (b.plans.add?.length) (ap.add ??= []).push(...b.plans.add);
+    if (b.plans.update?.length) (ap.update ??= []).push(...b.plans.update);
+    if (b.plans.resolve?.length) (ap.resolve ??= []).push(...b.plans.resolve);
+    if (b.plans.remove?.length) (ap.remove ??= []).push(...b.plans.remove);
+    if (b.plans.reopen?.length) (ap.reopen ??= []).push(...b.plans.reopen);
+  }
+}
+
+/* ============ 载入 / 保存 ============ */
+
+function cleanSummaryNode(s: MemSummary, idx: number): MemSummary {
+  return {
+    id: scalarText(s.id) || `sum_bad_${idx}_${Date.now().toString(36)}`,
+    text: scalarText(s.text),
+    level: typeof s.level === 'number' ? s.level : 1,
+    createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(),
+    auto: s.auto !== false,
+    timeStart: optText(s.timeStart),
+    timeEnd: optText(s.timeEnd),
+    timeLabel: optText(s.timeLabel),
+    childIds: Array.isArray(s.childIds) ? s.childIds.map(x => scalarText(x)).filter(Boolean) : [],
+    imported: s.imported === true ? true : undefined,
+    importedFloorStart:
+      s.imported === true && Number.isFinite(s.importedFloorStart) && (s.importedFloorStart as number) >= 0
+        ? Math.floor(s.importedFloorStart as number)
+        : undefined,
+    importedFloorEnd:
+      s.imported === true && Number.isFinite(s.importedFloorEnd) && (s.importedFloorEnd as number) >= 0
+        ? Math.floor(s.importedFloorEnd as number)
+        : undefined,
+  };
+}
+
+function assignForest(target: BaibaiMemory, summaries: MemSummary[], varTemplates: Record<VarTier, VarTemplate>) {
+  target.version = MEMORY_VERSION;
+  target.summaries = summaries.map(cleanSummaryNode);
+  target.varTemplates = varTemplates;
+}
+
+/** 读三层变量模板(chat 来自传入的 chatMetadata 原始值;global/char 来自 settings)。 */
+function loadVarTemplates(rawChatTemplate: unknown): Record<VarTier, VarTemplate> {
+  const key = currentCharKey();
+  return {
+    global: normalizeTemplate(apiSettings.varsGlobalTemplate),
+    char: key ? normalizeTemplate(apiSettings.varsTemplateByChar[key]) : { json: {}, meaning: '', rule: '' },
+    chat: normalizeTemplate(rawChatTemplate),
+  };
+}
+
+/** 从当前聊天载入森林 + 三层变量模板 + 重算派生(必要时迁移) */
+export function loadMemory() {
+  const ctx = getContext();
+  const meta = ctx?.chatMetadata as Record<string, unknown> | undefined;
+  const raw = meta?.[MEMORY_KEY] as Record<string, unknown> | undefined;
+  const chat = ctx?.chat ?? null;
+  // 变量模板与 summary 迁移正交:chat 层从 metadata 直读,再取全局/角色层(缺失=空模板)
+  const varTemplates = loadVarTemplates(raw?.varsTemplate);
+
+  if (raw && typeof raw === 'object') {
+    const version = typeof raw.version === 'number' ? raw.version : 1;
+    if (version >= MEMORY_VERSION) {
+      assignForest(memory, (Array.isArray(raw.summaries) ? raw.summaries : []) as MemSummary[], varTemplates);
+    } else {
+      const migrated = migrateV2toV3(raw, chat);
+      if (migrated) {
+        assignForest(memory, migrated.summaries, varTemplates);
+        // 先把叶子落盘(saveChat)成功,再升 version 写 metadata,保证可重入
+        flushLeavesNow();
+        saveMemory();
+      } else {
+        // 延后迁移:暂用旧森林里的压缩节点(level≥1),叶子等下次 chat 就绪再搬
+        const comps = (Array.isArray(raw.summaries) ? raw.summaries : []).filter(
+          (s: Record<string, unknown>) => (typeof s.level === 'number' ? s.level : 0) >= 1,
+        ) as MemSummary[];
+        assignForest(memory, comps, varTemplates);
+      }
+    }
+  } else {
+    assignForest(memory, [], varTemplates);
+  }
+  recomputeDerived();
+}
+
+/**
+ * 替换某一层的变量模板(供变量页编辑器保存):写回对应存储 → 更新内存 → 重算派生。
+ *  - global → apiSettings.varsGlobalTemplate(跨设备同步);
+ *  - char → apiSettings.varsTemplateByChar[avatar](无当前角色则忽略,UI 已禁用);
+ *  - chat → chatMetadata(经 saveMemory)。
+ * 模板变化只改「初始状态」,历史命令照旧重放(所以改初始值会影响整条聊天的当前值)。
+ * 注:注入刷新由调用方(页面)负责 refreshInjection —— store 不引 inject 避免循环依赖。
+ */
+export function replaceVarsTemplate(tier: VarTier, tpl: VarTemplate): void {
+  const norm = normalizeTemplate(tpl);
+  memory.varTemplates[tier] = norm;
+  if (tier === 'global') {
+    apiSettings.varsGlobalTemplate = norm;
+  } else if (tier === 'char') {
+    const key = currentCharKey();
+    if (key) {
+      if (Object.keys(norm.json).length || norm.meaning.trim() || norm.rule.trim()) apiSettings.varsTemplateByChar[key] = norm;
+      else delete apiSettings.varsTemplateByChar[key]; // 清空则移除键,不留空壳
+    }
+  } else {
+    saveMemory(); // chat 层写 chatMetadata
+  }
+  recomputeDerived();
+}
+
+/** 监听聊天切换:切走前 flush 未落盘叶子,切来后重载 */
+export function bindChatLifecycle() {
+  const ctx = getContext();
+  if (!ctx?.eventSource || !ctx?.eventTypes) return;
+  ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED, () => {
+    flushLeavesNow();
+    loadMemory();
+  });
+  // 首次载入
+  loadMemory();
+}
