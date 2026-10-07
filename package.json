@@ -1,0 +1,32 @@
+{
+  "name": "st-prism-book",
+  "version": "1.2.9-prism.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync-version": "node scripts/sync-version.mjs",
+    "prebuild": "node scripts/sync-version.mjs",
+    "build": "vite build",
+    "test": "vitest run && node scripts/test-time-rel.mjs && node scripts/test-vector-depth.mjs && node scripts/test-memory-regressions.mjs",
+    "test:time": "node scripts/test-time-rel.mjs",
+    "test:vector-depth": "node scripts/test-vector-depth.mjs",
+    "test:memory": "node scripts/test-memory-regressions.mjs",
+    "prewatch": "node scripts/sync-version.mjs",
+    "watch": "vite build --watch --mode development",
+    "typecheck": "vue-tsc --noEmit",
+    "export:prompts": "node scripts/export-prompts.mjs",
+    "release:check": "node scripts/check-release.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@vitejs/plugin-vue": "^6.0.7",
+    "typescript": "^5.7.0",
+    "vite": "^7.3.3",
+    "vitest": "^4.1.10",
+    "vue-tsc": "^3.3.3"
+  },
+  "dependencies": {
+    "vue": "^3.5.35"
+  },
+  "description": "棱镜宝书 · 基于柏宝书的内部维护版"
+}

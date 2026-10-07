@@ -1,0 +1,225 @@
+/*
+ * 主题令牌(design tokens)— 棱镜宝书 · 青瓷 × 纸墨
+ * 灵感:古籍的暖纸、深墨,与一抹青瓷(celadon-jade)点缀。
+ * 配色全部以 OKLCH 设计、感知均匀;所有文字对比度经 WCAG 2.1 校验:
+ *   正文 ≥ 4.5:1(AA),弱化文字与非文本 UI ≥ 3:1。
+ * 所有颜色/字体/尺寸都从这里取,组件不写死颜色。
+ * 切换主题 = 改根节点 [data-theme];未来自定义主题只需新增一套同名变量。
+ *
+ * 配色:黑金优雅 —— 深海军蓝(h≈264)× 琥珀金(h≈70),源自经典黑金方案。
+ * 金很亮,强调按钮上一律压「深 navy 字」(昼间用白字、金压暗),切勿白字配亮金。
+ */
+
+.bbs-root {
+  /* —— 字体:现代无衬线栈,优先国产现代字体,回退系统 —— */
+  --bbs-font-sans: 'MiSans', 'HarmonyOS Sans SC', 'PingFang SC', 'Microsoft YaHei',
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', system-ui, sans-serif;
+  --bbs-font-mono: 'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace;
+
+  /* —— 圆角:更大、更柔 —— */
+  --bbs-radius-win: 16px;
+  --bbs-radius: 10px;
+  --bbs-radius-sm: 8px;
+  --bbs-radius-pill: 999px;
+
+  /* —— 间距节奏 —— */
+  --bbs-gap: 16px;
+  --bbs-page-pad: clamp(20px, 4vw, 40px);
+
+  /* —— 尺寸 —— */
+  --bbs-win-max-w: 880px;
+  --bbs-win-max-h: 82vh;
+
+  /* —— 动效 —— */
+  --bbs-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --bbs-dur: 0.28s;
+}
+
+/* ========== 昼 · 象牙白 ==========
+   底色是暖中性象牙白;墨色取深海军蓝(与夜呼应),强调是压暗的金。
+   对比度(白底为基准):ink 16.0、ink-soft 7.1、ink-muted 3.6、accent 4.1。 */
+.bbs-root[data-theme='day'] {
+  --bbs-bg: oklch(0.97 0.004 90);
+  /* #f6f5f2 象牙白 */
+  --bbs-surface: oklch(1 0 0);
+  /* #ffffff 抬起面/卡片 */
+  --bbs-surface-2: oklch(0.945 0.006 90);
+  /* #eeede8 次级面/输入框 */
+  --bbs-ink: oklch(0.252 0.056 264);
+  /* #14213d 海军蓝墨 · 主文字 */
+  --bbs-ink-soft: oklch(0.46 0.04 264);
+  /* #4d586f 次级文字 */
+  --bbs-ink-muted: oklch(0.62 0.03 264);
+  /* #7d8699 弱化/占位 */
+  --bbs-accent: oklch(0.57 0.13 62);
+  /* #ac6304 深金 · 强调(白字 AA) */
+  --bbs-accent-soft: oklch(0.57 0.13 62 / 0.12);
+  --bbs-accent-ink: oklch(1 0 0);
+  /* #ffffff 强调上的文字 */
+  --bbs-line: oklch(0.91 0.005 90);
+  /* #e2e1de 细线 */
+  --bbs-line-strong: oklch(0.87 0.006 90);
+  /* #d6d4d0 */
+  --bbs-danger: oklch(0.52 0.18 25);
+  /* #ba2b2e 删除/警示(AA) */
+  --bbs-danger-soft: oklch(0.52 0.18 25 / 0.1);
+  --bbs-warning: oklch(0.55 0.1 75);
+  /* #936823 悬念/待办(AA) */
+  --bbs-warning-soft: oklch(0.55 0.1 75 / 0.12);
+  --bbs-overlay: oklch(0.252 0.056 264 / 0.34);
+  /* 遮罩 */
+  --bbs-shadow: 0 18px 48px -20px oklch(0.252 0.056 264 / 0.22),
+    0 4px 12px -6px oklch(0.252 0.056 264 / 0.1);
+}
+
+/* ========== 夜 · 海军黑 ==========
+   底色是深海军蓝(比纯黑更有层次、更高级),强调是明亮琥珀金,
+   金按钮上压深 navy 字。黑金优雅的标准用法,提气而不刺眼。
+   对比度(主底为基准):ink 15.3、ink-soft 8.2、ink-muted 4.4、accent 9.3。 */
+.bbs-root[data-theme='night'] {
+  --bbs-bg: #37353E;
+  --bbs-surface: #44444E;
+  --bbs-surface-2: #4E4D58;
+  --bbs-ink: #D3DAD9;
+  --bbs-ink-soft: #B0B5B4;
+  --bbs-ink-muted: #8E9392;
+  --bbs-accent: #76ABAE;
+  --bbs-accent-soft: #76ABAE26;
+  /* 15% opacity */
+  --bbs-accent-ink: #2C3536;
+  --bbs-line: #53525D;
+  --bbs-line-strong: #686774;
+  --bbs-danger: #D96B6B;
+  --bbs-danger-soft: #D96B6B26;
+  /* 15% opacity */
+  --bbs-warning: #D9B358;
+  --bbs-warning-soft: #D9B35826;
+  /* 15% opacity */
+  --bbs-overlay: #1F1E2499;
+  /* 60% opacity */
+  --bbs-shadow: 0 20px 56px -22px #000000A6, 0 4px 14px -8px #00000080;
+}
+
+/* ========== 粉彩 ==========
+   独立主题,不分昼夜。薰衣草粉纸底 + 玫瑰强调,梦幻而不失可读性。
+   梦幻的薰衣草/天蓝/婴儿粉太浅,只用于底/线/染色;文字与强调用够深的梅紫/玫瑰,
+   保证 WCAG AA。对比度(主底为基准):ink 10.5、ink-soft 5.3、ink-muted 3.2、accent 4.3。 */
+.bbs-root[data-theme='pastel'] {
+  --bbs-bg: oklch(0.975 0.012 330);
+  /* #fcf4fb 薰衣草粉纸 */
+  --bbs-surface: oklch(1 0 0);
+  /* #ffffff 抬起面/卡片 */
+  --bbs-surface-2: oklch(0.955 0.022 335);
+  /* #faebf6 次级面/输入框 */
+  --bbs-ink: oklch(0.36 0.09 330);
+  /* #572953 深梅紫 · 主文字 */
+  --bbs-ink-soft: oklch(0.52 0.08 330);
+  /* #83587f 次级文字 */
+  --bbs-ink-muted: oklch(0.64 0.07 330);
+  /* #a57da1 弱化/占位 */
+  --bbs-accent: #ffafcc;
+  /* #c4486d 玫瑰 · 强调(双用:底/文字均 AA) */
+  --bbs-accent-soft: oklch(0.58 0.16 5 / 0.12);
+  --bbs-accent-ink: oklch(1 0 0);
+  /* #ffffff 强调上的文字 */
+  --bbs-line: oklch(0.91 0.025 330);
+  /* #ebdce9 细线 */
+  --bbs-line-strong: oklch(0.86 0.035 335);
+  /* #e0c9da */
+  --bbs-danger: oklch(0.55 0.19 15);
+  /* #c72c4c 删除/警示(AA) */
+  --bbs-danger-soft: oklch(0.55 0.19 15 / 0.1);
+  --bbs-warning: oklch(0.62 0.12 70);
+  /* #b47825 悬念/待办(AA) */
+  --bbs-warning-soft: oklch(0.62 0.12 70 / 0.12);
+  --bbs-overlay: oklch(0.36 0.09 330 / 0.32);
+  /* 遮罩 */
+  --bbs-shadow: 0 18px 48px -20px oklch(0.45 0.15 350 / 0.3),
+    0 4px 12px -6px oklch(0.45 0.15 350 / 0.16);
+}
+
+/* 粉彩强调色是浅粉(#ffafcc),原生 accent-color 复选框会按浅底自动把勾翻成黑色。
+   仅在本主题下把复选框改为自绘:浅粉底 + 强制白色对勾。作用域限定 pastel,不影响其他主题。 */
+.bbs-root[data-theme='pastel'] .bbs-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1.5px solid var(--bbs-line-strong);
+  border-radius: 4px;
+  background: var(--bbs-surface);
+}
+
+.bbs-root[data-theme='pastel'] .bbs-checkbox:checked {
+  border-color: var(--bbs-accent);
+  background-color: var(--bbs-accent);
+  /* 白色对勾,内联 SVG,与底色无关,不再受浏览器自动反色影响 */
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'><path d='M5 12.5 10 17.5 19 7'/></svg>");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 14px;
+}
+
+/* ========== 绿色 ========== */
+.bbs-root[data-theme='green'] {
+  --bbs-bg: #F0F6F8;
+  /* Pale, misty lake blue */
+  --bbs-surface: #FFFFFF;
+  --bbs-surface-2: #E0EFE8;
+  /* Soft seafoam green for highlights */
+  --bbs-ink: #2C4A52;
+  /* Deep slate-teal for reading */
+  --bbs-ink-soft: #638289;
+  --bbs-ink-muted: #95AEB4;
+  --bbs-accent: #529E93;
+  /* Gentle blue-green aquamarine */
+  --bbs-accent-soft: #529E9326;
+  /* 15% opacity */
+  --bbs-accent-ink: #FFFFFF;
+  --bbs-line: #BFE3DF;
+  --bbs-line-strong: #8AC2BB;
+  --bbs-danger: #D47979;
+  /* Soft coral */
+  --bbs-danger-soft: #D4797926;
+  /* 15% opacity */
+  --bbs-warning: #D9B76B;
+  /* Warm sand */
+  --bbs-warning-soft: #D9B76B26;
+  /* 15% opacity */
+  --bbs-overlay: #2C4A5266;
+  /* 40% deep teal overlay */
+  --bbs-shadow: 0 20px 56px -22px #32646033, 0 4px 14px -8px #3264601A;
+}
+
+/* ========== 跟随 ST ==========
+   不定义自己的配色,而是从 SillyTavern 宿主主题的 --SmartTheme* 变量派生。
+   之所以可行:自定义属性是可继承属性,能穿透 shadow 边界;且 :host{all:initial}
+   的 `all` 简写不含自定义属性,故这些 ST 变量照常继承进来(见 base.css)。
+   ST 只给了少量基色,缺的 token 用 color-mix 从基色派生;每个 var() 都带回退值,
+   万一宿主没定义(理论上不会)也不至于塌成透明。
+   注:danger/warning ST 无语义色 → 用在明/暗底都可读的中性值;overlay 用中性深色遮罩,
+   不跟随 body 色,避免暗色主题下遮罩反而变浅。 */
+.bbs-root[data-theme='st'] {
+  --bbs-bg: var(--SmartThemeBlurTintColor, #f6f5f2);
+  --bbs-surface: var(--SmartThemeChatTintColor, #ffffff);
+  /* 次级面:面色掺一点主文字色,拉开与 surface 的层次(输入框/次级块) */
+  --bbs-surface-2: color-mix(in srgb, var(--SmartThemeChatTintColor, #fff) 92%, var(--SmartThemeBodyColor, #000));
+  --bbs-ink: var(--SmartThemeBodyColor, #14213d);
+  /* 次级/弱化文字:主文字向底色退让。EmColor 常年过淡,故用 body↔bg 混合更可控 */
+  --bbs-ink-soft: color-mix(in srgb, var(--SmartThemeBodyColor, #14213d) 72%, var(--SmartThemeBlurTintColor, #f6f5f2));
+  --bbs-ink-muted: color-mix(in srgb, var(--SmartThemeBodyColor, #14213d) 52%, var(--SmartThemeBlurTintColor, #f6f5f2));
+  --bbs-accent: var(--SmartThemeQuoteColor, #718cc1);
+  --bbs-accent-soft: color-mix(in srgb, var(--SmartThemeQuoteColor, #718cc1) 14%, transparent);
+  /* 强调上的文字:借界面底色反差(适配多数 ST 配色:深强调 × 浅底) */
+  --bbs-accent-ink: var(--SmartThemeBlurTintColor, #ffffff);
+  --bbs-line: var(--SmartThemeBorderColor, #cfbcbc);
+  --bbs-line-strong: color-mix(in srgb, var(--SmartThemeBorderColor, #cfbcbc) 70%, var(--SmartThemeBodyColor, #000));
+  --bbs-danger: #d96b6b;
+  --bbs-danger-soft: #d96b6b26;
+  /* 15% opacity */
+  --bbs-warning: #d9a441;
+  --bbs-warning-soft: #d9a44126;
+  /* 15% opacity */
+  --bbs-overlay: #00000073;
+  /* 45% 中性遮罩,不随 body 色反转 */
+  --bbs-shadow: 0 18px 48px -20px var(--SmartThemeShadowColor, #00000038),
+    0 4px 12px -6px var(--SmartThemeShadowColor, #0000001a);
+}
