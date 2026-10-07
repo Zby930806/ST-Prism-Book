@@ -7,7 +7,7 @@ import {
   selectInjectionNodes,
 } from '@/memory/inject';
 import type { ViewNode } from '@/memory/select';
-import { memory } from '@/memory/store';
+import { compatibilityState, memory, memoryWriteIssue } from '@/memory/store';
 import { cleanBody, latestStoryTime } from '@/memory/timeTag';
 import type { JsonValue, MemSummary } from '@/memory/types';
 import { getContext } from '@/st/context';
@@ -16,6 +16,7 @@ import type {
   HistoryOptions,
   PublicChatInfo,
   PublicCoverage,
+  PublicCompatibility,
   PublicFloor,
   PublicFloorContext,
   PublicHistory,
@@ -93,12 +94,32 @@ function resolveBefore(before: number | undefined, chatLength: number): number {
   return value;
 }
 
-function coverageAt(chat: ReturnType<typeof activeChat>['chat'], upToExclusive: number): PublicCoverage {
-  const missingAiFloors = pendingAiFloors(chat).filter(floor => floor < upToExclusive);
+function publicCompatibility(): PublicCompatibility {
+  // 必须先刷新当前聊天的兼容结论，不能沿用切换前的 store 状态。
+  const reason = memoryWriteIssue() || null;
   return {
-    complete: missingAiFloors.length === 0,
-    missingAiFloors,
+    mode: compatibilityState.mode,
+    converting: compatibilityState.converting,
+    blocked: reason !== null,
+    reason,
+    issues: [...compatibilityState.issues],
   };
+}
+
+function coverageAt(
+  chat: ReturnType<typeof activeChat>['chat'],
+  upToExclusive: number,
+  compatibility = publicCompatibility(),
+  injectionOnly = false,
+): PublicCoverage {
+  // pendingAiFloors 在保护态会主动返回 []；不能把“未评估”当作“完整”。
+  if (compatibility.blocked) {
+    return { complete: false, missingAiFloors: [], status: 'blocked', reason: compatibility.reason };
+  }
+  const missingAiFloors = pendingAiFloors(chat).filter(floor =>
+    floor < upToExclusive && (!injectionOnly || chat[floor]?.is_system === true));
+  const complete = missingAiFloors.length === 0;
+  return { complete, missingAiFloors, status: complete ? 'complete' : 'incomplete', reason: null };
 }
 
 function snapshotPoint(
@@ -124,6 +145,7 @@ function snapshotPoint(
 export function getSnapshot(options?: SnapshotOptions): PublicSnapshot {
   const { chat, info } = activeChat();
   const point = snapshotPoint(options, chat.length);
+  const compatibility = publicCompatibility();
   const derived = deriveMemory(chat, point.upToExclusive);
   return clonePublic({
     apiVersion: PUBLIC_API_VERSION,
@@ -131,7 +153,8 @@ export function getSnapshot(options?: SnapshotOptions): PublicSnapshot {
     revision: getPublicRevision(),
     chat: info,
     point,
-    coverage: coverageAt(chat, point.upToExclusive),
+    compatibility,
+    coverage: coverageAt(chat, point.upToExclusive, compatibility),
     state: derived.state,
     protagonist: derived.protagonist,
     vars: derived.vars,
@@ -231,6 +254,7 @@ function historyNodeDto(node: ViewNode, byId: Map<string, ViewNode>): PublicHist
 export function getHistory(options?: HistoryOptions): PublicHistory {
   const { chat, info } = activeChat();
   const before = resolveBefore(options?.before, chat.length);
+  const compatibility = publicCompatibility();
   const selected = selectHistoryNodesBefore(memory.summaries, chat, before);
   const byId = buildHistoryNodeMap(memory.summaries, chat);
   return clonePublic({
@@ -239,7 +263,8 @@ export function getHistory(options?: HistoryOptions): PublicHistory {
     revision: getPublicRevision(),
     chat: info,
     before,
-    coverage: coverageAt(chat, before),
+    compatibility,
+    coverage: coverageAt(chat, before, compatibility),
     text: renderHistoryNodes(selected),
     relativeText: renderHistoryNodesWithRelative(selected, latestStoryTime(chat.slice(0, before))),
     nodes: selected.map(node => historyNodeDto(node, byId)),
@@ -248,19 +273,32 @@ export function getHistory(options?: HistoryOptions): PublicHistory {
 
 export function getInjectedHistory(): PublicInjectedHistory {
   const { chat, info } = activeChat();
+  const compatibility = publicCompatibility();
+  if (compatibility.blocked) {
+    // refreshInjection 清槽并不能阻止公开 API/宏自行重选叶子，必须在选择/渲染前短路。
+    return clonePublic({
+      apiVersion: PUBLIC_API_VERSION,
+      pluginVersion: PLUGIN_VERSION,
+      revision: getPublicRevision(),
+      chat: info,
+      mode: 'injection',
+      compatibility,
+      coverage: coverageAt(chat, chat.length, compatibility, true),
+      text: '',
+      relativeText: '',
+      nodes: [],
+    });
+  }
   const selected = selectInjectionNodes(memory.summaries, chat);
   const byId = buildHistoryNodeMap(memory.summaries, chat);
-  const missingAiFloors = pendingAiFloors(chat).filter(floor => chat[floor]?.is_system === true);
   return clonePublic({
     apiVersion: PUBLIC_API_VERSION,
     pluginVersion: PLUGIN_VERSION,
     revision: getPublicRevision(),
     chat: info,
     mode: 'injection',
-    coverage: {
-      complete: missingAiFloors.length === 0,
-      missingAiFloors,
-    },
+    compatibility,
+    coverage: coverageAt(chat, chat.length, compatibility, true),
     text: renderHistoryNodes(selected),
     relativeText: renderHistoryNodesWithRelative(selected, latestStoryTime(chat)),
     nodes: selected.map(node => historyNodeDto(node, byId)),

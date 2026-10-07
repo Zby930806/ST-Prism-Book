@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import Icon from '@/components/Icon.vue';
+import PageHeader from '@/components/PageHeader.vue';
 import BbsSelect from '@/components/BbsSelect.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import ModalMask from '@/components/ModalMask.vue';
@@ -72,6 +73,13 @@ interface SceneRow {
 const currentId = computed(() =>
   findCurrentSceneId(memory.scenes, memory.state.location || '', memory.state.locationPath),
 );
+
+// 仅调整本机树视图，不改地点数据或当前位置。
+const currentScene = computed(() => memory.scenes.find(scene => scene.id === currentId.value));
+function setAllCollapsed(value: boolean) {
+  collapsed.value = value ? new Set(memory.scenes.map(scene => scene.parentId).filter(Boolean)) : new Set();
+  persistCollapsed();
+}
 
 // 当前所在的祖先脉络(含自身)id 集合
 const currentChain = computed(() => {
@@ -309,21 +317,25 @@ function confirmTravel() {
 
 <template>
   <section class="bbs-page">
-    <div class="bbs-section-head">
-      <h2 class="bbs-title bbs-title-sub">场景</h2>
-      <button
-        class="bbs-add-mini"
-        type="button"
-        :disabled="!hasLeaf"
-        :title="hasLeaf ? '手动添加地点' : '需先有摘要才能手动添加'"
-        @click="openComposer"
-      >
-        <Icon name="plus" />
-      </button>
-    </div>
+    <PageHeader icon="scenes" title="场景" eyebrow="世界足迹" description="沿着地点层级，回看故事走过的每一处。">
+      <template #actions>
+        <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!hasLeaf"
+          :title="hasLeaf ? '手动添加地点' : '需先有摘要才能手动添加'" @click="openComposer"><Icon name="plus" />添加地点</button>
+      </template>
+    </PageHeader>
     <SummaryOnlyNotice subject="地点、场景层级与当前位置" />
-
-    <hr class="bbs-rule" />
+    <div class="bbs-current-location">
+      <span class="bbs-current-icon"><Icon name="scenes" /></span>
+      <div><span class="bbs-current-label">当前所在</span><p>{{ currentScene ? currentScene.path.join(' › ') : memory.state.location || '尚未记录当前位置' }}</p></div>
+    </div>
+    <div class="bbs-scene-toolbar">
+      <span class="bbs-scene-total"><strong>{{ memory.scenes.length }}</strong> 个地点<span v-if="rows.length"> · 展示 {{ rows.length }} 个</span></span>
+      <div v-if="memory.scenes.length" class="bbs-scene-tools">
+        <button class="bbs-filter-tab" type="button" @click="setAllCollapsed(false)">全部展开</button>
+        <button class="bbs-filter-tab" type="button" @click="setAllCollapsed(true)">收起层级</button>
+      </div>
+    </div>
+    <p v-if="!hasLeaf" class="bbs-scene-hint">先生成一条有效摘要，才能手动添加地点。</p>
 
     <TransitionGroup v-if="rows.length" tag="div" name="scene" class="bbs-scene-tree">
       <div
@@ -333,8 +345,8 @@ function confirmTravel() {
         :class="{ 'is-current': r.isCurrent, 'on-path': r.onCurrentPath }"
         :style="{ '--depth': r.depth }"
       >
-        <!-- 层级引导轨:每级一条细竖线,在当前脉络上点亮成主干 -->
-        <span v-for="d in r.depth" :key="d" class="bbs-scene-rail" :class="{ active: r.onCurrentPath && d <= r.depth }"></span>
+        <!-- 最多四条引导轨，避免极深层级挤出窄屏；完整路径始终在内容区呈现。 -->
+        <span v-for="d in Math.min(r.depth, 4)" :key="d" class="bbs-scene-rail" :class="{ active: r.onCurrentPath && d <= r.depth }"></span>
 
         <!-- 有子节点的整张卡片可点折叠(含描述/物品区);叶子卡不可点。操作按钮 @click.stop 不触发 -->
         <div
@@ -343,36 +355,42 @@ function confirmTravel() {
           @click="r.hasChildren && toggleCollapse(r.node.id)"
         >
           <div class="bbs-scene-head">
-            <span
+            <button
               v-if="r.hasChildren"
               class="bbs-scene-toggle"
               :class="{ collapsed: r.isCollapsed }"
+              type="button"
+              :aria-expanded="!r.isCollapsed"
+              :aria-label="(r.isCollapsed ? '展开下属地点：' : '收起下属地点：') + r.node.name"
               :title="r.isCollapsed ? '展开下属地点' : '收起下属地点'"
-            >
-              <Icon name="chevron" />
-            </span>
+              @click.stop="toggleCollapse(r.node.id)"
+            ><Icon name="chevron" /></button>
             <span class="bbs-scene-name">{{ r.node.name }}</span>
             <span v-if="r.isCurrent" class="bbs-scene-here"><Icon name="scenes" />所在</span>
             <span v-else-if="r.isCollapsed" class="bbs-scene-count">{{ childCount(r.node) }}</span>
-            <span class="bbs-scene-acts">
-              <button v-if="!r.isCurrent" class="bbs-item-act" type="button" title="前往" @click.stop="askTravel(r.node)"><Icon name="navigate" /></button>
-              <button class="bbs-item-act" type="button" title="编辑" @click.stop="openEdit(r.node)"><Icon name="edit" /></button>
-              <button class="bbs-item-act bbs-item-del" type="button" title="删除" @click.stop="askRemove(r.node)"><Icon name="trash" /></button>
-            </span>
+
           </div>
+          <p v-if="r.depth" class="bbs-scene-path">{{ r.node.path.join(' › ') }}</p>
           <p v-if="r.node.desc" class="bbs-scene-desc">{{ r.node.desc }}</p>
           <div v-if="itemsAt(r.node).length" class="bbs-scene-items">
             <span v-for="it in itemsAt(r.node)" :key="it.id" class="bbs-scene-chip">
               <Icon name="items" />{{ it.name }}<i v-if="typeof it.qty === 'number'">×{{ it.qty }}</i>
             </span>
           </div>
+          <div class="bbs-scene-acts">
+              <button v-if="!r.isCurrent" class="bbs-item-act" type="button" title="前往" @click.stop="askTravel(r.node)"><Icon name="navigate" /><span>前往</span></button>
+              <button class="bbs-item-act" type="button" title="编辑" @click.stop="openEdit(r.node)"><Icon name="edit" /><span>编辑</span></button>
+              <button class="bbs-item-act bbs-item-del" type="button" title="删除" @click.stop="askRemove(r.node)"><Icon name="trash" /><span>删除</span></button>
+            </div>
         </div>
       </div>
     </TransitionGroup>
 
     <div v-else class="bbs-empty">
       <span class="bbs-empty-icon"><Icon name="scenes" /></span>
-      <p>还没有去过的地点。摘要时会记下走过的场景,也可点右上角「+」手动添加。</p>
+      <h3>世界地图，始于一处足迹</h3>
+      <p>摘要会记录走过的场景，并整理上下级地点。{{ hasLeaf ? '也可以手动添加一处地点，为它写下描述。' : '生成第一条有效摘要后，即可手动添加。' }}</p>
+      <button v-if="hasLeaf" class="bbs-btn" type="button" @click="openComposer"><Icon name="plus" />添加第一处地点</button>
     </div>
 
     <!-- 添加弹窗:选上级(已有地点 / 顶级)+ 填新名 + 描述 -->
@@ -456,207 +474,92 @@ function confirmTravel() {
 </template>
 
 <style scoped>
-.bbs-page {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
+
+/* 页面本身保持文档流，滚动交给书页容器；不把工具栏与说明再套成卡片。 */
+.bbs-page { display: flex; flex-direction: column; height: auto; min-width: 0; min-height: 100%; color: var(--bbs-ink); }
+.bbs-page, .bbs-page * { box-sizing: border-box; }
+.bbs-page .bbs-input { min-width: 0; max-width: 100%; }
+.bbs-page button { font-family: inherit; }
+.bbs-page button:focus-visible, .bbs-page input:focus-visible, .bbs-page textarea:focus-visible { outline: 2px solid var(--bbs-accent); outline-offset: 3px; }
+.bbs-page button:disabled { cursor: not-allowed; }
+.bbs-page .bbs-btn { min-height: 38px; gap: 6px; white-space: normal; }
+.bbs-ledger-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin: 18px 0; padding: 0 0 14px; border-bottom: 1px solid var(--bbs-line); font-size: 12px; line-height: 1.6; color: var(--bbs-ink-muted); }
+.bbs-ledger-meta strong { margin-right: 4px; font-size: 19px; font-variant-numeric: tabular-nums; font-weight: 650; color: var(--bbs-ink); }
+.bbs-ledger-note { margin-left: auto; color: var(--bbs-accent); }
+.bbs-search { display: flex; align-items: center; gap: 9px; flex: 1 1 200px; min-width: 0; color: var(--bbs-ink-muted); }
+.bbs-search > .bbs-input { flex: 1; width: 100%; }
+.bbs-filterbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 18px; }
+.bbs-filter-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+.bbs-filter-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
+.bbs-filter-tab[aria-pressed='true'] { background: var(--bbs-accent-soft); border-color: var(--bbs-accent); color: var(--bbs-accent); }
+.bbs-filter-tab span { font-variant-numeric: tabular-nums; font-size: 11px; }
+.bbs-item-act { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--bbs-ink-soft); cursor: pointer; font-size: 15px; }
+.bbs-item-act:hover:not(:disabled) { background: var(--bbs-surface-2); border-color: var(--bbs-line); color: var(--bbs-accent); }
+.bbs-item-del:hover:not(:disabled) { background: var(--bbs-danger-soft); color: var(--bbs-danger); border-color: var(--bbs-danger); }
+.bbs-empty { display: flex; flex: none; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 230px; padding: 34px 16px; margin: 12px 0; text-align: center; background: transparent; }
+.bbs-empty-icon { display: inline-flex; align-items: center; justify-content: center; width: 54px; height: 54px; border-radius: 18px; background: var(--bbs-accent-soft); color: var(--bbs-accent); font-size: 25px; }
+.bbs-empty h3 { margin: 5px 0 0; color: var(--bbs-ink); font-size: 16px; font-weight: 650; }
+.bbs-empty p { max-width: 360px; margin: 0; color: var(--bbs-ink-muted); font-size: 13px; line-height: 1.8; }
+.bbs-empty .bbs-btn { margin-top: 6px; }
+.bbs-modal { min-width: 0; overflow-wrap: anywhere; }
+.bbs-modal-head, .bbs-modal-foot { flex-wrap: wrap; }
+.bbs-modal-textarea { resize: vertical; min-height: 80px; font-family: inherit; }
+.bbs-modal-check { flex-direction: row; align-items: center; gap: 9px; cursor: pointer; }
+.bbs-modal-check input { flex-shrink: 0; }
+@media (max-width: 480px) {
+  .bbs-ledger-meta { gap: 6px 14px; margin: 16px 0; }
+  .bbs-ledger-note { flex-basis: 100%; margin-left: 0; }
+  .bbs-search { flex-basis: 100%; }
+  .bbs-filterbar { gap: 10px; }
+  .bbs-item-act { width: 40px; height: 40px; }
+  .bbs-page .bbs-btn { min-height: 42px; }
+  .bbs-filter-tab { min-height: 40px; }
+  .bbs-empty { min-height: 210px; padding: 26px 10px; }
 }
 
-/* —— 嵌套树:层级引导轨是这页的标识元素 —— */
-.bbs-scene-tree {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  position: relative; /* 作离场行 position:absolute 的定位上下文 */
+.bbs-current-location { display: flex; align-items: center; gap: 12px; margin-top: 8px; padding: 16px 0 16px 14px; border-left: 3px solid var(--bbs-accent); }
+.bbs-current-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 36px; height: 36px; border-radius: 12px; background: var(--bbs-accent-soft); color: var(--bbs-accent); font-size: 19px; }
+.bbs-current-location > div { min-width: 0; }
+.bbs-current-label { font-size: 11px; letter-spacing: .06em; color: var(--bbs-ink-muted); }
+.bbs-current-location p { margin: 5px 0 0; font-size: 15px; font-weight: 600; line-height: 1.7; overflow-wrap: anywhere; }
+.bbs-scene-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 0 14px; margin-bottom: 16px; border-bottom: 1px solid var(--bbs-line); }
+.bbs-scene-total { color: var(--bbs-ink-muted); font-size: 12px; }
+.bbs-scene-total strong { color: var(--bbs-ink); font-size: 19px; font-variant-numeric: tabular-nums; }
+.bbs-scene-tools { display: flex; flex-wrap: wrap; gap: 6px; }
+.bbs-scene-hint { margin: 0 0 12px; font-size: 12px; line-height: 1.7; color: var(--bbs-ink-muted); }
+.bbs-scene-tree { display: flex; flex-direction: column; gap: 12px; position: relative; min-width: 0; }
+.bbs-scene-row { display: flex; align-items: stretch; min-width: 0; }
+.bbs-scene-rail { flex: 0 0 16px; position: relative; }
+.bbs-scene-rail::before { content: ''; position: absolute; left: 6px; top: -12px; bottom: -12px; width: 1px; background: var(--bbs-line); }
+.bbs-scene-rail.active::before { background: var(--bbs-accent); }
+.bbs-scene-card { flex: 1 1 auto; min-width: 0; padding: 16px; border: 1px solid var(--bbs-line); border-radius: 14px; background: var(--bbs-surface); box-shadow: var(--bbs-card-shadow); }
+.bbs-scene-card.clickable { cursor: pointer; }
+.bbs-scene-card.clickable:hover { border-color: var(--bbs-line-strong); }
+.bbs-scene-row.is-current .bbs-scene-card { border-color: var(--bbs-accent); background: var(--bbs-accent-soft); }
+.bbs-scene-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.bbs-scene-toggle { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; height: 32px; padding: 0; border: 1px solid var(--bbs-line); border-radius: 8px; background: var(--bbs-surface); color: var(--bbs-accent); cursor: pointer; transition: transform .16s ease; }
+.bbs-scene-toggle.collapsed { transform: rotate(-90deg); }
+.bbs-scene-name { flex: 1; min-width: 0; font-size: 15px; line-height: 1.6; font-weight: 650; overflow-wrap: anywhere; }
+.bbs-scene-count { flex-shrink: 0; font-size: 11px; color: var(--bbs-ink-muted); padding: 3px 7px; border-radius: 6px; background: var(--bbs-surface-2); }
+.bbs-scene-here { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border-radius: 6px; background: var(--bbs-accent); color: var(--bbs-accent-ink); font-size: 11px; }
+.bbs-scene-path, .bbs-scene-crumb { margin: 7px 0 0; font-size: 11px; line-height: 1.7; color: var(--bbs-ink-muted); overflow-wrap: anywhere; }
+.bbs-scene-desc { margin: 10px 0 0; font-size: 13px; line-height: 1.85; color: var(--bbs-ink-soft); overflow-wrap: anywhere; white-space: pre-wrap; }
+.bbs-scene-items { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.bbs-scene-chip { display: inline-flex; align-items: baseline; gap: 4px; min-width: 0; max-width: 100%; padding: 4px 8px; border-radius: 7px; background: var(--bbs-surface-2); color: var(--bbs-ink-soft); font-size: 11px; overflow-wrap: anywhere; }
+.bbs-scene-chip i { font-style: normal; color: var(--bbs-accent); }
+.bbs-scene-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px; margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--bbs-line); }
+.bbs-scene-acts .bbs-item-act { width: auto; min-width: 36px; gap: 5px; padding: 0 7px; font-size: 12px; }
+.scene-enter-active, .scene-leave-active { transition: opacity .16s ease, transform .16s ease; }
+.scene-enter-from, .scene-leave-to { opacity: 0; transform: translateY(-6px); }
+.scene-leave-active { position: absolute; width: 100%; }
+.scene-move { transition: transform .16s ease; }
+@media (max-width: 480px) {
+  .bbs-current-location { padding-left: 10px; gap: 9px; }
+  .bbs-scene-rail { flex-basis: 8px; }
+  .bbs-scene-rail::before { left: 2px; }
+  .bbs-scene-card { padding: 12px 10px; }
+  .bbs-scene-toggle { flex-basis: 36px; height: 36px; }
+  .bbs-scene-acts .bbs-item-act { min-height: 40px; }
 }
-.bbs-scene-row {
-  display: flex;
-  align-items: stretch;
-}
-
-/* 展开/收起动画:进出淡入淡出 + 轻微上滑;留下的行用 move 平滑补位。
-   用比 --bbs-dur(0.28s) 更快的 0.16s,折叠交互要干脆。 */
-.scene-enter-active,
-.scene-leave-active {
-  transition: opacity 0.16s var(--bbs-ease), transform 0.16s var(--bbs-ease);
-}
-.scene-enter-from,
-.scene-leave-to {
-  opacity: 0;
-  transform: translateY(-6px);
-}
-/* 离场的行脱离文档流,避免它占位导致下方行不平滑补位 */
-.scene-leave-active {
-  position: absolute;
-  width: 100%;
-}
-.scene-move {
-  transition: transform 0.16s var(--bbs-ease);
-}
-/* 每级一条 14px 宽的轨道槽,中间一条 hairline 竖线 */
-.bbs-scene-rail {
-  flex: 0 0 14px;
-  position: relative;
-}
-.bbs-scene-rail::before {
-  content: '';
-  position: absolute;
-  left: 6px;
-  top: -6px; /* 接上一行的间隙,连成贯穿线 */
-  bottom: -6px;
-  width: 1px;
-  background: var(--bbs-line);
-}
-/* 当前所在脉络:轨道点亮成主干 */
-.bbs-scene-rail.active::before {
-  background: var(--bbs-accent);
-  opacity: 0.55;
-  width: 2px;
-  left: 5px;
-}
-
-.bbs-scene-card {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: 9px 12px;
-  border: 1px solid var(--bbs-line);
-  border-radius: var(--bbs-radius);
-  background: var(--bbs-surface);
-  transition: border-color var(--bbs-dur) var(--bbs-ease), background var(--bbs-dur) var(--bbs-ease);
-}
-/* 当前所在地点本身:实心强调,作脉络的终点 */
-.bbs-scene-row.is-current .bbs-scene-card {
-  border-color: var(--bbs-accent);
-  background: var(--bbs-accent-soft);
-}
-.bbs-scene-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-/* 有子节点的卡片:整卡可点折叠,光标提示 + hover 时箭头变深 */
-.bbs-scene-card.clickable {
-  cursor: pointer;
-}
-.bbs-scene-card.clickable:hover .bbs-scene-toggle {
-  color: var(--bbs-ink);
-}
-/* 折叠箭头:展开时朝下(chevron 原样),折叠时朝右(-90°)。纯视觉指示,点击由整行承接。 */
-.bbs-scene-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
-  margin-right: -2px;
-  color: var(--bbs-ink-muted);
-  font-size: 13px;
-  transition: transform 0.16s var(--bbs-ease), color var(--bbs-dur) var(--bbs-ease);
-}
-.bbs-scene-toggle.collapsed {
-  transform: rotate(-90deg);
-}
-/* 折叠态:显示隐藏的后代数 */
-.bbs-scene-count {
-  flex: 0 0 auto;
-  font-size: 11px;
-  font-family: var(--bbs-font-mono);
-  color: var(--bbs-ink-muted);
-  padding: 0 6px;
-  border-radius: var(--bbs-radius-pill);
-  background: var(--bbs-surface-2);
-}
-.bbs-scene-name {
-  font-family: var(--bbs-font-mono);
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--bbs-ink);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.bbs-scene-here {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  flex: 0 0 auto;
-  font-size: 11px;
-  padding: 1px 7px 1px 5px;
-  border-radius: var(--bbs-radius-pill);
-  background: var(--bbs-accent);
-  color: var(--bbs-accent-ink);
-  letter-spacing: 0.02em;
-}
-.bbs-scene-acts {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  flex: 0 0 auto;
-}
-.bbs-scene-desc {
-  margin: 5px 0 0;
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--bbs-ink-soft);
-}
-.bbs-scene-items {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 7px;
-}
-.bbs-scene-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: var(--bbs-radius-pill);
-  background: var(--bbs-surface-2);
-  color: var(--bbs-ink-muted);
-}
-.bbs-scene-chip i {
-  font-style: normal;
-  color: var(--bbs-accent);
-}
-
-/* 编辑弹窗里的路径面包屑 */
-.bbs-scene-crumb {
-  margin: 0 0 2px;
-  font-family: var(--bbs-font-mono);
-  font-size: 12px;
-  color: var(--bbs-ink-muted);
-}
-
-/* 复用 items 页的行内操作按钮样式(scoped 不继承,这里重声明同款) */
-.bbs-item-act {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 0;
-  border-radius: var(--bbs-radius-sm);
-  background: transparent;
-  color: var(--bbs-ink-muted);
-  cursor: pointer;
-  font-size: 14px;
-}
-.bbs-item-act:hover {
-  background: var(--bbs-surface-2);
-  color: var(--bbs-ink);
-}
-.bbs-item-del:hover {
-  color: var(--bbs-danger);
-}
-.bbs-modal-textarea {
-  resize: vertical;
-  min-height: 60px;
-  font-family: inherit;
-}
-.bbs-empty {
-  flex: 1;
-}
+@media (prefers-reduced-motion: reduce) { .scene-enter-active, .scene-leave-active, .scene-move, .bbs-scene-toggle { transition: none; } }
 </style>

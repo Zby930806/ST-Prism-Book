@@ -1,10 +1,11 @@
 import { apiSettings, currentCharKey } from '@/api/settings';
 import { getContext, type STMessage } from '@/st/context';
 import { reactive } from 'vue';
+import { convertedForest, inspectCompatibility, isRecord, legacyLeafIssue, type CompatibilityReport } from './compatibility';
 import { deriveMemory, getLeaf, leafValid } from './apply';
 import { isAiFloor, pendingAiFloors } from './engine';
 import { latestStoryTime } from './timeTag';
-import type { BaibaiMemory, LeafExtra, MemSummary, StoredDelta, VarTemplate, VarTier } from './types';
+import type { BaibaiMemory, LeafExtra, MemSummary, VarTemplate, VarTier } from './types';
 import { createEmptyMemory, MEMORY_KEY, MEMORY_VERSION, normalizeTemplate } from './types';
 
 /**
@@ -13,6 +14,88 @@ import { createEmptyMemory, MEMORY_KEY, MEMORY_VERSION, normalizeTemplate } from
  * state / items / plans 是从 chat 重放出的派生缓存,供 Vue 渲染。
  */
 export const memory = reactive<BaibaiMemory>(createEmptyMemory());
+
+export const compatibilityState = reactive<CompatibilityReport & { converting: boolean }>({
+  mode: 'ready', leaves: 0, summaries: 0, issues: [], conversion: [], converting: false,
+});
+let checkedChat: STMessage[] | undefined;
+let checkedMetadata: unknown;
+let checkedRaw: unknown;
+let checkedChatId: string | undefined;
+export function checkCompatibility(): void {
+  const ctx = getContext();
+  checkedChat = ctx?.chat;
+  checkedMetadata = ctx?.chatMetadata;
+  checkedChatId = ctx?.getCurrentChatId?.();
+  const raw = (ctx?.chatMetadata as Record<string, unknown> | undefined)?.[MEMORY_KEY];
+  checkedRaw = raw;
+  Object.assign(compatibilityState, inspectCompatibility(raw, checkedChat ?? []));
+}
+/** 缓存只属于本次加载的聊天；切换聊天不能沿用另一聊天的兼容结论。 */
+export function memoryWriteIssue(): string {
+  const ctx = getContext();
+  const raw = (ctx?.chatMetadata as Record<string, unknown> | undefined)?.[MEMORY_KEY];
+  if (checkedChat !== ctx?.chat || checkedMetadata !== ctx?.chatMetadata || checkedChatId !== ctx?.getCurrentChatId?.() || checkedRaw !== raw) checkCompatibility();
+  if (compatibilityState.converting) return '正在本地转换旧记忆，请稍候。';
+  // 宿主翻页/编辑会原地改消息，引用缓存不能代表分页归属仍成立。
+  // 这里只复查叶子；不能在合法删楼事务清理祖先前把暂时孤儿的树误判为损坏。
+  if (compatibilityState.mode === 'ready' && ctx?.chat?.some(m => legacyLeafIssue(m?.extra?.bbs_leaf, m))) checkCompatibility();
+  if (compatibilityState.mode === 'ready') return '';
+  return compatibilityState.mode === 'convert'
+    ? '检测到旧版记忆，请在摘要页确认本地转换；不需要重新摘要，也不会调用模型。'
+    : '旧记忆保护中：' + compatibilityState.issues.join('；') + '。请先备份并核对，勿全量重建。';
+}
+export function assertMemoryWritable(): void {
+  const issue = memoryWriteIssue();
+  if (issue) throw new Error(issue);
+}
+
+/** 用户确认后才转换；备份旧元数据，保持原摘要/ID/状态/未知字段，不请求模型。 */
+export async function convertLegacyMemory(): Promise<void> {
+  const ctx = getContext();
+  if (!ctx || !ctx.getCurrentChatId?.()) throw new Error('请先打开聊天');
+  if (compatibilityState.converting) throw new Error('转换已在进行');
+  checkCompatibility();
+  if (compatibilityState.mode !== 'convert') throw new Error('当前旧记忆不能安全自动转换');
+  if (typeof ctx.saveChat !== 'function' || typeof ctx.saveMetadata !== 'function') throw new Error('宿主缺少可靠保存接口，未修改数据');
+  const meta = ctx.chatMetadata as Record<string, unknown>;
+  const sourceChat = ctx.chat;
+  const sourceId = ctx.getCurrentChatId();
+  const stillHere = () => {
+    const current = getContext();
+    return current?.chat === sourceChat && current?.chatMetadata === meta && current?.getCurrentChatId?.() === sourceId;
+  };
+  const requireSameChat = () => { if (!stillHere()) throw new Error('转换期间已切换聊天，停止后续保存；请返回原聊天核对备份。'); };
+  const raw = meta[MEMORY_KEY] as Record<string, unknown>;
+  const backupKey = 'prism_book_legacy_backup';
+  if (meta[backupKey] !== undefined) throw new Error('已有旧格式备份，先核对上次转换结果；不会覆盖备份');
+  const original = JSON.parse(JSON.stringify(raw));
+  const plan: CompatibilityReport['conversion'] = JSON.parse(JSON.stringify(compatibilityState.conversion));
+  const operations = plan.map(op => ({ message: ctx.chat[op.floor], extra: ctx.chat[op.floor].extra, leaf: JSON.parse(JSON.stringify(op.leaf)) as LeafExtra }));
+  compatibilityState.converting = true;
+  try {
+    meta[backupKey] = original;
+    // 先将旧格式备份单独落盘，失败则不动任何叶子。
+    await ctx.saveMetadata();
+    requireSameChat();
+    for (const op of operations) op.message.extra = { ...op.extra, bbs_leaf: op.leaf };
+    meta[MEMORY_KEY] = { ...raw, version: MEMORY_VERSION, summaries: convertedForest(raw) };
+    // 一次完整聊天保存先持久化叶子和备份，然后等待元数据保存；不使用不受等待的防抖迁移。
+    await ctx.saveChat();
+    requireSameChat();
+    await ctx.saveMetadata();
+    requireSameChat();
+  } catch (error) {
+    for (const op of operations) op.message.extra = op.extra;
+    meta[MEMORY_KEY] = raw;
+    // 备份保留，避免未知磁盘状态下重试覆盖；原元数据从未丢弃。
+    throw new Error('转换保存未确认成功，已恢复内存中的原记录并保留备份。请先导出聊天核对，不要重建。' + String(error));
+  } finally {
+    compatibilityState.converting = false;
+    if (stillHere()) loadMemory();
+  }
+}
+
 
 /**
  * 给页面读的派生元信息(chat 非 reactive,UI 必须经此 reactive 通道):
@@ -54,6 +137,12 @@ function optText(v: unknown): string | undefined {
 /** 重放 chat 得到 state/items/plans,原地写回;并刷新 derivedMeta */
 export function recomputeDerived(): void {
   const ctx = getContext();
+  if (memoryWriteIssue()) {
+    const empty = createEmptyMemory();
+    for (const key of ['state', 'protagonist', 'items', 'plans', 'scenes', 'npcs', 'itemLog', 'lifeDetails', 'vars'] as const) Object.assign(memory, { [key]: empty[key] });
+    Object.assign(derivedMeta, { hasLeaf: false, leaves: [], pendingFloors: [], latestStoryTime: '', rev: derivedMeta.rev + 1 });
+    return;
+  }
   // 欢迎页(未进入任何聊天)getCurrentChatId 为空,但 chat 里可能残留上次的 #0,
   // 不属于任何聊天的楼层不该被判为「未摘要」,故此时视作无 chat。
   const chat = ctx?.getCurrentChatId?.() ? ctx.chat ?? null : null;
@@ -112,11 +201,19 @@ let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** 防抖落盘叶子(写进 chat 文件)。合并连续多楼摘要为一次 saveChat。 */
 export function scheduleLeafFlush(): void {
+  assertMemoryWritable();
   const ctx = getContext();
   if (!ctx?.saveChat) return;
   if (flushTimer) clearTimeout(flushTimer);
+  const sourceChat = ctx.chat;
+  const sourceMetadata = ctx.chatMetadata;
+  const sourceId = ctx.getCurrentChatId?.();
   flushTimer = setTimeout(() => {
     flushTimer = null;
+    const current = getContext();
+    // 宿主保存函数可能读取全局当前聊天，不能让上一聊天的定时器落到新聊天。
+    if (current?.chat !== sourceChat || current?.chatMetadata !== sourceMetadata ||
+        current?.getCurrentChatId?.() !== sourceId || memoryWriteIssue()) return;
     void ctx.saveChat();
   }, 1500);
 }
@@ -127,6 +224,7 @@ export function flushLeavesNow(): void {
     clearTimeout(flushTimer);
     flushTimer = null;
   }
+  if (memoryWriteIssue()) return;
   const ctx = getContext();
   void ctx?.saveChat?.();
 }
@@ -136,153 +234,34 @@ export function flushLeavesNow(): void {
  * 全局/角色层的模板不在这里(它们存 extension_settings,由 replaceVarsTemplate 落盘)。叶子也不在这里。
  */
 export function saveMemory() {
+  assertMemoryWritable();
   const ctx = getContext();
   if (!ctx?.chatMetadata) return;
   const snapshot: { version: number; summaries: MemSummary[]; varsTemplate: VarTemplate } = {
+    ...((ctx.chatMetadata as Record<string, unknown>)[MEMORY_KEY] as Record<string, unknown> ?? {}),
     version: MEMORY_VERSION,
     summaries: JSON.parse(JSON.stringify(memory.summaries)),
     varsTemplate: JSON.parse(JSON.stringify(memory.varTemplates.chat)),
   };
   (ctx.chatMetadata as Record<string, unknown>)[MEMORY_KEY] = snapshot;
+  checkedRaw = snapshot; // 本次受保护写入，避免在编辑事务中途重新判定森林
   ctx.saveMetadataDebounced?.();
-}
-
-/* ============ 迁移 v2 → v3 ============ */
-
-/**
- * v2(叶子在森林、带 coveredIndices+delta)→ v3(叶子搬到消息 extra)。
- * 需 chat 上下文;无 chat 时返回 null(延后,下次 CHAT_CHANGED 重跑)。
- * 搬不动的叶子(索引越界/消息已删)其 delta 合并进一条兜底叶子挂到最后 AI 楼,保结构化 1:1。
- */
-function migrateV2toV3(raw: Record<string, unknown>, chat: STMessage[] | null): BaibaiMemory | null {
-  if (!chat || chat.length === 0) return null; // 延后
-
-  const out = createEmptyMemory();
-  out.version = MEMORY_VERSION;
-  const oldSums = (Array.isArray(raw.summaries) ? raw.summaries : []) as Array<Record<string, unknown>>;
-
-  const orphanDeltas: StoredDelta[] = [];
-
-  // 1) 旧叶子(level0)→ 搬到对应 AI 楼的 extra(保留原 id)
-  for (const s of oldSums) {
-    if ((typeof s.level === 'number' ? s.level : 0) !== 0) continue;
-    const cov = (Array.isArray(s.coveredIndices) ? s.coveredIndices : []) as number[];
-    const delta = (s.delta ?? {}) as StoredDelta;
-
-    // 定位挂靠的 AI 楼:coveredIndices 里最后一个 isAiFloor;退而求其次取最后一个存在的
-    let target = -1;
-    for (let k = cov.length - 1; k >= 0; k--) {
-      if (isAiFloor(chat[cov[k]])) {
-        target = cov[k];
-        break;
-      }
-    }
-    if (target < 0) {
-      for (let k = cov.length - 1; k >= 0; k--) {
-        if (chat[cov[k]]) {
-          target = cov[k];
-          break;
-        }
-      }
-    }
-    if (target < 0 || !chat[target] || chat[target].extra?.bbs_leaf) {
-      orphanDeltas.push(delta); // 搬不动/目标已占用 → 兜底
-      continue;
-    }
-    const leaf: LeafExtra = {
-      id: String(s.id),
-      text: String(s.text ?? ''),
-      delta,
-      timeLabel: s.timeLabel as string | undefined,
-      createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(),
-      v: 1,
-    };
-    chat[target].extra = { ...(chat[target].extra ?? {}), bbs_leaf: leaf };
-  }
-
-  // 1b) 兜底叶子:把搬不动的 delta 合并挂到最后一条 AI 楼
-  if (orphanDeltas.length) {
-    let last = -1;
-    for (let i = chat.length - 1; i >= 0; i--) {
-      if (isAiFloor(chat[i])) {
-        last = i;
-        break;
-      }
-    }
-    if (last >= 0 && !chat[last].extra?.bbs_leaf) {
-      const merged: StoredDelta = {};
-      for (const d of orphanDeltas) mergeStoredDelta(merged, d);
-      chat[last].extra = {
-        ...(chat[last].extra ?? {}),
-        bbs_leaf: {
-          id: `leaf_migrate_${Date.now().toString(36)}`,
-          text: '(迁移:历史结构化状态)',
-          delta: merged,
-          createdAt: Date.now(),
-          v: 1,
-        },
-      };
-    }
-  }
-
-  // 2) 压缩节点(level≥1)原样保留进森林
-  for (const s of oldSums) {
-    if ((typeof s.level === 'number' ? s.level : 0) < 1) continue;
-    out.summaries.push({
-      id: String(s.id),
-      text: String(s.text ?? ''),
-      level: s.level as number,
-      createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(),
-      auto: s.auto !== false,
-      timeLabel: s.timeLabel as string | undefined,
-      childIds: Array.isArray(s.childIds) ? (s.childIds as string[]) : [],
-    });
-  }
-  return out;
-}
-
-/** 迁移辅助:把 delta b 合并进 a(用于兜底叶子,简单拼接 add/op 数组,resolve 用稳定 id) */
-function mergeStoredDelta(a: StoredDelta, b: StoredDelta): void {
-  if (b.time) a.time = b.time;
-  if (b.location) a.location = b.location;
-  if (b.protagonist) a.protagonist = { ...(a.protagonist ?? {}), ...b.protagonist };
-  if (b.items) {
-    const ai = (a.items ??= {});
-    if (b.items.add?.length) (ai.add ??= []).push(...b.items.add);
-    if (b.items.update?.length) (ai.update ??= []).push(...b.items.update);
-    if (b.items.remove?.length) (ai.remove ??= []).push(...b.items.remove);
-  }
-  if (b.scenes) {
-    const as = (a.scenes ??= {});
-    if (b.scenes.add?.length) (as.add ??= []).push(...b.scenes.add);
-    if (b.scenes.update?.length) (as.update ??= []).push(...b.scenes.update);
-    if (b.scenes.reparent?.length) (as.reparent ??= []).push(...b.scenes.reparent);
-    if (b.scenes.remove?.length) (as.remove ??= []).push(...b.scenes.remove);
-    if (b.scenes.ops?.length) (as.ops ??= []).push(...b.scenes.ops);
-  }
-  if (b.plans) {
-    const ap = (a.plans ??= {});
-    if (b.plans.add?.length) (ap.add ??= []).push(...b.plans.add);
-    if (b.plans.update?.length) (ap.update ??= []).push(...b.plans.update);
-    if (b.plans.resolve?.length) (ap.resolve ??= []).push(...b.plans.resolve);
-    if (b.plans.remove?.length) (ap.remove ??= []).push(...b.plans.remove);
-    if (b.plans.reopen?.length) (ap.reopen ??= []).push(...b.plans.reopen);
-  }
 }
 
 /* ============ 载入 / 保存 ============ */
 
 function cleanSummaryNode(s: MemSummary, idx: number): MemSummary {
   return {
-    id: scalarText(s.id) || `sum_bad_${idx}_${Date.now().toString(36)}`,
-    text: scalarText(s.text),
+    ...s, // 沿用旧扩展字段，不能因换品牌静默丢失
+    id: s.id,
+    text: s.text,
     level: typeof s.level === 'number' ? s.level : 1,
     createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(),
     auto: s.auto !== false,
     timeStart: optText(s.timeStart),
     timeEnd: optText(s.timeEnd),
     timeLabel: optText(s.timeLabel),
-    childIds: Array.isArray(s.childIds) ? s.childIds.map(x => scalarText(x)).filter(Boolean) : [],
+    childIds: [...s.childIds],
     imported: s.imported === true ? true : undefined,
     importedFloorStart:
       s.imported === true && Number.isFinite(s.importedFloorStart) && (s.importedFloorStart as number) >= 0
@@ -313,35 +292,15 @@ function loadVarTemplates(rawChatTemplate: unknown): Record<VarTier, VarTemplate
 
 /** 从当前聊天载入森林 + 三层变量模板 + 重算派生(必要时迁移) */
 export function loadMemory() {
+  checkCompatibility();
   const ctx = getContext();
   const meta = ctx?.chatMetadata as Record<string, unknown> | undefined;
-  const raw = meta?.[MEMORY_KEY] as Record<string, unknown> | undefined;
-  const chat = ctx?.chat ?? null;
-  // 变量模板与 summary 迁移正交:chat 层从 metadata 直读,再取全局/角色层(缺失=空模板)
-  const varTemplates = loadVarTemplates(raw?.varsTemplate);
-
-  if (raw && typeof raw === 'object') {
-    const version = typeof raw.version === 'number' ? raw.version : 1;
-    if (version >= MEMORY_VERSION) {
-      assignForest(memory, (Array.isArray(raw.summaries) ? raw.summaries : []) as MemSummary[], varTemplates);
-    } else {
-      const migrated = migrateV2toV3(raw, chat);
-      if (migrated) {
-        assignForest(memory, migrated.summaries, varTemplates);
-        // 先把叶子落盘(saveChat)成功,再升 version 写 metadata,保证可重入
-        flushLeavesNow();
-        saveMemory();
-      } else {
-        // 延后迁移:暂用旧森林里的压缩节点(level≥1),叶子等下次 chat 就绪再搬
-        const comps = (Array.isArray(raw.summaries) ? raw.summaries : []).filter(
-          (s: Record<string, unknown>) => (typeof s.level === 'number' ? s.level : 0) >= 1,
-        ) as MemSummary[];
-        assignForest(memory, comps, varTemplates);
-      }
-    }
-  } else {
-    assignForest(memory, [], varTemplates);
-  }
+  const raw = meta?.[MEMORY_KEY];
+  const data = isRecord(raw) ? raw : undefined;
+  const templates = loadVarTemplates(data?.varsTemplate);
+  // 无法确认的格式留在原始存储里；绝不清理/覆盖成空森林，也不自动迁移。
+  assignForest(memory, compatibilityState.mode === 'ready' && Array.isArray(data?.summaries)
+    ? data.summaries as MemSummary[] : [], templates);
   recomputeDerived();
 }
 
@@ -354,6 +313,7 @@ export function loadMemory() {
  * 注:注入刷新由调用方(页面)负责 refreshInjection —— store 不引 inject 避免循环依赖。
  */
 export function replaceVarsTemplate(tier: VarTier, tpl: VarTemplate): void {
+  assertMemoryWritable();
   const norm = normalizeTemplate(tpl);
   memory.varTemplates[tier] = norm;
   if (tier === 'global') {

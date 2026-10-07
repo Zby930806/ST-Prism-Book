@@ -16,8 +16,10 @@
  * 对象(editingChannel.name 等)也不会报错——无需在各调用点加守卫。
  */
 import { modalHost } from '@/state/ui';
+import { ref } from 'vue';
+import { useDialogFocus } from '@/composables/useDialogFocus';
 
-defineProps<{
+const props = defineProps<{
   /** 弹窗是否显示 */
   open?: boolean;
   /** 叠加在其它弹窗之上(更高 z-index),如渠道弹窗里再开删除确认 */
@@ -25,6 +27,8 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{ (e: 'close'): void }>();
+const maskEl = ref<HTMLElement | null>(null);
+const { onDialogKeydown } = useDialogFocus(maskEl, () => !!props.open, () => emit('close'));
 </script>
 
 <template>
@@ -33,6 +37,9 @@ const emit = defineEmits<{ (e: 'close'): void }>();
     <Transition name="bbs-modal">
       <div
         v-if="open"
+        ref="maskEl"
+        tabindex="-1"
+        @keydown="onDialogKeydown"
         class="bbs-modal-mask"
         :class="{ 'bbs-modal-mask-top': topLayer }"
         @mousedown.self="emit('close')"

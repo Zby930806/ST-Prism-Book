@@ -4,7 +4,7 @@ import { fmtItemLogInline } from './prompts';
 import { lifeDetailSubject, mergeLifeDetailsOp, sameLifeDetail } from './lifeDetails';
 import { mergeProtagonistDelta } from './protagonist';
 import { applyNpcAffinity, cleanNpcAffinityLevel } from './npcRelations';
-import { memory, recomputeDerived, saveMemory, scheduleLeafFlush } from './store';
+import { memory, memoryWriteIssue, assertMemoryWritable, recomputeDerived, saveMemory, scheduleLeafFlush } from './store';
 import { readItemsTagText, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { scheduleVectorIndex } from './vector';
 import { invalidateRecallCache } from './vector/cache';
@@ -416,6 +416,51 @@ function cleanStoredDelta(raw: StoredDelta, seed = false): StoredDelta {
   return out;
 }
 
+/**
+ * V2 转换保守验收：复用正式重放清洗器，不能给会被静默丢弃的旧状态盖上 V1 标记。
+ * 普通扩展元数据留在摘要节点上保留；delta 内的未知字段属于未确认的状态语义。
+ */
+export function legacyDeltaIssue(raw: unknown): string | null {
+  if (!isRecord(raw)) return '状态变化不是对象';
+  const known = new Set(['time', 'location', 'locationPath', 'sceneFocus', 'protagonist', 'items', 'scenes', 'npcs', 'plans', 'lifeDetails', 'varOps']);
+  for (const key of Object.keys(raw)) if (!known.has(key)) return '未识别的状态字段：' + key;
+  for (const key of ['items', 'scenes', 'npcs', 'plans', 'lifeDetails', 'protagonist']) {
+    if (raw[key] !== undefined && !isRecord(raw[key])) return '状态字段结构不明确：' + key;
+  }
+  const operations: Record<string, string[]> = {
+    items: ['add', 'update', 'remove'], scenes: ['add', 'update', 'reparent', 'remove', 'ops'],
+    npcs: ['add', 'update', 'remove'], plans: ['add', 'update', 'resolve', 'remove', 'reopen'],
+    lifeDetails: ['add', 'update', 'archive', 'remove'],
+  };
+  for (const [key, names] of Object.entries(operations)) {
+    const group = raw[key];
+    if (isRecord(group)) for (const op of Object.keys(group)) {
+      if (!names.includes(op)) return '未识别的状态操作：' + key + '.' + op;
+    }
+  }
+  const cleaned = cleanStoredDelta(raw as StoredDelta);
+  const empty = (value: unknown): boolean => value === undefined || value === '' ||
+    (Array.isArray(value) && value.length === 0) || (isRecord(value) && Object.keys(value).length === 0);
+  const dropped = (source: unknown, target: unknown, where: string): string | null => {
+    if (empty(source) && target === undefined) return null; // 明确的空操作不改变状态
+    if (Array.isArray(source)) {
+      if (!Array.isArray(target) || source.length !== target.length) return where;
+      for (let i = 0; i < source.length; i++) { const bad = dropped(source[i], target[i], where + '[' + i + ']'); if (bad) return bad; }
+      return null;
+    }
+    if (isRecord(source)) {
+      if (!isRecord(target)) return where;
+      for (const key of Object.keys(source)) { const bad = dropped(source[key], target[key], where + '.' + key); if (bad) return bad; }
+      return null;
+    }
+    if (source === target) return null;
+    if (source != null && target != null && String(source).trim() === String(target).trim()) return null;
+    return where;
+  };
+  const lost = dropped(raw, cleaned, 'delta');
+  return lost ? '该状态不能完整重放：' + lost : null;
+}
+
 /* ============ 确定性 id ============ */
 
 /** 物品 id:按规范化名,故重放幂等、手动 op 可稳定引用 */
@@ -722,8 +767,10 @@ function msgSwipe(m: STMessage): number {
  */
 export function leafValid(m: STMessage | undefined): boolean {
   const leaf = getLeaf(m);
-  if (!leaf || !leaf.id || !leaf.delta) return false;
-  if (!m) return false;
+  // 派生器也接受仅含 delta 的内部操作记录；持久旧摘要的完整校验由加载边界负责。
+  if (!leaf || !m || !leafIntact(m)) return false;
+  if (leaf.v !== undefined && leaf.v !== 1) return false;
+  if (leaf.swipe === undefined && msgSwipe(m) !== 0) return false;
   return leafSwipe(leaf) === msgSwipe(m);
 }
 
@@ -1580,6 +1627,7 @@ export function parseItemLogText(text: string): { name: string; qty: number }[] 
  * 返回是否发生了改写。
  */
 export function syncItemLogFromMessage(index: number): boolean {
+  assertMemoryWritable();
   const chat = getContext()?.chat;
   const leaf = getLeaf(chat?.[index]);
   if (!chat || !leaf || !leaf.delta) return false;
@@ -1772,6 +1820,7 @@ export function finalizeDelta(delta: SummaryDelta, openPlansOrdered: { id: strin
 export function addSummary(
   s: Omit<MemSummary, 'id' | 'createdAt'> & Partial<Pick<MemSummary, 'id' | 'createdAt'>>,
 ): MemSummary {
+  assertMemoryWritable();
   const rec: MemSummary = {
     id: s.id ?? uid('sum'),
     text: s.text,
@@ -1809,6 +1858,7 @@ export function latestLeaf(): { index: number; leaf: LeafExtra } | null {
  * 只改 delta,不改变叶子的结构与 swipe 归属,故不影响 leafValid。
  */
 export function appendOpToLatestLeaf(op: StoredDelta): boolean {
+  assertMemoryWritable();
   const found = latestLeaf();
   if (!found) return false;
   const { index, leaf } = found;
@@ -2195,6 +2245,7 @@ export function removeScene(path: string[]): boolean {
 
 /** 删除某条消息上的叶子(清 extra),然后级联删坏链 + 重算 + 落盘 */
 export function deleteLeafAt(index: number): boolean {
+  assertMemoryWritable();
   const chat = getContext()?.chat;
   if (!chat || !chat[index]?.extra?.bbs_leaf) return false;
   delete (chat[index].extra as Record<string, unknown>).bbs_leaf;
@@ -2212,6 +2263,7 @@ export function deleteLeafAt(index: number): boolean {
  * timeEnd 同步写进 delta.time(覆盖型当前状态,重放即生效);编辑后清掉旧的 timeLabel(已被起止取代)。
  */
 export function editLeafAt(index: number, text: string, timeStart: string, timeEnd: string): boolean {
+  assertMemoryWritable();
   const chat = getContext()?.chat;
   const leaf = getLeaf(chat?.[index]);
   if (!chat || !leaf) return false;
@@ -2244,6 +2296,7 @@ export function editLeafFull(
   index: number,
   patch: { text: string; timeStart: string; timeEnd: string; delta: StoredDelta },
 ): boolean {
+  assertMemoryWritable();
   const chat = getContext()?.chat;
   const leaf = getLeaf(chat?.[index]);
   if (!chat || !leaf) return false;
@@ -2294,6 +2347,7 @@ export function editPlan(
   planIdStr: string,
   patch: { content?: string; createdTime?: string; targetTime?: string },
 ): boolean {
+  assertMemoryWritable();
   const m = planIdStr.match(/^plan:(.+)#(\d+)$/);
   if (!m) return false;
   const leafId = m[1];
@@ -2346,6 +2400,7 @@ export function editPlan(
  * 故只改 text 字段即可,无需 recompute。
  */
 export function editSummary(id: string, text: string): boolean {
+  assertMemoryWritable();
   const comp = memory.summaries.find(s => s.id === id);
   if (!comp) return false;
   comp.text = text.trim();
@@ -2362,6 +2417,7 @@ export function editSummary(id: string, text: string): boolean {
  * 注意:删压缩节点不影响结构化数据(只压文本),无需 recompute,但要刷新注入。
  */
 export function deleteSummary(id: string): boolean {
+  assertMemoryWritable();
   const idx = memory.summaries.findIndex(s => s.id === id);
   if (idx < 0) return false;
   for (const p of memory.summaries) {
@@ -2391,6 +2447,7 @@ export interface DeleteSummarySubtreesResult {
  * 与 deleteLeafAt 一样，删叶子后会按剩余叶子重算结构化状态、清理失效祖先并防抖落盘。
  */
 export function deleteSummarySubtrees(rootIds: string[]): DeleteSummarySubtreesResult {
+  assertMemoryWritable();
   const roots = new Set(rootIds.filter(Boolean));
   if (!roots.size) return { leaves: 0, summaries: 0, imported: 0 };
 
@@ -2451,6 +2508,7 @@ export function deleteSummarySubtrees(rootIds: string[]): DeleteSummarySubtreesR
  * 这里从 childId 向上找父节点并移除整条祖先链;未被任何总结收纳的叶子不会造成改动。
  */
 export function invalidateSummaryAncestors(childId: string): number {
+  assertMemoryWritable();
   if (!childId) return 0;
   const affected = new Set<string>([childId]);
   let found = true;
@@ -2482,11 +2540,18 @@ export function invalidateSummaryAncestors(childId: string): number {
  * 自己那一页的 extra 里(翻回去就显示)——绝不能因「当前不在这页」就删掉它所属的压缩链。
  */
 export function pruneBrokenComps(): boolean {
+  if (memoryWriteIssue()) return false;
   const chat = getContext()?.chat ?? null;
   const liveLeafIds = new Set<string>();
   if (chat) {
     for (const m of chat) {
       if (leafIntact(m)) liveLeafIds.add(getLeaf(m)!.id);
+      const pages = (m as unknown as Record<string, unknown>).swipe_info;
+      if (Array.isArray(pages)) for (const page of pages) {
+        if (!isRecord(page) || !isRecord(page.extra)) continue;
+        const leaf = page.extra.bbs_leaf;
+        if (isRecord(leaf) && typeof leaf.id === 'string' && isRecord(leaf.delta)) liveLeafIds.add(leaf.id);
+      }
     }
   }
   const byId = new Map(memory.summaries.map(s => [s.id, s]));

@@ -1,4 +1,4 @@
-import { derivedMeta, memory } from '@/memory/store';
+import { compatibilityState, derivedMeta, memory } from '@/memory/store';
 import { getContext } from '@/st/context';
 import { PLUGIN_VERSION } from '@/version';
 import { watch } from 'vue';
@@ -380,7 +380,7 @@ async function registerMacros(): Promise<{ macros: boolean; parameterized: boole
         }],
         ['bbsInjectedHistory', {
           category: categoryChat,
-          description: '返回与正常记忆注入相同、已跳过滑动窗口的历史剧情文本。',
+          description: '返回与正常记忆注入相同、已跳过滑动窗口的历史剧情文本；兼容保护/转换期间返回空串，原因见 bbsSnapshot。',
           exampleUsage: ['{{bbsInjectedHistory}}'],
           handler: () => macroSafe(() => getInjectedHistory().relativeText),
         }],
@@ -432,7 +432,7 @@ async function registerMacros(): Promise<{ macros: boolean; parameterized: boole
       ['bbsState', () => macroSafe(() => getSnapshot().state), '返回棱镜宝书当前状态 JSON。'],
       ['bbsSnapshot', () => macroSafe(() => getSnapshot()), '返回棱镜宝书当前完整状态快照 JSON。'],
       ['bbsHistory', () => macroSafe(() => getHistory().relativeText), '返回棱镜宝书带相对时间的压缩历史剧情文本。'],
-      ['bbsInjectedHistory', () => macroSafe(() => getInjectedHistory().relativeText), '返回与正常记忆注入相同、已跳过滑动窗口的历史剧情文本。'],
+      ['bbsInjectedHistory', () => macroSafe(() => getInjectedHistory().relativeText), '返回与正常记忆注入相同、已跳过滑动窗口的历史剧情文本；兼容保护/转换期间返回空串，原因见 bbsSnapshot。'],
     ];
     for (const [name, handler, description] of stableMacros) {
       legacyModule.MacrosParser.registerMacro(name, handler, description);
@@ -453,7 +453,8 @@ export async function registerPublicInterface(): Promise<void> {
   (globalThis as typeof globalThis & { STBaiBaiBook?: STBaiBaiBookApi }).STBaiBaiBook = api;
 
   watch(
-    [() => derivedMeta.rev, () => memory.summaries],
+    // 转换开始/结束或保护原因变化也会改变公开读取结果，即使森林/rev 未变。
+    [() => derivedMeta.rev, () => memory.summaries, () => compatibilityState],
     queueChangedNotice,
     { deep: true },
   );

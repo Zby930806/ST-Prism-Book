@@ -9,8 +9,10 @@
  */
 import Icon from '@/components/Icon.vue';
 import { modalHost } from '@/state/ui';
+import { ref } from 'vue';
+import { useDialogFocus } from '@/composables/useDialogFocus';
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     open: boolean;
     title: string;
@@ -46,7 +48,11 @@ const emit = defineEmits<{
   (e: 'cancel'): void;
 }>();
 
+const dialogEl = ref<HTMLElement | null>(null);
+const { onDialogKeydown } = useDialogFocus(dialogEl, () => props.open, () => { if (!props.busy) cancel(); });
+
 function cancel() {
+  if (props.busy) return;
   emit('update:open', false);
   emit('cancel');
 }
@@ -64,7 +70,7 @@ function confirm() {
         :class="{ 'bbs-modal-mask-top': topLayer }"
         @mousedown.self="cancel"
       >
-        <div class="bbs-modal bbs-modal-confirm" role="dialog" aria-modal="true" :aria-label="title">
+        <div ref="dialogEl" tabindex="-1" @keydown="onDialogKeydown" class="bbs-modal bbs-modal-confirm" role="dialog" aria-modal="true" :aria-label="title">
           <header class="bbs-modal-head">
             <span class="bbs-modal-title">{{ title }}</span>
           </header>
@@ -73,7 +79,7 @@ function confirm() {
           </p>
           <footer class="bbs-modal-foot">
             <span class="bbs-modal-foot-spacer"></span>
-            <button class="bbs-btn" type="button" @click="cancel">{{ cancelText }}</button>
+            <button class="bbs-btn" type="button" :disabled="busy" @click="cancel">{{ cancelText }}</button>
             <button
               class="bbs-btn"
               :class="tone === 'danger' ? 'bbs-btn-danger' : 'bbs-btn-primary'"

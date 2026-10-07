@@ -16,7 +16,7 @@ import { apiSettings, engineActiveHere } from '@/api/settings';
 import type { VecItem, VecPayloadItem } from '@/api/baibaoku';
 import { resetVectorStoreProbe, vecClearScope, vecReconcile, vecUpdatePayload, vecUpsert } from './store';
 import { getLeaf, leafValid } from '../apply';
-import { memory } from '../store';
+import { memory, memoryWriteIssue } from '../store';
 import { stripThinkBlocks } from '../timeTag';
 import type { LeafExtra } from '../types';
 import { embedTexts, encodeFloat32Base64 } from './embed';
@@ -116,6 +116,7 @@ let timer: ReturnType<typeof setTimeout> | null = null;
 
 /** 向量记忆是否在当前聊天可索引(总开关开 + 当前角色未排除 + 向量开关开 + 进入了单角色聊天)。 */
 export function vectorIndexableHere(): boolean {
+  if (memoryWriteIssue()) return false;
   if (!engineActiveHere()) return false; // 插件总开关关 / 当前角色被排除 → 不索引
   if (!apiSettings.vector.enabled) return false;
   return !!currentVectorDb() && !!currentChatId();

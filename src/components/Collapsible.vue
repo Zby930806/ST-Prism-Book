@@ -22,7 +22,7 @@ const expanded = ref(props.open);
       <span class="bbs-collapsible-title">{{ title }}</span>
       <Icon name="chevron" class="bbs-collapsible-chevron" />
     </button>
-    <div class="bbs-collapsible-outer">
+    <div class="bbs-collapsible-outer" :inert="!expanded" :aria-hidden="!expanded">
       <div class="bbs-collapsible-inner">
         <div class="bbs-collapsible-body">
           <slot />

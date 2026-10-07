@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import Icon from '@/components/Icon.vue';
+import BrandMark from '@/components/BrandMark.vue';
 import { openBook, ui } from '@/state/ui';
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 
@@ -194,7 +194,7 @@ onUnmounted(() => window.removeEventListener('resize', onResize));
     @keydown="onKey"
   >
     <img v-if="orbImage" :src="orbImage" class="bbs-orb-img" alt="" draggable="false" />
-    <Icon v-else name="bookmark" class="bbs-orb-icon" />
+    <BrandMark v-else :size="Math.round(orbW * 0.94)" class="bbs-orb-brand" />
   </div>
 </template>
 
@@ -240,7 +240,8 @@ onUnmounted(() => window.removeEventListener('resize', onResize));
   opacity: 1;
 }
 .bbs-orb:focus-visible {
-  outline: none;
+  outline: 2px solid var(--bbs-accent);
+  outline-offset: -3px;
   color: var(--bbs-accent);
 }
 .bbs-orb:active {
@@ -268,4 +269,5 @@ onUnmounted(() => window.removeEventListener('resize', onResize));
     transition: none;
   }
 }
+.bbs-orb-brand{pointer-events:none}.bbs-orb.shape-bookmark .bbs-orb-brand{margin-bottom:12px}
 </style>

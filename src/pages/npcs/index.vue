@@ -2,6 +2,7 @@
 import { npcLocationLabel } from '@/memory/npcLocation';
 import { apiSettings } from '@/api/settings';
 import Icon from '@/components/Icon.vue';
+import PageHeader from '@/components/PageHeader.vue';
 import BbsSelect from '@/components/BbsSelect.vue';
 import { fmtLifeDetail, lifeDetailSubject } from '@/memory/lifeDetails';
 import { NPC_AFFINITY_FIELDS, affinityLevelFromInput, fmtNpcAffinity } from '@/memory/npcRelations';
@@ -190,6 +191,28 @@ const present = computed(() => buckets.value.present);
 const nearby = computed(() => buckets.value.nearby);
 const absent = computed(() => buckets.value.absent);
 
+// 检索与分组按钮只筛选名册视图；权威在场判定和注入分组不变。
+const npcQuery = ref('');
+const npcFilter = ref<'all' | 'mains' | 'present' | 'nearby' | 'absent'>('all');
+const npcFilters = computed(() => [
+  { key: 'all' as const, label: '全部', count: memory.npcs.length },
+  { key: 'mains' as const, label: '主要', count: mains.value.length },
+  { key: 'present' as const, label: '在场', count: present.value.length },
+  { key: 'nearby' as const, label: '同区域', count: nearby.value.length },
+  { key: 'absent' as const, label: '不在场 / 未确认', count: absent.value.length },
+]);
+const visibleGroups = computed(() => {
+  const query = npcQuery.value.trim().toLocaleLowerCase();
+  const filterGroup = (key: 'mains' | 'present' | 'nearby' | 'absent', list: MemNpc[]) =>
+    npcFilter.value !== 'all' && npcFilter.value !== key ? [] : list.filter(n =>
+      !query || [n.name, n.title, n.relation, n.location, n.lastKnownLocation?.place, n.personality, n.desc, n.outfit, n.condition]
+        .some(value => value?.toLocaleLowerCase().includes(query)),
+    );
+  return { mains: filterGroup('mains', mains.value), present: filterGroup('present', present.value),
+    nearby: filterGroup('nearby', nearby.value), absent: filterGroup('absent', absent.value) };
+});
+const visibleNpcCount = computed(() => Object.values(visibleGroups.value).reduce((sum, list) => sum + list.length, 0));
+
 /* —— 随行一键开关:随行→取消(留在当前地点);非随行→标记随行 —— */
 function toggleFollow(npc: MemNpc) {
   if (npc.follow === true) {
@@ -333,24 +356,22 @@ function confirmRemove() {
 
 <template>
   <section class="bbs-page">
-    <div class="bbs-section-head">
-      <h2 class="bbs-title bbs-title-sub">角色</h2>
-      <button
-        class="bbs-add-mini"
-        type="button"
-        :disabled="!hasLeaf"
-        :title="hasLeaf ? '手动添加角色' : '需先有摘要才能手动添加'"
-        @click="openComposer"
-      >
-        <Icon name="plus" />
-      </button>
-    </div>
+    <PageHeader icon="npcs" title="角色" eyebrow="人物档案" description="从主角到擦肩而过的人，整理关系、近况与生活细节。">
+      <template #actions>
+        <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!hasLeaf"
+          :title="hasLeaf ? '手动添加角色' : '需先有摘要才能手动添加'" @click="openComposer"><Icon name="plus" />添加角色</button>
+      </template>
+    </PageHeader>
     <SummaryOnlyNotice subject="主角档案、NPC 名册与角色状态" />
-
-    <hr class="bbs-rule" />
+    <div class="bbs-ledger-meta" aria-label="人物档案概览">
+      <span><strong>{{ memory.npcs.length }}</strong>位 NPC</span>
+      <span><strong>{{ mains.length }}</strong>主要角色</span>
+      <span><strong>{{ memory.lifeDetails.length }}</strong>条生活细节</span>
+      <span v-if="!hasLeaf" class="bbs-ledger-note">先生成摘要，再手动补录</span>
+    </div>
 
     <!-- ===== 生活小档案:主角与主要角色的偏好/习惯/近期状态(三投放层)。置于主角卡之上且可折叠,不打断下方角色卡流 ===== -->
-    <div class="bbs-protagonist-section">
+    <div class="bbs-protagonist-section bbs-life-section">
       <div class="bbs-npc-grouphead">
         <button
           class="bbs-fold-head"
@@ -370,6 +391,7 @@ function confirmRemove() {
           class="bbs-add-mini"
           type="button"
           :disabled="!hasLeaf"
+          aria-label="添加生活细节"
           :title="hasLeaf ? '手动添加生活细节' : '需先有摘要才能手动添加'"
           @click="openDetailComposer"
         >
@@ -377,7 +399,7 @@ function confirmRemove() {
         </button>
       </div>
       <!-- grid 1fr↔0fr 收展:高度自适应、无需写死 max-height;reduced-motion 下瞬切(见样式) -->
-      <div class="bbs-fold-wrap" :class="{ 'is-collapsed': !lifeShown }">
+      <div class="bbs-fold-wrap" :class="{ 'is-collapsed': !lifeShown }" :inert="!lifeShown">
         <div class="bbs-fold-inner">
           <div v-if="lifeList.length" class="bbs-life-group">
             <article v-for="d in lifeList" :key="d.id" class="bbs-life" :class="`is-${d.tier}`">
@@ -452,9 +474,19 @@ function confirmRemove() {
       </article>
     </div>
 
-    <div v-if="memory.npcs.length" class="bbs-npc-groups">
+    <div v-if="memory.npcs.length" class="bbs-roster-tools">
+      <div class="bbs-roster-heading"><h2>NPC 名册</h2><span role="status">显示 {{ visibleNpcCount }} / {{ memory.npcs.length }} 位</span></div>
+      <div class="bbs-filterbar">
+        <label class="bbs-search"><Icon name="search" /><input v-model="npcQuery" class="bbs-input" type="search" aria-label="搜索角色档案" placeholder="搜索姓名、身份、关系或状态" /></label>
+        <div class="bbs-filter-tabs" aria-label="按角色分组筛选">
+          <button v-for="filter in npcFilters" :key="filter.key" type="button" class="bbs-filter-tab"
+            :aria-pressed="npcFilter === filter.key" @click="npcFilter = filter.key">{{ filter.label }}<span>{{ filter.count }}</span></button>
+        </div>
+      </div>
+    </div>
+    <div v-if="visibleNpcCount" class="bbs-npc-groups">
       <!-- 主要角色:核心主演,永远全量发送。这里突出「即时状态面板」(着装/状态/所在),弱化身份档案 -->
-      <div v-if="mains.length" class="bbs-npc-group">
+      <div v-if="visibleGroups.mains.length" class="bbs-npc-group">
         <div class="bbs-npc-grouphead">
           <span class="bbs-npc-grouptag is-main"><Icon name="star" />主要角色</span>
           <span class="bbs-npc-grouphint" :class="{ 'is-local-only': apiSettings.summaryOnlyMode }">
@@ -462,7 +494,7 @@ function confirmRemove() {
           </span>
         </div>
         <div class="bbs-npc-list">
-          <article v-for="n in mains" :key="n.id" class="bbs-npc is-present is-main">
+          <article v-for="n in visibleGroups.mains" :key="n.id" class="bbs-npc is-present is-main">
             <div class="bbs-npc-body">
               <div class="bbs-npc-head">
                 <span class="bbs-npc-name" :title="n.name">{{ n.name }}</span>
@@ -492,7 +524,7 @@ function confirmRemove() {
       </div>
 
       <!-- 在场:随行 / 所在当前场景。全量信息发给 AI,这里也全量展示 -->
-      <div v-if="present.length" class="bbs-npc-group">
+      <div v-if="visibleGroups.present.length" class="bbs-npc-group">
         <div class="bbs-npc-grouphead">
           <span class="bbs-npc-grouptag is-present">在场</span>
           <span class="bbs-npc-grouphint" :class="{ 'is-local-only': apiSettings.summaryOnlyMode }">
@@ -500,7 +532,7 @@ function confirmRemove() {
           </span>
         </div>
         <div class="bbs-npc-list">
-          <article v-for="n in present" :key="n.id" class="bbs-npc is-present" :class="{ 'is-follow': n.follow }">
+          <article v-for="n in visibleGroups.present" :key="n.id" class="bbs-npc is-present" :class="{ 'is-follow': n.follow }">
             <div class="bbs-npc-body">
               <div class="bbs-npc-head">
                 <span class="bbs-npc-name" :title="n.name">{{ n.name }}</span>
@@ -548,7 +580,7 @@ function confirmRemove() {
       </div>
 
       <!-- 同区域:在附近但未必照面。发名+身份+性格给 AI,这里也只展示这三样 -->
-      <div v-if="nearby.length" class="bbs-npc-group">
+      <div v-if="visibleGroups.nearby.length" class="bbs-npc-group">
         <div class="bbs-npc-grouphead">
           <span class="bbs-npc-grouptag is-nearby">同区域</span>
           <span class="bbs-npc-grouphint" :class="{ 'is-local-only': apiSettings.summaryOnlyMode }">
@@ -556,7 +588,7 @@ function confirmRemove() {
           </span>
         </div>
         <div class="bbs-npc-list">
-          <article v-for="n in nearby" :key="n.id" class="bbs-npc is-nearby">
+          <article v-for="n in visibleGroups.nearby" :key="n.id" class="bbs-npc is-nearby">
             <div class="bbs-npc-body">
               <div class="bbs-npc-head">
                 <span class="bbs-npc-name" :title="n.name">{{ n.name }}</span>
@@ -596,7 +628,7 @@ function confirmRemove() {
       </div>
 
       <!-- 不在场:只发名+身份给 AI,这里也压暗、收起细节 -->
-      <div v-if="absent.length" class="bbs-npc-group">
+      <div v-if="visibleGroups.absent.length" class="bbs-npc-group">
         <div class="bbs-npc-grouphead">
           <span class="bbs-npc-grouptag">不在场 / 位置未确认</span>
           <span class="bbs-npc-grouphint" :class="{ 'is-local-only': apiSettings.summaryOnlyMode }">
@@ -604,7 +636,7 @@ function confirmRemove() {
           </span>
         </div>
         <div class="bbs-npc-list">
-          <article v-for="n in absent" :key="n.id" class="bbs-npc is-absent">
+          <article v-for="n in visibleGroups.absent" :key="n.id" class="bbs-npc is-absent">
             <div class="bbs-npc-body">
               <div class="bbs-npc-head">
                 <span class="bbs-npc-name" :title="n.name">{{ n.name }}</span>
@@ -646,9 +678,15 @@ function confirmRemove() {
       </div>
     </div>
 
+    <div v-else-if="memory.npcs.length" class="bbs-empty">
+      <span class="bbs-empty-icon"><Icon name="search" /></span>
+      <h3>没有匹配的角色</h3><p>调整关键词或分组；主角档案与生活细节不受筛选影响。</p>
+      <button class="bbs-btn" type="button" @click="npcQuery = ''; npcFilter = 'all'">查看全部角色</button>
+    </div>
     <div v-else class="bbs-empty">
       <span class="bbs-empty-icon"><Icon name="npcs" /></span>
-      <p>还没有登场的 NPC。摘要时会记下与主角有交集的人物,也可点右上角「+」手动添加。</p>
+      <h3>等待下一次相遇</h3><p>摘要会记下与主角有交集的人物。{{ hasLeaf ? '也可以手动建立第一份角色档案。' : '生成第一条有效摘要后，即可手动添加。' }}</p>
+      <button v-if="hasLeaf" class="bbs-btn" type="button" @click="openComposer"><Icon name="plus" />添加第一位角色</button>
     </div>
 
     <ModalMask :open="!!protagonistEditing" @close="cancelProtagonistEdit">
@@ -890,545 +928,116 @@ function confirmRemove() {
 </template>
 
 <style scoped>
-.bbs-page {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
+
+/* 页面本身保持文档流，滚动交给书页容器；不把工具栏与说明再套成卡片。 */
+.bbs-page { display: flex; flex-direction: column; height: auto; min-width: 0; min-height: 100%; color: var(--bbs-ink); }
+.bbs-page, .bbs-page * { box-sizing: border-box; }
+.bbs-page .bbs-input { min-width: 0; max-width: 100%; }
+.bbs-page button { font-family: inherit; }
+.bbs-page button:focus-visible, .bbs-page input:focus-visible, .bbs-page textarea:focus-visible { outline: 2px solid var(--bbs-accent); outline-offset: 3px; }
+.bbs-page button:disabled { cursor: not-allowed; }
+.bbs-page .bbs-btn { min-height: 38px; gap: 6px; white-space: normal; }
+.bbs-ledger-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin: 18px 0; padding: 0 0 14px; border-bottom: 1px solid var(--bbs-line); font-size: 12px; line-height: 1.6; color: var(--bbs-ink-muted); }
+.bbs-ledger-meta strong { margin-right: 4px; font-size: 19px; font-variant-numeric: tabular-nums; font-weight: 650; color: var(--bbs-ink); }
+.bbs-ledger-note { margin-left: auto; color: var(--bbs-accent); }
+.bbs-search { display: flex; align-items: center; gap: 9px; flex: 1 1 200px; min-width: 0; color: var(--bbs-ink-muted); }
+.bbs-search > .bbs-input { flex: 1; width: 100%; }
+.bbs-filterbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 18px; }
+.bbs-filter-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+.bbs-filter-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
+.bbs-filter-tab[aria-pressed='true'] { background: var(--bbs-accent-soft); border-color: var(--bbs-accent); color: var(--bbs-accent); }
+.bbs-filter-tab span { font-variant-numeric: tabular-nums; font-size: 11px; }
+.bbs-item-act { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--bbs-ink-soft); cursor: pointer; font-size: 15px; }
+.bbs-item-act:hover:not(:disabled) { background: var(--bbs-surface-2); border-color: var(--bbs-line); color: var(--bbs-accent); }
+.bbs-item-del:hover:not(:disabled) { background: var(--bbs-danger-soft); color: var(--bbs-danger); border-color: var(--bbs-danger); }
+.bbs-empty { display: flex; flex: none; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 230px; padding: 34px 16px; margin: 12px 0; text-align: center; background: transparent; }
+.bbs-empty-icon { display: inline-flex; align-items: center; justify-content: center; width: 54px; height: 54px; border-radius: 18px; background: var(--bbs-accent-soft); color: var(--bbs-accent); font-size: 25px; }
+.bbs-empty h3 { margin: 5px 0 0; color: var(--bbs-ink); font-size: 16px; font-weight: 650; }
+.bbs-empty p { max-width: 360px; margin: 0; color: var(--bbs-ink-muted); font-size: 13px; line-height: 1.8; }
+.bbs-empty .bbs-btn { margin-top: 6px; }
+.bbs-modal { min-width: 0; overflow-wrap: anywhere; }
+.bbs-modal-head, .bbs-modal-foot { flex-wrap: wrap; }
+.bbs-modal-textarea { resize: vertical; min-height: 80px; font-family: inherit; }
+.bbs-modal-check { flex-direction: row; align-items: center; gap: 9px; cursor: pointer; }
+.bbs-modal-check input { flex-shrink: 0; }
+@media (max-width: 480px) {
+  .bbs-ledger-meta { gap: 6px 14px; margin: 16px 0; }
+  .bbs-ledger-note { flex-basis: 100%; margin-left: 0; }
+  .bbs-search { flex-basis: 100%; }
+  .bbs-filterbar { gap: 10px; }
+  .bbs-item-act { width: 40px; height: 40px; }
+  .bbs-page .bbs-btn { min-height: 42px; }
+  .bbs-filter-tab { min-height: 40px; }
+  .bbs-empty { min-height: 210px; padding: 26px 10px; }
 }
 
-.bbs-npc-groups {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-.bbs-protagonist-section {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 18px;
-}
-.bbs-npc-group {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-/* 分组头:在场/不在场是这页的信息骨架(= AI 实际收到的分档),用细标签 + 一句说明点明取舍 */
-.bbs-npc-grouphead {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-}
-.bbs-npc-grouptag {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  padding: 2px 9px;
-  border-radius: var(--bbs-radius-pill);
-  background: var(--bbs-surface-2);
-  color: var(--bbs-ink-muted);
-}
-.bbs-npc-grouptag.is-present {
-  background: var(--bbs-accent);
-  color: var(--bbs-accent-ink);
-}
-/* 同区域:描边空心 pill —— 介于「在场(实心强调)」与「不在场(实心灰底)」之间 */
-.bbs-npc-grouptag.is-nearby {
-  background: transparent;
-  border: 1px solid var(--bbs-line-strong);
-  padding: 1px 8px; /* 补偿 1px 边框,保持与实心标签等高 */
-}
-/* 主要角色分组标签:同强调底色 + 星标,与置顶组的「核心」地位呼应 */
-.bbs-npc-grouptag.is-main {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  background: var(--bbs-accent);
-  color: var(--bbs-accent-ink);
-}
-.bbs-npc-grouptag.is-protagonist {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  background: var(--bbs-warning-soft);
-  color: var(--bbs-warning);
-}
-.bbs-npc-grouphint {
-  font-size: 11.5px;
-  color: var(--bbs-ink-muted);
-}
-.bbs-npc-grouphint.is-local-only {
-  color: var(--bbs-warning);
-  font-weight: 600;
-}
-
-.bbs-npc-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-/* —— 角色卡:与物品/场景同款的安静卡片。在场/随行只用「左侧一道色条」表态,
-      不再用大圆球——保持列表整体的克制,把强调留给那道竖条。 —— */
-.bbs-npc {
-  position: relative;
-  display: flex;
-  padding: 10px 12px;
-  border: 1px solid var(--bbs-line);
-  border-radius: var(--bbs-radius);
-  background: var(--bbs-surface);
-  overflow: hidden; /* 让左色条贴着圆角边缘 */
-}
-/* 在场:左缘一道青瓷色条 */
-.bbs-npc.is-present::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background: var(--bbs-accent);
-  opacity: 0.5;
-}
-.bbs-protagonist::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background: var(--bbs-warning);
-  opacity: 0.65;
-}
-/* 同区域:左色条更细更淡 —— 在「在场(3px@0.5)」与「不在场(无条)」之间的一档 */
-.bbs-npc.is-nearby::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: var(--bbs-accent);
-  opacity: 0.28;
-}
-/* 随行:色条加粗加实,作同伴的最高标识 */
-.bbs-npc.is-follow::before {
-  width: 3px;
-  opacity: 1;
-}
-/* 主要角色:整条左色条加粗实色,卡片更醒目,呼应「核心主演」地位 */
-.bbs-npc.is-main::before {
-  width: 4px;
-  opacity: 1;
-}
-.bbs-npc.is-main {
-  border-color: var(--bbs-line-strong);
-}
-/* 不在场:整行压暗 + 虚线框,与「只发名+身份」的弱化呼应 */
-.bbs-npc.is-absent {
-  background: transparent;
-  border-style: dashed;
-}
-.bbs-npc.is-absent .bbs-npc-name {
-  color: var(--bbs-ink-soft);
-}
-
-.bbs-npc-body {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-/* 头行:名字 + 性别/年龄 + 操作区。只放定长内容——所在地、身份这类变长文本一律下沉到
-   下方字段表,否则它们会吃光行宽、把名字挤成一两个字。 */
-.bbs-npc-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.bbs-npc-name {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--bbs-ink);
-  /* 允许收缩 + 单行省略:长名字截断显示(title 悬浮见全名),
-     不把右侧操作钮顶出卡片——卡有 overflow:hidden,溢出即被裁掉点不到 */
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* 性别小标签:紧凑灰色括注,跟在名字后面 */
-.bbs-npc-gender {
-  font-size: 11px;
-  color: var(--bbs-ink-muted);
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-.bbs-npc-acts {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  margin-left: auto;
-}
-
-/* —— 字段表:身份/性格/外貌统一成「彩色类别标签 + 内容」的对齐行。
-      标签同宽左对齐成一条竖列,用语义色区分类别,内容统一字号——治「三行同灰、层次乱」。 —— */
-.bbs-npc-fields {
-  margin: 2px 0 0;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.bbs-npc-field {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-}
-.bbs-npc-field dt {
-  flex: 0 0 auto;
-  width: 30px;
-  text-align: center;
-  padding: 1px 0;
-  border-radius: var(--bbs-radius-sm);
-  font-size: 10.5px;
-  font-weight: 600;
-  line-height: 1.5;
-  letter-spacing: 0.04em;
-  /* 默认中性,具体类别在下方各自染色 */
-  background: var(--bbs-surface-2);
-  color: var(--bbs-ink-muted);
-}
-.bbs-npc-field dd {
-  margin: 0;
-  flex: 1;
-  min-width: 0;
-  font-size: 12.5px;
-  line-height: 1.55;
-  color: var(--bbs-ink-soft);
-  word-break: break-word;
-}
-/* 身份:强调金标签——这是最关键的一类身份信息 */
-.bbs-npc-field.f-title dt {
-  background: var(--bbs-accent-soft);
-  color: var(--bbs-accent);
-}
-.bbs-npc-field.f-title dd {
-  color: var(--bbs-ink);
-}
-/* 着装:暖色标签——即时层核心,与「会变的当前状态」呼应,内容也加重 */
-.bbs-npc-field.f-outfit dt {
-  background: var(--bbs-warning-soft);
-  color: var(--bbs-warning);
-}
-.bbs-npc-field.f-outfit dd {
-  color: var(--bbs-ink);
-}
-/* 状态/健康:警示色标签——受伤/异常一眼可辨 */
-.bbs-npc-field.f-cond dt {
-  background: var(--bbs-danger-soft);
-  color: var(--bbs-danger);
-}
-/* 性格:中性偏暖(沿用默认中性,与档案层弱化一致) */
-.bbs-npc-field.f-trait dt {
-  background: var(--bbs-surface-2);
-  color: var(--bbs-ink-muted);
-}
-/* 与主角的关系:强调色标签——关系是「他是谁的谁」,与身份同级重要 */
-.bbs-npc-field.f-rel dt {
-  background: var(--bbs-accent-soft);
-  color: var(--bbs-accent);
-}
-.bbs-npc-field.f-rel dd {
-  color: var(--bbs-ink);
-}
-/* 人际(与其他角色):中性标签(档案层次要细节) */
-/* 外貌:中性标签(沿用默认),作次要细节 */
-/* 所在:青瓷描边——位置是「他现在在哪」,属即时层,但比着装/状态弱一档,故只染字不填底 */
-.bbs-npc-field.f-loc dt {
-  background: transparent;
-  border: 1px solid color-mix(in srgb, var(--bbs-accent) 35%, transparent);
-  color: var(--bbs-accent);
-  /* 描边占 2px,减内距让这枚标签与其他填底标签仍同宽同高 */
-  padding: 0;
-}
-/* 随行中:所在内容点亮强调色,替代原头行那枚「随行」标 */
-.bbs-npc-field.f-loc dd.is-follow {
-  color: var(--bbs-accent);
-}
-/* 所在不明:虚化斜体,与「不在场」组的压暗基调一致 */
-.bbs-npc-field.f-loc dd.is-nowhere {
-  font-style: italic;
-  opacity: 0.7;
-}
-
-/* 主要角色无状态时的占位提示:引导补录当前状态,避免空卡 */
-.bbs-npc-mainhint {
-  margin: 4px 0 0;
-  font-size: 12px;
-  font-style: italic;
-  color: var(--bbs-ink-muted);
-}
-
-/* PC(支持 hover)上操作按钮默认隐藏,悬停整卡才浮现;触屏常驻(与物品页一致) */
-@media (hover: hover) {
-  .bbs-npc-acts {
-    opacity: 0;
-    transition: opacity var(--bbs-dur) var(--bbs-ease);
-  }
-  .bbs-npc:hover .bbs-npc-acts,
-  .bbs-npc-acts:focus-within {
-    opacity: 1;
-  }
-}
-
-/* 行内操作按钮:复刻 items 页(scoped 不继承,重声明同款) */
-.bbs-item-act {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 0;
-  border-radius: var(--bbs-radius-sm);
-  background: transparent;
-  color: var(--bbs-ink-muted);
-  cursor: pointer;
-  font-size: 14px;
-}
-.bbs-item-act:hover {
-  background: var(--bbs-surface-2);
-  color: var(--bbs-ink);
-}
-.bbs-item-del:hover {
-  color: var(--bbs-danger);
-}
-/* 随行开关:激活态点亮强调色,把「这是同伴」表达在按钮本身 */
-.bbs-npc-pin.active {
-  color: var(--bbs-accent);
-}
-.bbs-npc-pin.active:hover {
-  color: var(--bbs-accent);
-  background: var(--bbs-accent-soft);
-}
-/* 主要角色星标:激活态点亮(实心感由强调色填充表达) */
-.bbs-npc-star.active {
-  color: var(--bbs-accent);
-}
-.bbs-npc-star.active:hover {
-  color: var(--bbs-accent);
-  background: var(--bbs-accent-soft);
-}
-/* 主要角色卡的操作区常驻(置顶组无需 hover 才显,星标本身就是状态指示) */
-.bbs-npc.is-main .bbs-npc-acts {
-  opacity: 1;
-}
-.bbs-protagonist .bbs-npc-acts {
-  opacity: 1;
-}
-
-.bbs-modal-textarea {
-  resize: vertical;
-  min-height: 60px;
-  font-family: inherit;
-}
-/* 自适应高度:默认贴合一行,内容多才长高(v-autosize 量 scrollHeight 写回);
-   min-height 归零、resize 交给指令,封顶后滚动。 */
-.bbs-modal-autogrow {
-  resize: none;
-  min-height: 0;
-  max-height: 140px;
-  overflow-y: auto;
-}
-.bbs-modal-check {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-}
-.bbs-modal-check input {
-  flex-shrink: 0;
-}
-.bbs-empty {
-  flex: 1;
-}
-
-/* —— 生活小档案 —— */
-/* 区块标题:与摘要页区块标题同款的普通小标题字,不用药丸题签 */
-.bbs-life-title {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--bbs-ink);
-}
-.bbs-npc-grouphead .bbs-add-mini {
-  margin-left: auto;
-}
-/* —— 折叠头/容器:与摘要页计划/悬念折叠同款。标题行整体可点:左箭头 + 题签 + 金色计数标 —— */
-.bbs-fold-head {
-  flex: 0 0 auto;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-}
-/* 无可折叠(零条目)时退化为普通标题:不是按钮观感、光标默认 */
-.bbs-fold-head.is-static {
-  cursor: default;
-}
-/* 折叠箭头:展开朝下,收拢转 -90° 朝右;hover 整行才点亮强调色 */
-.bbs-fold-caret {
-  flex: 0 0 auto;
-  color: var(--bbs-ink-muted);
-  transition: transform 0.2s ease, color 0.15s;
-}
-.bbs-fold-caret.is-collapsed {
-  transform: rotate(-90deg);
-}
-.bbs-fold-head:hover:not(.is-static) .bbs-fold-caret,
-.bbs-fold-head:focus-visible .bbs-fold-caret {
-  color: var(--bbs-accent);
-}
-/* 计数标:金底描边小药丸,始终显示;收拢时尤其有用——点明藏了多少条 */
-.bbs-fold-count {
-  flex: 0 0 auto;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--bbs-accent);
-  background: var(--bbs-accent-soft);
-  border: 1px solid var(--bbs-accent);
-  border-radius: var(--bbs-radius-pill);
-  padding: 1px 9px;
-  font-variant-numeric: tabular-nums;
-}
-/* —— 可收展容器:grid 1fr↔0fr,高度随内容自适应,无需写死 max-height —— */
-.bbs-fold-wrap {
-  display: grid;
-  grid-template-rows: 1fr;
-  transition: grid-template-rows 0.24s ease;
-}
-.bbs-fold-wrap.is-collapsed {
-  grid-template-rows: 0fr;
-}
-/* min-height:0 + overflow:hidden 才能让 0fr 真正压到零高 */
-.bbs-fold-inner {
-  min-height: 0;
-  overflow: hidden;
-}
-@media (prefers-reduced-motion: reduce) {
-  .bbs-fold-caret,
-  .bbs-fold-wrap {
-    transition: none;
-  }
-}
-
-.bbs-life-group {
-  margin-top: 8px;
-}
-/* 一条细节:与 NPC 卡同族的卡片容器(主题描边/圆角/纸面) */
-.bbs-life {
-  position: relative;
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 8px 12px;
-  border: 1px solid var(--bbs-line);
-  border-radius: var(--bbs-radius);
-  background: var(--bbs-surface);
-  margin-bottom: 6px;
-  overflow: hidden; /* 让置顶色条贴着圆角边缘 */
-}
-/* 置顶:左缘一道金色条,呼应角色卡「在场」、点明「常驻发送」 */
-.bbs-life.is-pinned::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background: var(--bbs-accent);
-  opacity: 0.5;
-}
-/* 沉降:虚线框 + 压暗,呼应角色卡「不在场」的弱化 */
-.bbs-life.is-archive {
-  background: transparent;
-  border-style: dashed;
-}
-.bbs-life.is-archive .bbs-life-text {
-  color: var(--bbs-ink-soft);
-}
-.bbs-life-main {
-  flex: 1;
-  min-width: 0;
-}
-.bbs-life-text {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.55;
-  color: var(--bbs-ink);
-  word-break: break-word;
-}
-.bbs-life-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 4px;
-}
-/* 主题/时效小签:与计划卡时间签同款的描边小标签 */
-.bbs-life-tag,
-.bbs-life-until {
-  font-size: 10.5px;
-  line-height: 1.5;
-  padding: 1px 7px;
-  border-radius: var(--bbs-radius-sm);
-  border: 1px solid var(--bbs-line);
-  background: var(--bbs-surface-2);
-  color: var(--bbs-ink-muted);
-}
-.bbs-life-until {
-  color: var(--bbs-accent);
-  background: var(--bbs-accent-soft);
-  border-color: color-mix(in srgb, var(--bbs-accent) 40%, transparent);
-}
-.bbs-life .bbs-npc-acts {
-  flex-shrink: 0;
-}
-.bbs-item-act.active {
-  color: var(--bbs-accent);
-}
-
-/* ============ 窄屏:生活细节卡的重排 ============ */
+.bbs-protagonist-section { display: flex; flex-direction: column; gap: 12px; margin-bottom: 26px; min-width: 0; }
+.bbs-life-section { padding-bottom: 20px; border-bottom: 1px solid var(--bbs-line); }
+.bbs-npc-groups { display: flex; flex-direction: column; gap: 28px; }
+.bbs-npc-group { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.bbs-npc-grouphead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0; }
+.bbs-npc-grouptag { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 7px; background: var(--bbs-surface-2); font-size: 12px; font-weight: 650; color: var(--bbs-ink-soft); }
+.bbs-npc-grouptag.is-present, .bbs-npc-grouptag.is-main { background: var(--bbs-accent-soft); color: var(--bbs-accent); }
+.bbs-npc-grouptag.is-protagonist { background: var(--bbs-warning-soft); color: var(--bbs-warning); }
+.bbs-npc-grouptag.is-nearby { background: transparent; border: 1px solid var(--bbs-line-strong); }
+.bbs-npc-grouphint { flex: 1 1 150px; color: var(--bbs-ink-muted); font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
+.bbs-npc-grouphint.is-local-only { color: var(--bbs-warning); }
+.bbs-npc-grouphead .bbs-add-mini { flex-shrink: 0; margin-left: auto; min-width: 36px; min-height: 36px; }
+.bbs-roster-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.bbs-roster-heading h2 { font-size: 16px; margin: 0; font-weight: 650; }
+.bbs-roster-heading > span { font-size: 11px; color: var(--bbs-ink-muted); }
+.bbs-roster-tools .bbs-filter-tabs { flex-basis: 100%; }
+.bbs-npc-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 12px; }
+.bbs-npc { position: relative; min-width: 0; padding: 17px 18px; border: 1px solid var(--bbs-line); border-radius: 15px; background: var(--bbs-surface); box-shadow: var(--bbs-card-shadow); }
+.bbs-npc.is-present, .bbs-npc.is-nearby { border-left: 3px solid var(--bbs-line-strong); }
+.bbs-npc.is-main, .bbs-npc.is-follow { border-left: 3px solid var(--bbs-accent); }
+.bbs-protagonist { border-left: 3px solid var(--bbs-warning); }
+.bbs-npc.is-absent { background: transparent; box-shadow: none; border-style: dashed; }
+.bbs-npc-body { min-width: 0; }
+.bbs-npc-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 9px; padding-bottom: 10px; border-bottom: 1px solid var(--bbs-line); margin-bottom: 12px; }
+.bbs-npc-name { font-size: 16px; font-weight: 650; min-width: 0; max-width: 100%; overflow-wrap: anywhere; line-height: 1.5; }
+.bbs-npc-gender { padding: 2px 6px; border-radius: 5px; background: var(--bbs-surface-2); color: var(--bbs-ink-muted); font-size: 11px; max-width: 100%; overflow-wrap: anywhere; }
+.bbs-npc-acts { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 2px; margin-left: auto; flex-shrink: 0; }
+.bbs-npc-fields { display: flex; flex-direction: column; gap: 10px; margin: 0; }
+.bbs-npc-field { display: grid; grid-template-columns: 60px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.bbs-npc-field dt { font-size: 11px; font-weight: 500; line-height: 1.7; color: var(--bbs-ink-muted); }
+.bbs-npc-field dd { min-width: 0; margin: 0; font-size: 13px; line-height: 1.75; color: var(--bbs-ink-soft); overflow-wrap: anywhere; white-space: pre-wrap; }
+.bbs-npc-field.f-title dd, .bbs-npc-field.f-rel dd { color: var(--bbs-ink); }
+.bbs-npc-field.f-cond dt { color: var(--bbs-danger); }
+.bbs-npc-field.f-outfit dt { color: var(--bbs-warning); }
+.bbs-npc-field.f-loc dt, .bbs-npc-field.f-loc dd.is-follow { color: var(--bbs-accent); }
+.bbs-npc-field.f-loc dd.is-nowhere { color: var(--bbs-ink-muted); font-style: italic; }
+.bbs-npc-mainhint { margin: 4px 0; color: var(--bbs-ink-muted); font-size: 12px; line-height: 1.8; }
+.bbs-item-act.active { color: var(--bbs-accent); background: var(--bbs-accent-soft); }
+.bbs-npc-star.active { color: var(--bbs-warning); background: var(--bbs-warning-soft); }
+.bbs-modal-autogrow { resize: none; min-height: 0; max-height: 140px; overflow-y: auto; }
+.bbs-life-title { margin: 0; font-size: 14px; font-weight: 650; color: var(--bbs-ink); }
+.bbs-fold-head { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; min-height: 36px; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.bbs-fold-head.is-static { cursor: default; opacity: 1; }
+.bbs-fold-caret { flex-shrink: 0; color: var(--bbs-ink-muted); transition: transform .2s ease; }
+.bbs-fold-caret.is-collapsed { transform: rotate(-90deg); }
+.bbs-fold-count { border-radius: 6px; padding: 2px 8px; background: var(--bbs-warning-soft); color: var(--bbs-warning); font-size: 11px; font-variant-numeric: tabular-nums; }
+.bbs-fold-wrap { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .24s ease; }
+.bbs-fold-wrap.is-collapsed { grid-template-rows: 0fr; }
+.bbs-fold-inner { min-height: 0; overflow: hidden; }
+.bbs-life-group { display: flex; flex-direction: column; }
+.bbs-life { display: flex; align-items: flex-start; gap: 12px; padding: 13px 0 13px 12px; border-bottom: 1px solid var(--bbs-line); border-left: 2px solid var(--bbs-line); }
+.bbs-life:last-child { border-bottom: 0; }
+.bbs-life.is-pinned { border-left-color: var(--bbs-warning); }
+.bbs-life.is-archive { border-left-style: dashed; }
+.bbs-life-main { flex: 1; min-width: 0; }
+.bbs-life-text { margin: 0; font-size: 13px; line-height: 1.8; color: var(--bbs-ink); overflow-wrap: anywhere; }
+.bbs-life.is-archive .bbs-life-text { color: var(--bbs-ink-muted); }
+.bbs-life-meta { display: flex; flex-wrap: wrap; gap: 5px 9px; margin-top: 6px; }
+.bbs-life-tag, .bbs-life-until { max-width: 100%; font-size: 11px; line-height: 1.6; color: var(--bbs-ink-muted); overflow-wrap: anywhere; }
+.bbs-life-until { color: var(--bbs-warning); }
 @media (max-width: 640px) {
-  /* 生活小档案:主题/时效标签与操作钮同占顶行,正文整行排在下方。
-     main 改 display:contents,让文本/标签直接参与卡片 flex 排序,无需改模板结构 */
-  .bbs-life {
-    flex-wrap: wrap;
-  }
-  .bbs-life-main {
-    display: contents;
-  }
-  .bbs-life-meta {
-    order: 1;
-    flex: 1 1 auto;
-    min-width: 0;
-    margin-top: 0;
-    align-self: center;
-  }
-  .bbs-life .bbs-npc-acts {
-    order: 2;
-    flex-shrink: 0;
-    margin-left: auto;
-  }
-  .bbs-life-text {
-    order: 3;
-    flex-basis: 100%;
-  }
+  .bbs-npc { padding: 14px; }
+  .bbs-npc-head .bbs-npc-acts { flex-basis: 100%; margin-top: 2px; }
+  .bbs-life { flex-direction: column; gap: 6px; }
+  .bbs-life .bbs-npc-acts { align-self: flex-end; }
+  .bbs-npc-field { grid-template-columns: 54px minmax(0, 1fr); gap: 8px; }
 }
+@media (max-width: 480px) { .bbs-npc-grouphead .bbs-add-mini { min-width: 40px; min-height: 40px; } }
+@media (prefers-reduced-motion: reduce) { .bbs-fold-caret, .bbs-fold-wrap { transition: none; } }
 </style>

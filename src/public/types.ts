@@ -41,12 +41,26 @@ export interface PublicChatInfo {
   length: number;
 }
 
+/** 只暴露兼容诊断，不泄露内部转换计划或可变 store 引用。 */
+export interface PublicCompatibility {
+  mode: 'ready' | 'convert' | 'protected';
+  converting: boolean;
+  blocked: boolean;
+  reason: string | null;
+  issues: string[];
+}
+
 export interface PublicCoverage {
   complete: boolean;
+  /** blocked 时空数组表示未评估，不代表没有缺失楼层。 */
   missingAiFloors: number[];
+  status?: 'complete' | 'incomplete' | 'blocked';
+  reason?: string | null;
 }
 
 export interface PublicSnapshot {
+  /** 增量字段；新版实现始终提供，兼容旧版 API 消费者。 */
+  compatibility?: PublicCompatibility;
   apiVersion: 1;
   pluginVersion: string;
   revision: number;
@@ -83,6 +97,8 @@ export interface PublicHistoryNode {
 }
 
 export interface PublicHistory {
+  /** 增量字段；新版实现始终提供，兼容旧版 API 消费者。 */
+  compatibility?: PublicCompatibility;
   apiVersion: 1;
   pluginVersion: string;
   revision: number;
@@ -95,6 +111,8 @@ export interface PublicHistory {
 }
 
 export interface PublicInjectedHistory {
+  /** 增量字段；新版实现始终提供，兼容旧版 API 消费者。 */
+  compatibility?: PublicCompatibility;
   apiVersion: 1;
   pluginVersion: string;
   revision: number;

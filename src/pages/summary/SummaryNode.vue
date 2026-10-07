@@ -27,12 +27,13 @@ const isChild = computed(() => props.depth > 0);
 </script>
 
 <template>
-  <div class="bbs-node">
+  <div class="bbs-node" :class="{ 'is-nested': depth > 1 }">
     <article
       class="bbs-summary-card"
       :class="{ 'is-deep': row.level > 0, 'is-child': isChild, 'is-expanded': isExpanded && expandable }"
     >
       <div class="bbs-summary-main">
+        <p v-if="isChild" class="bbs-node-context">上层总结的来源 · 第 {{ depth }} 层</p>
         <header class="bbs-summary-meta">
           <template v-if="row.kind === 'comp'">
             <span class="bbs-summary-badge">{{ ctx.levelLabel(row.level, row.imported) }}</span>
@@ -48,10 +49,10 @@ const isChild = computed(() => props.depth > 0);
           <!-- 操作键:编辑对任何层级开放(结构安全:不改 id、不断链;叶子改完向量索引自动重 embed,
                总结不进向量库、只影响上下文注入);删除仅根行——删深层叶子会级联删整条祖先总结链 -->
           <span class="bbs-summary-acts">
-            <button class="bbs-summary-act" type="button" :title="row.imported ? '编辑导入历史' : row.kind === 'comp' ? '编辑总结' : '编辑摘要'" @click="ctx.openEdit(row)">
+            <button class="bbs-summary-act" type="button" :title="row.imported ? '编辑导入历史' : row.kind === 'comp' ? '编辑总结' : '编辑摘要'" :aria-label="row.imported ? '编辑导入历史' : row.kind === 'comp' ? '编辑总结' : '编辑摘要'" @click="ctx.openEdit(row)">
               <Icon name="edit" />
             </button>
-            <button v-if="!isChild" class="bbs-summary-act bbs-summary-del" type="button" :title="row.imported ? '删除导入历史' : row.kind === 'comp' ? '删除总结(下层会展开)' : '删除摘要'" @click="ctx.onDelete(row)">
+            <button v-if="!isChild" class="bbs-summary-act bbs-summary-del" type="button" :title="row.imported ? '删除导入历史' : row.kind === 'comp' ? '删除总结(下层会展开)' : '删除摘要'" :aria-label="row.imported ? '删除导入历史' : row.kind === 'comp' ? '删除总结(下层会展开)' : '删除摘要'" @click="ctx.onDelete(row)">
               <Icon name="trash" />
             </button>
           </span>
@@ -63,21 +64,23 @@ const isChild = computed(() => props.depth > 0);
           class="bbs-expand-bar"
           type="button"
           :aria-expanded="isExpanded"
+          :aria-label="isExpanded ? '收起下层摘要' : `展开下层 ${children.length} 条摘要`"
+          :title="isExpanded ? '收起下层摘要' : `展开下层 ${children.length} 条摘要`"
           @click="ctx.toggleExpand(node.id)"
         >
           <Icon name="chevron" class="bbs-expand-caret" :class="{ 'is-collapsed': !isExpanded }" />
-          {{ isExpanded ? '收起下层' : `展开下层 ${children.length} 条` }}
+          {{ isExpanded ? `收起下层 ${children.length} 条` : `展开下层 ${children.length} 条` }}
         </button>
       </div>
     </article>
 
     <!-- 下层:grid 0fr↔1fr 高度过渡(内容常驻、不脱流,无闪烁);缩进一档标示归属 -->
-    <div v-if="expandable" class="bbs-node-children" :class="{ 'is-open': isExpanded }">
+    <div v-if="expandable" class="bbs-node-children" :class="{ 'is-open': isExpanded }" :inert="!isExpanded" :aria-hidden="!isExpanded">
       <div class="bbs-node-children-inner">
         <div class="bbs-node-children-body">
           <SummaryNode v-for="c in children" :key="`${c.kind}:${c.id}`" :node="c" :depth="depth + 1" />
           <!-- 组尾收起条:滚到展开内容末尾也能就地收回,不必翻回顶部 -->
-          <button class="bbs-collapse-footer" type="button" title="收起下层摘要" @click="ctx.toggleExpand(node.id)">
+          <button class="bbs-collapse-footer" type="button" title="收起下层摘要" aria-label="收起下层摘要" @click="ctx.toggleExpand(node.id)">
             <Icon name="chevron" class="bbs-collapse-caret" />
             收起下层 {{ children.length }} 条
           </button>
@@ -131,5 +134,17 @@ const isChild = computed(() => props.depth > 0);
   .bbs-node-children-body {
     transition: none;
   }
+}
+
+/* 收纳关系明确可见；深层不再无限缩窄，手机上仍留出正文宽度。 */
+.bbs-node { min-width: 0; }
+.bbs-node-context { margin: 0 0 10px; color: var(--bbs-ink-muted); font-size: 10px; line-height: 1.6; letter-spacing: .04em; }
+.bbs-node-children-body { gap: 12px; margin-left: 12px; padding-left: 12px; border-left: 2px solid var(--bbs-line-strong); }
+.bbs-node.is-nested > .bbs-node-children > .bbs-node-children-inner > .bbs-node-children-body { margin-left: 0; padding-left: 0; border-left: 0; }
+.bbs-collapse-footer { align-self: flex-start; max-width: 100%; white-space: normal; text-align: left; }
+.bbs-expand-bar { flex-wrap: wrap; }
+@media (max-width: 640px) {
+  .bbs-node-children-body { margin-left: 3px; padding-left: 7px; gap: 10px; }
+  .bbs-node-context { letter-spacing: 0; }
 }
 </style>

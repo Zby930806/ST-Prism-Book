@@ -39,8 +39,8 @@
   align-items: center;
   justify-content: center;
   background: var(--bbs-overlay);
-  backdrop-filter: blur(3px);
-  padding: 24px;
+  backdrop-filter: blur(7px);
+  padding: 28px;
 }
 
 /* —— 窗口外壳 —— */
@@ -70,7 +70,7 @@
 /* —— 通用排版原子,供各分页复用 —— */
 .bbs-title {
   font-weight: 600;
-  font-size: 22px;
+  font-size: 24px;
   color: var(--bbs-ink);
   letter-spacing: -0.01em;
   margin: 0;
@@ -589,20 +589,10 @@
   }
 }
 
-/* —— 隐藏滚动条(保留滚动能力):整个 UI 内统一 —— */
-.bbs-root * {
-  scrollbar-width: none;
-  /* Firefox */
-  -ms-overflow-style: none;
-  /* 旧 Edge/IE */
-}
-
-.bbs-root *::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-  display: none;
-  /* Chrome/Safari */
-}
+/* 显示轻量滚动条，长设置和摘要不再丢失滚动线索。 */
+.bbs-root * { scrollbar-width: thin; scrollbar-color: var(--bbs-line-strong) transparent; }
+.bbs-root *::-webkit-scrollbar { width: 6px; height: 6px; }
+.bbs-root *::-webkit-scrollbar-thumb { background: var(--bbs-line-strong); border-radius: 8px; }
 
 /* ============ 响应式:移动端整屏(底部抽屉式) ============ */
 @media (max-width: 640px) {
@@ -632,3 +622,32 @@
     transition-duration: 0.001ms !important;
   }
 }
+/* 共享交互规范：不改变各页事件与内容，仅统一触达、焦点、排版。 */
+.bbs-root :where(button,input,select,textarea) { font: inherit; }
+.bbs-root :where(button,[role='button'],a,input,select,textarea):focus-visible { outline: 2px solid var(--bbs-accent); outline-offset: 3px; }
+.bbs-root :where(input,textarea,select) { accent-color: var(--bbs-accent); }
+.bbs-root :where(button,input,select,textarea):disabled { cursor: not-allowed; }
+.bbs-body { overscroll-behavior: contain; scroll-padding-top: 18px; }
+.bbs-body > * { min-width: 0; }
+.bbs-btn { min-height: 36px; justify-content: center; font-size: 12px; font-weight: 550; line-height: 1.4; }
+.bbs-btn:disabled:hover { color: var(--bbs-ink); border-color: var(--bbs-line-strong); }
+.bbs-btn-primary:disabled:hover { color: var(--bbs-accent-ink); border-color: var(--bbs-accent); }
+.bbs-input { min-width: 0; min-height: 38px; line-height: 1.6; }
+.bbs-input::placeholder { color: var(--bbs-ink-muted); opacity: 1; }
+textarea.bbs-input { min-height: 90px; resize: vertical; }
+.bbs-add-mini { min-width: 32px; min-height: 32px; }
+.bbs-modal { background: var(--bbs-surface); }
+.bbs-empty { min-height: 220px; padding: 32px 20px; }
+.bbs-empty .bbs-empty-icon { color: var(--bbs-accent); background: var(--bbs-accent-soft); border-radius: 20px; }
+.bbs-summary-acts { opacity: 1; }
+.bbs-root button { -webkit-tap-highlight-color: transparent; }
+@media (max-width:640px) {
+  .bbs-btn { min-height: 40px; }
+  .bbs-add-mini { min-width: 40px; min-height: 40px; }
+  .bbs-modal-mask { padding: 12px; }
+  .bbs-modal { max-height: 90dvh; }
+  .bbs-modal-foot { flex-wrap: wrap; }
+}
+
+/* 初始焦点落在非交互容器时不绘制整窗轮廓；控件的 focus-visible 保留。 */
+.bbs-window:focus, .bbs-modal-mask:focus, .bbs-modal:focus { outline: none; }

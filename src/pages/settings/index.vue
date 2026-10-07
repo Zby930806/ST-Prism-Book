@@ -5,6 +5,7 @@ import Collapsible from '@/components/Collapsible.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import BbsSelect from '@/components/BbsSelect.vue';
 import Icon from '@/components/Icon.vue';
+import PageHeader from '@/components/PageHeader.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { fetchModels, testChannel } from '@/api/client';
 import { apiSettings, newChannel, resolveVectorModel, sanitizeTagName, type ApiChannel, type Verbosity } from '@/api/settings';
@@ -721,55 +722,158 @@ function exportPublicApiDocument() {
   anchor.click();
   toast('公共接口文档已导出', 'success');
 }
+
+/* 页面导航与概览只读取现有状态，不写入配置，也不发起连接测试。 */
+const settingsRoot = ref<HTMLElement | null>(null);
+const SETTINGS_GROUPS = [
+  { id: 'common', label: '常用设置', icon: 'settings', hint: 'API · 摘要 · 外观' },
+  { id: 'memory', label: '记忆与召回', icon: 'summary', hint: '注入 · 向量记忆' },
+  { id: 'prompts', label: '提示词', icon: 'edit', hint: '编辑 · 恢复默认' },
+  { id: 'advanced', label: '高级过滤', icon: 'vars', hint: '排除 · 内容清洗' },
+  { id: 'data', label: '数据与迁移', icon: 'upload', hint: '新对话 · 旧版迁移' },
+] as const;
+function goToSettingsGroup(id: string) {
+  // 限定在本页根节点内，兼容 ST 的 Shadow DOM，不修改宿主页面 hash。
+  const heading = settingsRoot.value?.querySelector<HTMLElement>('#prism-settings-' + id);
+  if (!heading) return;
+  heading.scrollIntoView({ block: 'start', behavior: 'auto' });
+  heading.focus({ preventScroll: true });
+}
+function assignedChannelName(id: string): string {
+  if (!id) return '跟随主 API';
+  return apiSettings.channels.find(channel => channel.id === id)?.name ||
+    (apiSettings.channels.some(channel => channel.id === id) ? '未命名渠道' : '渠道不存在，请重新指派');
+}
+const currentThemeLabel = computed(() => THEMES.find(theme => theme.value === ui.theme)?.label || ui.theme);
+const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(meta.key)).length);
+
 </script>
 
 <template>
-  <section class="bbs-page">
-    <!-- 标题行右端显示版本号;有更新时旁边出现「更新」按钮。 -->
-    <div class="bbs-page-head">
-      <h2 class="bbs-title bbs-title-sub">设置</h2>
-      <div class="bbs-ver-row">
-        <span class="bbs-ver" :title="INTERNAL_UPDATE_NOTICE">
-          v{{ updateState.current || '—' }} · 内部版
-        </span>
-        <button
-          v-if="updateState.available"
-          class="bbs-btn bbs-btn-primary bbs-btn-sm"
-          type="button"
-          :disabled="updateState.updating"
-          :title="`更新到 v${updateState.latest}`"
-          @click="openUpdateConfirm"
-        >
-          {{ updateState.updating ? '更新中…' : '更新' }}
+  <section ref="settingsRoot" class="bbs-page prism-settings">
+    <PageHeader
+      icon="settings"
+      title="设置"
+      eyebrow="棱镜宝书 · 配置中心"
+      description="让记忆按你的方式运转。管理模型、摘要与召回，再按需调整高级选项。"
+    >
+      <template #actions>
+        <div class="bbs-ver-row">
+          <span class="bbs-ver" :title="INTERNAL_UPDATE_NOTICE">v{{ updateState.current || '—' }} · 内部版</span>
+          <button
+            v-if="updateState.available"
+            class="bbs-btn bbs-btn-primary bbs-btn-sm"
+            type="button"
+            :disabled="updateState.updating"
+            :title="'更新到 v' + updateState.latest"
+            @click="openUpdateConfirm"
+          >{{ updateState.updating ? '更新中…' : '更新' }}</button>
+        </div>
+      </template>
+    </PageHeader>
+
+    <div class="prism-overview" aria-label="当前配置概览">
+      <div class="bbs-master" :class="{ 'is-off': !apiSettings.enabled }">
+        <span class="prism-engine-icon" aria-hidden="true"><Icon name="sparkles" /></span>
+        <div class="bbs-master-text">
+          <span class="prism-eyebrow">记忆引擎</span>
+          <h3 class="bbs-master-title">{{ apiSettings.enabled ? '已启用，让故事继续被记住' : '已停用，已有记忆仍然保留' }}</h3>
+          <p class="prism-master-description">{{ apiSettings.enabled ? '按下方配置执行注入、摘要、总结与旧楼隐藏。' : '暂停注入、摘要、总结与旧楼隐藏；可继续编辑配置。' }}</p>
+        </div>
+        <div class="prism-master-control">
+          <span class="prism-state" :class="{ 'is-muted': !apiSettings.enabled }">{{ apiSettings.enabled ? '已启用' : '已停用' }}</span>
+          <button
+            type="button"
+            role="switch"
+            class="bbs-toggle"
+            :class="{ 'is-on': apiSettings.enabled }"
+            :aria-checked="apiSettings.enabled"
+            :aria-label="apiSettings.enabled ? '停用棱镜宝书记忆引擎' : '启用棱镜宝书记忆引擎'"
+            :title="apiSettings.enabled ? '停用棱镜宝书记忆引擎' : '启用棱镜宝书记忆引擎'"
+            @click="apiSettings.enabled = !apiSettings.enabled"
+          ><span class="bbs-toggle-knob"></span></button>
+        </div>
+      </div>
+      <details class="prism-config-details">
+        <summary>配置概览 <span>查看渠道、自动摘要与召回状态</span></summary>
+      <dl class="prism-status-grid">
+        <div class="prism-status-item">
+          <dt><Icon name="plug" /> 任务渠道</dt>
+          <dd><strong>{{ apiSettings.channels.length }} 个副 API 渠道</strong><span>摘要：{{ assignedChannelName(apiSettings.assignments.summary) }}<br />总结：{{ assignedChannelName(apiSettings.assignments.resummary) }}</span></dd>
+        </div>
+        <div class="prism-status-item">
+          <dt><Icon name="summary" /> 自动摘要</dt>
+          <dd><strong>{{ !apiSettings.enabled ? '随引擎暂停' : apiSettings.autoSummaryEnabled ? '已开启' : '未开启' }}</strong><span>配置{{ apiSettings.autoSummaryEnabled ? '开启' : '关闭' }} · 保留最近 {{ apiSettings.keepRecent }} 条 AI 全文</span></dd>
+        </div>
+        <div class="prism-status-item">
+          <dt><Icon name="vars" /> 向量记忆</dt>
+          <dd><strong>{{ !apiSettings.enabled ? '随引擎暂停' : apiSettings.vector.enabled ? '已开启' : '未开启' }}</strong><span>配置{{ apiSettings.vector.enabled ? '开启' : '关闭' }} · {{ apiSettings.vector.embedding.model || '尚未填写向量模型' }}</span></dd>
+        </div>
+        <div class="prism-status-item">
+          <dt><Icon name="sun" /> 界面与模板</dt>
+          <dd><strong>{{ currentThemeLabel }}主题</strong><span>{{ customPromptCount }} 项自定义提示词 · {{ apiSettings.summaryOnlyMode ? '仅注入剧情摘要' : '按配置注入状态' }}</span></dd>
+        </div>
+      </dl>
+      <p class="prism-overview-note">以上为当前配置，不代表 API 连接测试结果。普通设置直接修改；渠道与提示词在编辑窗口点「完成」后写回。</p>
+      </details>
+    </div>
+
+    <div class="prism-settings-layout">
+      <nav class="prism-settings-nav" aria-label="设置分组目录">
+        <span class="prism-nav-label">设置目录</span>
+        <button v-for="group in SETTINGS_GROUPS" :key="group.id" type="button" :aria-controls="'prism-settings-' + group.id" @click="goToSettingsGroup(group.id)">
+          <Icon :name="group.icon" />
+          <span><strong>{{ group.label }}</strong><small>{{ group.hint }}</small></span>
+          <Icon name="chevron" class="prism-nav-arrow" />
         </button>
-      </div>
-    </div>
-    <p class="bbs-field-hint">{{ INTERNAL_UPDATE_NOTICE }} 原作：柏柏；本版为棱镜宝书内部维护版。</p>
-    <hr class="bbs-rule" />
+      </nav>
+      <div class="bbs-sections">
+        <section class="prism-settings-group prism-group-common" aria-labelledby="prism-settings-common">
+          <header class="prism-group-head">
+            <span class="prism-group-number" aria-hidden="true">01</span>
+            <div><h2 id="prism-settings-common" tabindex="-1">常用设置</h2><p>先选择摘要与总结使用的渠道，再调整记忆节奏和界面偏好。</p></div>
+            <span class="prism-group-tag">日常配置</span>
+          </header>
+          <div class="prism-group-cards">
+      <Collapsible class="prism-settings-card" title="副 API" :open="true">
+        <p class="prism-card-intro">为摘要、总结分别指派渠道；选择「跟随主 API」时沿用酒馆主 API。添加后可随时点击渠道编辑或测试。</p>
+        <!-- 任务指派 -->
+        <div class="bbs-field bbs-assign">
+          <div class="bbs-assign-row">
+            <span class="bbs-field-label">摘要使用</span>
+            <BbsSelect v-model="apiSettings.assignments.summary" :options="channelOptions" class="bbs-assign-select" aria-label="摘要使用的渠道" />
+          </div>
+          <div class="bbs-assign-row">
+            <span class="bbs-field-label">总结使用</span>
+            <BbsSelect v-model="apiSettings.assignments.resummary" :options="channelOptions" class="bbs-assign-select" aria-label="总结使用的渠道" />
+          </div>
+        </div>
+        <p class="bbs-field-hint">推荐使用DeepSeek或豆包，不推荐Gemini，甲太厚</p>
 
-    <!-- 总开关:整个插件的主控,关闭即停止注入/摘要/总结/隐藏(已有数据保留)。
-         单独抬出在折叠区之上,作为这页最显眼的一处决策。 -->
-    <div class="bbs-master" :class="{ 'is-off': !apiSettings.enabled }">
-      <span class="bbs-master-spine" aria-hidden="true"></span>
-      <div class="bbs-master-text">
-        <span class="bbs-master-title">棱镜宝书 · 记忆引擎</span>
-      </div>
-      <button
-        type="button"
-        role="switch"
-        class="bbs-toggle"
-        :class="{ 'is-on': apiSettings.enabled }"
-        :aria-checked="apiSettings.enabled"
-        :title="apiSettings.enabled ? '点击停用' : '点击启用'"
-        @click="apiSettings.enabled = !apiSettings.enabled"
-      >
-        <span class="bbs-toggle-knob"></span>
-      </button>
-    </div>
+        <hr class="bbs-rule" />
 
-    <div class="bbs-sections">
-      <!-- 基本设置 -->
-      <Collapsible title="基本设置" :open="false">
+        <!-- 渠道:顶部添加按钮 + 紧凑只读列表(点行进弹窗编辑),不再一长列表单平铺 -->
+        <div class="bbs-channel-bar">
+          <span class="bbs-field-label">渠道</span>
+          <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="addChannel('api')">
+            <Icon name="plus" /> 添加渠道
+          </button>
+        </div>
+
+        <ul v-if="apiSettings.channels.length" class="bbs-channel-list">
+          <li v-for="ch in apiSettings.channels" :key="ch.id" class="bbs-channel-item">
+            <button class="bbs-channel-open" type="button" :title="'编辑渠道：' + (ch.name || '未命名渠道')" @click="openChannel(ch.id)">
+              <span class="bbs-channel-item-name">{{ ch.name || '未命名渠道' }}</span>
+              <span class="bbs-channel-item-model" :title="ch.model || '未设模型'">{{ ch.model || '未设模型' }}</span>
+              <Icon name="edit" class="prism-channel-edit" />
+            </button>
+          </li>
+        </ul>
+        <p v-else class="bbs-field-hint">还没有渠道。点「添加渠道」配置摘要/总结要用的 API。</p>
+      </Collapsible>
+
+      <Collapsible class="prism-settings-card" title="基本设置" :open="true">
+        <p class="prism-card-intro">主题、导航与入口偏好。全部沿用现有设置，按自己的阅读习惯调整。</p>
         <div class="bbs-field">
           <div class="bbs-field-head">
             <span class="bbs-field-label">主题</span>
@@ -781,6 +885,7 @@ function exportPublicApiDocument() {
               type="button"
               class="bbs-seg"
               :class="{ 'is-on': ui.theme === t.value }"
+              :aria-pressed="ui.theme === t.value"
               @click="ui.theme = t.value"
             >
               <Icon :name="t.icon" />
@@ -800,6 +905,7 @@ function exportPublicApiDocument() {
               type="button"
               class="bbs-seg"
               :class="{ 'is-on': ui.navPosition === n.value }"
+              :aria-pressed="ui.navPosition === n.value"
               @click="ui.navPosition = n.value"
             >
               {{ n.label }}
@@ -851,6 +957,7 @@ function exportPublicApiDocument() {
                 type="button"
                 class="bbs-seg"
                 :class="{ 'is-on': ui.orbShape === s.value }"
+                :aria-pressed="ui.orbShape === s.value"
                 @click="ui.orbShape = s.value"
               >
                 {{ s.label }}
@@ -895,44 +1002,8 @@ function exportPublicApiDocument() {
         </Collapsible>
       </Collapsible>
 
-      <!-- 副 API -->
-      <Collapsible title="副 API" :open="false">
-        <!-- 任务指派 -->
-        <div class="bbs-field bbs-assign">
-          <div class="bbs-assign-row">
-            <span class="bbs-field-label">摘要使用</span>
-            <BbsSelect v-model="apiSettings.assignments.summary" :options="channelOptions" class="bbs-assign-select" aria-label="摘要使用的渠道" />
-          </div>
-          <div class="bbs-assign-row">
-            <span class="bbs-field-label">总结使用</span>
-            <BbsSelect v-model="apiSettings.assignments.resummary" :options="channelOptions" class="bbs-assign-select" aria-label="总结使用的渠道" />
-          </div>
-        </div>
-        <p class="bbs-field-hint">推荐使用DeepSeek或豆包，不推荐Gemini，甲太厚</p>
-
-        <hr class="bbs-rule" />
-
-        <!-- 渠道:顶部添加按钮 + 紧凑只读列表(点行进弹窗编辑),不再一长列表单平铺 -->
-        <div class="bbs-channel-bar">
-          <span class="bbs-field-label">渠道</span>
-          <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="addChannel('api')">
-            <Icon name="plus" /> 添加渠道
-          </button>
-        </div>
-
-        <ul v-if="apiSettings.channels.length" class="bbs-channel-list">
-          <li v-for="ch in apiSettings.channels" :key="ch.id" class="bbs-channel-item">
-            <button class="bbs-channel-open" type="button" @click="openChannel(ch.id)">
-              <span class="bbs-channel-item-name">{{ ch.name || '未命名渠道' }}</span>
-              <span class="bbs-channel-item-model">{{ ch.model || '未设模型' }}</span>
-            </button>
-          </li>
-        </ul>
-        <p v-else class="bbs-field-hint">还没有渠道。点「添加渠道」配置摘要/总结要用的 API。</p>
-      </Collapsible>
-
-      <!-- 摘要设置 -->
-      <Collapsible title="摘要设置" :open="false">
+      <Collapsible class="prism-settings-card prism-card-wide" title="摘要设置" :open="true">
+        <p class="prism-card-intro">控制全文保留、分层压缩与失败重试。下方参数沿用现有含义，不因界面改版改变。</p>
         <label class="bbs-switch-row">
           <span class="bbs-field-label">启用自动摘要</span>
           <input v-model="apiSettings.autoSummaryEnabled" type="checkbox" class="bbs-checkbox" />
@@ -980,9 +1051,18 @@ function exportPublicApiDocument() {
         <p class="bbs-field-hint">摘要/总结请求失败(报错或返回内容无法解析)时最多额外重试几次,0 为不重试。默认 1。</p>
         <p class="bbs-field-hint">批量补摘按楼序逐楼生成完整记忆，每楼保存人物、物品与计划后再处理下一楼；失败时停止，可在当前楼完成后取消。内置摘要上限：详细 300、精简 150 字符（含标点）；超长会进入上述有限重试，失败保留旧摘要。</p>
       </Collapsible>
+          </div>
+        </section>
 
-      <!-- 注入设置 -->
-      <Collapsible title="注入设置" :open="false">
+        <section class="prism-settings-group prism-group-memory" aria-labelledby="prism-settings-memory">
+          <header class="prism-group-head">
+            <span class="prism-group-number" aria-hidden="true">02</span>
+            <div><h2 id="prism-settings-memory" tabindex="-1">记忆与召回</h2><p>决定主模型能看到什么，以及如何从旧记忆中找回相关线索。</p></div>
+            <span class="prism-group-tag">按需开启</span>
+          </header>
+          <div class="prism-group-cards">
+      <Collapsible class="prism-settings-card" title="注入设置" :open="true">
+        <p class="prism-card-intro">管理主对话的记忆预算、时间标签和状态内容；开关依赖关系保持不变。</p>
         <p v-if="apiSettings.autoSummaryEnabled && !fitTimeTagPrompt(timeTagPrompt())" class="bbs-field-hint">⚠ 当前时间指令超过预算份额,已整块停用。请提高预算或缩短自定义时间指令。</p>
         <label class="bbs-switch-row"><span class="bbs-field-label">记忆注入估算预算</span><input v-model.number="apiSettings.memoryBudgetTokens" class="bbs-input" type="number" min="0" max="50000" step="500" /></label>
         <p class="bbs-field-hint">默认 6000,0 为不限;非零最少按 2000 计算。按 UTF-8 字节估算,不等于真实模型 token。历史/状态/时间指令/召回分别占 45%/35%/5%/15%,未用份额不挪用。超额只省略完整条目,不删除存档;过长时间指令整块停用。预算不含聊天正文、角色卡及其他插件。旧向量召回槽在修改预算后清空,下次生成重算。</p>
@@ -1039,148 +1119,8 @@ function exportPublicApiDocument() {
         <p class="bbs-field-hint">随身/可达物品发全量,他处寄存仅名与数量;依赖场景信息。</p>
       </Collapsible>
 
-      <!-- 排除角色 -->
-      <Collapsible title="排除角色" :open="false">
-        <p class="bbs-field-hint">勾选的角色名(含同名的重名卡)所在聊天里,棱镜宝书的所有功能都不生效——不摘要、不隐藏、不注入、不拦截。适合工具性、不需要记忆的角色。</p>
-        <div class="bbs-channel-bar">
-          <span class="bbs-field-label">
-            已排除 {{ apiSettings.excludedChars.length }} 个
-          </span>
-          <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="openExclude">
-            <Icon name="edit" /> 编辑名单
-          </button>
-        </div>
-        <ul v-if="apiSettings.excludedChars.length" class="bbs-exclude-chips">
-          <li v-for="name in apiSettings.excludedChars" :key="name" class="bbs-exclude-chip">
-            <span class="bbs-exclude-chip-name">{{ name }}</span>
-            <button class="bbs-exclude-chip-x" type="button" title="移出名单" @click="toggleExcluded(name)">
-              <Icon name="close" />
-            </button>
-          </li>
-        </ul>
-        <p v-else class="bbs-field-hint">名单为空,所有角色都启用记忆系统。</p>
-      </Collapsible>
-
-      <!-- 排除世界书内容 -->
-      <Collapsible title="排除世界书内容" :open="false">
-        <p class="bbs-field-hint">
-          摘要 / 总结时会激活世界书当参考。这里可剔除对剧情记忆无用的条目——如全局挂载的附加知识书、
-          规则说明等,既省 token 也避免干扰。仅影响摘要副 API,不改变你主对话里的世界书。
-        </p>
-
-        <!-- 渲染世界书模板:配合「提示词模板(ST-Prompt-Template)」等插件 -->
-        <label class="bbs-switch-row">
-          <span class="bbs-field-label">渲染世界书模板</span>
-          <input v-model="apiSettings.renderWorldInfoTemplates" type="checkbox" class="bbs-checkbox" />
-        </label>
-        <p class="bbs-field-hint">
-          开启后会兼容提示词模板（ejs）的世界书条目
-        </p>
-
-        <hr class="bbs-rule" />
-
-        <!-- 整本排除:复刻排除角色的搜索+勾选弹窗 -->
-        <div class="bbs-channel-bar">
-          <span class="bbs-field-label">整本排除 · 已选 {{ apiSettings.excludedWorldNames.length }} 本</span>
-          <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="openExcludeWorld">
-            <Icon name="edit" /> 编辑名单
-          </button>
-        </div>
-        <ul v-if="apiSettings.excludedWorldNames.length" class="bbs-exclude-chips">
-          <li v-for="name in apiSettings.excludedWorldNames" :key="name" class="bbs-exclude-chip">
-            <span class="bbs-exclude-chip-name">{{ name }}</span>
-            <button class="bbs-exclude-chip-x" type="button" title="移出名单" @click="toggleWorldExcluded(name)">
-              <Icon name="close" />
-            </button>
-          </li>
-        </ul>
-        <p v-else class="bbs-field-hint">未排除任何世界书,全部激活条目都会进摘要参考。</p>
-
-        <hr class="bbs-rule" />
-
-        <!-- 按条目名过滤:复刻清洗标签的输入框 + chips -->
-        <div class="bbs-field-head">
-          <span class="bbs-field-label">按条目名过滤</span>
-        </div>
-        <p class="bbs-field-hint">
-          填条目备注名(comment)即按<strong>包含</strong>匹配(不分大小写)——如填 <code>附加</code> 可命中「附加设定」。
-          也支持正则:<code>^规则</code> 表示以「规则」开头。对上面未整本排除的世界书生效。
-          默认预置一条 <code>\[mvu[\s\S]*?\]</code>,过滤变量框架 MVU 的机制条目;不需要可直接删。
-        </p>
-        <div class="bbs-striptag-bar">
-          <input
-            v-model="wiPatternDraft"
-            class="bbs-input"
-            type="text"
-            placeholder="条目名或正则,如 附加 或 ^规则"
-            @keydown.enter.prevent="addWiPattern"
-          />
-          <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="addWiPattern">
-            <Icon name="plus" /> 添加
-          </button>
-        </div>
-        <ul v-if="apiSettings.excludedWorldInfoPatterns.length" class="bbs-exclude-chips">
-          <li v-for="pat in apiSettings.excludedWorldInfoPatterns" :key="pat" class="bbs-exclude-chip">
-            <span class="bbs-exclude-chip-name">{{ pat }}</span>
-            <button class="bbs-exclude-chip-x" type="button" title="移除" @click="removeWiPattern(pat)">
-              <Icon name="close" />
-            </button>
-          </li>
-        </ul>
-        <p v-else class="bbs-field-hint">暂无条目名规则。</p>
-      </Collapsible>
-
-      <!-- 自定义清洗标签 -->
-      <Collapsible title="自定义清洗标签" :open="false">
-        <p class="bbs-field-hint">
-          正文里若混入其它插件/世界书写的格式块(如状态栏 <code>&lt;snow&gt;…&lt;/snow&gt;</code>),
-          可在此填入标签名(只填 <code>snow</code>,不带尖括号),摘要、向量索引与召回时会把整块连内容一并删掉。
-          调整后对**召回**即时生效(向量库存原文、召回再清洗),无需重建索引。
-        </p>
-        <div class="bbs-striptag-bar">
-          <input
-            v-model="stripTagDraft"
-            class="bbs-input"
-            type="text"
-            placeholder="标签名,如 snow"
-            @keydown.enter.prevent="addStripTag"
-          />
-          <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="addStripTag">
-            <Icon name="plus" /> 添加
-          </button>
-        </div>
-        <ul v-if="apiSettings.customStripTags.length" class="bbs-exclude-chips">
-          <li v-for="tag in apiSettings.customStripTags" :key="tag" class="bbs-exclude-chip">
-            <span class="bbs-exclude-chip-name">&lt;{{ tag }}&gt;</span>
-            <button class="bbs-exclude-chip-x" type="button" title="移除" @click="removeStripTag(tag)">
-              <Icon name="close" />
-            </button>
-          </li>
-        </ul>
-        <p v-else class="bbs-field-hint">暂无自定义标签。仅内置清洗(思维链、注释、物品旁注等)生效。</p>
-      </Collapsible>
-
-      <!-- 自定义提示词 -->
-      <Collapsible title="自定义提示词" :open="false">
-        <label class="bbs-switch-row"><span class="bbs-field-label">任务说明模式</span>
-          <select v-model="apiSettings.taskContextMode" class="bbs-input"><option value="default">内置中性说明</option><option value="custom">自定义(允许空白)</option><option value="disabled">禁用</option></select>
-        </label>
-        <p class="bbs-field-hint">旧自定义文本会保留。保存自定义任务说明会切换到自定义模式;恢复默认并保存会使用新版中性说明。禁用只关闭附加说明,不关闭必要的输出格式规则。</p>
-        <ul class="bbs-prompt-list">
-          <li v-for="m in PROMPT_METAS" :key="m.key" class="bbs-prompt-item">
-            <button class="bbs-prompt-open" type="button" @click="openPrompt(m)">
-              <span class="bbs-prompt-name">{{ m.label }}</span>
-              <span class="bbs-prompt-state" :class="{ 'is-custom': isCustom(m.key) }">
-                {{ m.key === 'jailbreak' && apiSettings.taskContextMode === 'disabled' ? '已禁用' : isCustom(m.key) ? '已自定义' : '默认' }}
-              </span>
-              <Icon name="edit" class="bbs-prompt-edit" />
-            </button>
-          </li>
-        </ul>
-      </Collapsible>
-
-      <!-- 向量记忆 -->
-      <Collapsible title="向量记忆" :open="false">
+      <Collapsible class="prism-settings-card" title="向量记忆" :open="true">
+        <p class="prism-card-intro">启用后配置三个模型角色。端点标题下显示已填模型；连接情况以实际操作结果为准。</p>
         <label class="bbs-switch-row bbs-vec-enable">
           <span class="bbs-field-label">启用向量记忆</span>
           <input v-model="apiSettings.vector.enabled" type="checkbox" class="bbs-checkbox" />
@@ -1202,11 +1142,14 @@ function exportPublicApiDocument() {
             :aria-expanded="vecEpOpen[role.key]"
             @click="vecEpOpen[role.key] = !vecEpOpen[role.key]"
           >
-            <span class="bbs-field-label">{{ role.label }}</span>
+            <span class="prism-endpoint-heading">
+              <span class="bbs-field-label">{{ role.label }}</span>
+              <span class="prism-endpoint-model">{{ apiSettings.vector[role.key].model || '尚未填写模型' }}</span>
+            </span>
             <Icon name="chevron" class="bbs-vec-chevron" />
           </button>
 
-          <div class="bbs-vec-ep-outer">
+          <div class="bbs-vec-ep-outer" :inert="!vecEpOpen[role.key]" :aria-hidden="!vecEpOpen[role.key]">
             <div class="bbs-vec-ep-inner">
           <div class="bbs-vec-ep-body">
           <p v-if="role.key !== 'embedding'" class="bbs-field-hint">地址 / 密钥留空即复用 Embedding;模型仍需各自填写。</p>
@@ -1234,7 +1177,7 @@ function exportPublicApiDocument() {
               <button
                 class="bbs-icon-mini"
                 type="button"
-                :title="vecShowKey[role.key] ? '隐藏密钥' : '显示密钥'"
+                :title="vecShowKey[role.key] ? '隐藏密钥' : '显示密钥'" :aria-label="vecShowKey[role.key] ? '隐藏密钥' : '显示密钥'"
                 @click="vecShowKey[role.key] = !vecShowKey[role.key]"
               >
                 <Icon :name="vecShowKey[role.key] ? 'eye-off' : 'eye'" />
@@ -1279,7 +1222,7 @@ function exportPublicApiDocument() {
               <button
                 class="bbs-icon-mini"
                 type="button"
-                :title="vecLoadingModels[role.key] ? '拉取中…' : '拉取模型'"
+                :title="vecLoadingModels[role.key] ? '拉取中…' : '拉取模型'" :aria-label="vecLoadingModels[role.key] ? '拉取中…' : '拉取模型'"
                 :disabled="!apiSettings.vector.enabled || vecLoadingModels[role.key]"
                 @click="pullVecModels(role.key)"
               >
@@ -1336,7 +1279,7 @@ function exportPublicApiDocument() {
               />
             </label>
             <p class="bbs-field-hint">
-              使用上方任务说明模式;禁用或自定义空白时不附加。无需为了检索重写把输出上限设成超大值。
+              使用「提示词工作台」中的任务说明模式;禁用或自定义空白时不附加。无需为了检索重写把输出上限设成超大值。
             </p>
           </template>
           </div>
@@ -1565,9 +1508,172 @@ function exportPublicApiDocument() {
           </div>
         </Collapsible>
       </Collapsible>
+          </div>
+        </section>
 
-      <!-- 带数据创建新对话 -->
-      <Collapsible title="带数据创建新对话" :open="false">
+        <section class="prism-settings-group prism-group-prompts" aria-labelledby="prism-settings-prompts">
+          <header class="prism-group-head">
+            <span class="prism-group-number" aria-hidden="true">03</span>
+            <div><h2 id="prism-settings-prompts" tabindex="-1">提示词工作台</h2><p>保留内置模板，也支持逐项定制。恢复默认仅修改草稿，点「完成」后生效。</p></div>
+            <span class="prism-group-tag">高级 · 模板</span>
+          </header>
+          <div class="prism-group-cards">
+      <Collapsible class="prism-settings-card" title="自定义提示词" :open="true">
+        <p class="prism-card-intro">点击任意模板进入编辑器，可插入宏、取消修改或恢复内置默认。</p>
+        <label class="bbs-switch-row"><span class="bbs-field-label">任务说明模式</span>
+          <select v-model="apiSettings.taskContextMode" class="bbs-input"><option value="default">内置中性说明</option><option value="custom">自定义(允许空白)</option><option value="disabled">禁用</option></select>
+        </label>
+        <p class="bbs-field-hint">旧自定义文本会保留。保存自定义任务说明会切换到自定义模式;恢复默认并保存会使用新版中性说明。禁用只关闭附加说明,不关闭必要的输出格式规则。</p>
+        <ul class="bbs-prompt-list">
+          <li v-for="m in PROMPT_METAS" :key="m.key" class="bbs-prompt-item">
+            <button class="bbs-prompt-open" type="button" @click="openPrompt(m)">
+              <span class="bbs-prompt-name">{{ m.label }}</span>
+              <span class="bbs-prompt-state" :class="{ 'is-custom': isCustom(m.key) }">
+                {{ m.key === 'jailbreak' && apiSettings.taskContextMode === 'disabled' ? '已禁用' : isCustom(m.key) ? '已自定义' : '默认' }}
+              </span>
+              <Icon name="edit" class="bbs-prompt-edit" />
+            </button>
+          </li>
+        </ul>
+      </Collapsible>
+          </div>
+        </section>
+
+        <section class="prism-settings-group prism-group-advanced" aria-labelledby="prism-settings-advanced">
+          <header class="prism-group-head">
+            <span class="prism-group-number" aria-hidden="true">04</span>
+            <div><h2 id="prism-settings-advanced" tabindex="-1">高级过滤</h2><p>只在需要时调整排除范围与清洗规则；展开对应分组即可编辑。</p></div>
+            <span class="prism-group-tag">高级 · 输入范围</span>
+          </header>
+          <div class="prism-group-cards">
+      <Collapsible class="prism-settings-card" title="排除角色" :open="false">
+        <p class="bbs-field-hint">勾选的角色名(含同名的重名卡)所在聊天里,棱镜宝书的所有功能都不生效——不摘要、不隐藏、不注入、不拦截。适合工具性、不需要记忆的角色。</p>
+        <div class="bbs-channel-bar">
+          <span class="bbs-field-label">
+            已排除 {{ apiSettings.excludedChars.length }} 个
+          </span>
+          <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="openExclude">
+            <Icon name="edit" /> 编辑名单
+          </button>
+        </div>
+        <ul v-if="apiSettings.excludedChars.length" class="bbs-exclude-chips">
+          <li v-for="name in apiSettings.excludedChars" :key="name" class="bbs-exclude-chip">
+            <span class="bbs-exclude-chip-name">{{ name }}</span>
+            <button class="bbs-exclude-chip-x" type="button" title="移出名单" aria-label="移出名单" @click="toggleExcluded(name)">
+              <Icon name="close" />
+            </button>
+          </li>
+        </ul>
+        <p v-else class="bbs-field-hint">名单为空,所有角色都启用记忆系统。</p>
+      </Collapsible>
+
+      <Collapsible class="prism-settings-card" title="排除世界书内容" :open="false">
+        <p class="bbs-field-hint">
+          摘要 / 总结时会激活世界书当参考。这里可剔除对剧情记忆无用的条目——如全局挂载的附加知识书、
+          规则说明等,既省 token 也避免干扰。仅影响摘要副 API,不改变你主对话里的世界书。
+        </p>
+
+        <!-- 渲染世界书模板:配合「提示词模板(ST-Prompt-Template)」等插件 -->
+        <label class="bbs-switch-row">
+          <span class="bbs-field-label">渲染世界书模板</span>
+          <input v-model="apiSettings.renderWorldInfoTemplates" type="checkbox" class="bbs-checkbox" />
+        </label>
+        <p class="bbs-field-hint">
+          开启后会兼容提示词模板（ejs）的世界书条目
+        </p>
+
+        <hr class="bbs-rule" />
+
+        <!-- 整本排除:复刻排除角色的搜索+勾选弹窗 -->
+        <div class="bbs-channel-bar">
+          <span class="bbs-field-label">整本排除 · 已选 {{ apiSettings.excludedWorldNames.length }} 本</span>
+          <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="openExcludeWorld">
+            <Icon name="edit" /> 编辑名单
+          </button>
+        </div>
+        <ul v-if="apiSettings.excludedWorldNames.length" class="bbs-exclude-chips">
+          <li v-for="name in apiSettings.excludedWorldNames" :key="name" class="bbs-exclude-chip">
+            <span class="bbs-exclude-chip-name">{{ name }}</span>
+            <button class="bbs-exclude-chip-x" type="button" title="移出名单" aria-label="移出名单" @click="toggleWorldExcluded(name)">
+              <Icon name="close" />
+            </button>
+          </li>
+        </ul>
+        <p v-else class="bbs-field-hint">未排除任何世界书,全部激活条目都会进摘要参考。</p>
+
+        <hr class="bbs-rule" />
+
+        <!-- 按条目名过滤:复刻清洗标签的输入框 + chips -->
+        <div class="bbs-field-head">
+          <span class="bbs-field-label">按条目名过滤</span>
+        </div>
+        <p class="bbs-field-hint">
+          填条目备注名(comment)即按<strong>包含</strong>匹配(不分大小写)——如填 <code>附加</code> 可命中「附加设定」。
+          也支持正则:<code>^规则</code> 表示以「规则」开头。对上面未整本排除的世界书生效。
+          默认预置一条 <code>\[mvu[\s\S]*?\]</code>,过滤变量框架 MVU 的机制条目;不需要可直接删。
+        </p>
+        <div class="bbs-striptag-bar">
+          <input
+            v-model="wiPatternDraft"
+            class="bbs-input"
+            type="text"
+            placeholder="条目名或正则,如 附加 或 ^规则"
+            @keydown.enter.prevent="addWiPattern"
+          />
+          <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="addWiPattern">
+            <Icon name="plus" /> 添加
+          </button>
+        </div>
+        <ul v-if="apiSettings.excludedWorldInfoPatterns.length" class="bbs-exclude-chips">
+          <li v-for="pat in apiSettings.excludedWorldInfoPatterns" :key="pat" class="bbs-exclude-chip">
+            <span class="bbs-exclude-chip-name">{{ pat }}</span>
+            <button class="bbs-exclude-chip-x" type="button" title="移除" aria-label="移除" @click="removeWiPattern(pat)">
+              <Icon name="close" />
+            </button>
+          </li>
+        </ul>
+        <p v-else class="bbs-field-hint">暂无条目名规则。</p>
+      </Collapsible>
+
+      <Collapsible class="prism-settings-card" title="自定义清洗标签" :open="false">
+        <p class="bbs-field-hint">
+          正文里若混入其它插件/世界书写的格式块(如状态栏 <code>&lt;snow&gt;…&lt;/snow&gt;</code>),
+          可在此填入标签名(只填 <code>snow</code>,不带尖括号),摘要、向量索引与召回时会把整块连内容一并删掉。
+          调整后对**召回**即时生效(向量库存原文、召回再清洗),无需重建索引。
+        </p>
+        <div class="bbs-striptag-bar">
+          <input
+            v-model="stripTagDraft"
+            class="bbs-input"
+            type="text"
+            placeholder="标签名,如 snow"
+            @keydown.enter.prevent="addStripTag"
+          />
+          <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="addStripTag">
+            <Icon name="plus" /> 添加
+          </button>
+        </div>
+        <ul v-if="apiSettings.customStripTags.length" class="bbs-exclude-chips">
+          <li v-for="tag in apiSettings.customStripTags" :key="tag" class="bbs-exclude-chip">
+            <span class="bbs-exclude-chip-name">&lt;{{ tag }}&gt;</span>
+            <button class="bbs-exclude-chip-x" type="button" title="移除" aria-label="移除" @click="removeStripTag(tag)">
+              <Icon name="close" />
+            </button>
+          </li>
+        </ul>
+        <p v-else class="bbs-field-hint">暂无自定义标签。仅内置清洗(思维链、注释、物品旁注等)生效。</p>
+      </Collapsible>
+          </div>
+        </section>
+
+        <section class="prism-settings-group prism-group-data" aria-labelledby="prism-settings-data">
+          <header class="prism-group-head">
+            <span class="prism-group-number" aria-hidden="true">05</span>
+            <div><h2 id="prism-settings-data" tabindex="-1">数据与迁移</h2><p>延续已有记忆、迁入旧版数据，或将记忆接入其他工具。操作前请阅读说明。</p></div>
+            <span class="prism-group-tag">维护工具</span>
+          </header>
+          <div class="prism-group-cards">
+      <Collapsible class="prism-settings-card" title="带数据创建新对话" :open="false">
         <p class="bbs-field-hint">
           把当前聊天的「最近全文窗口 + 合并历史摘要 + 当前状态(时间/地点、场景、物品、角色、计划、变量)」打包,创建一个新对话带过去。
           新对话从一片「种子叶子」重放还原状态,旧剧情作为摘要随行;若开了向量记忆,旧聊天会被快照,
@@ -1587,8 +1693,7 @@ function exportPublicApiDocument() {
         <p v-if="carryMsg" class="bbs-field-hint">{{ carryMsg }}</p>
       </Collapsible>
 
-      <!-- 从旧版 Horae 迁移 -->
-      <Collapsible title="从旧版 Horae 迁移" :open="false">
+      <Collapsible class="prism-settings-card" title="从旧版 Horae 迁移" :open="false">
         <p class="bbs-field-hint">
           把当前聊天里旧版 Horae 的摘要、物品、计划迁移过来。需要迁移的聊天各点一次,不会动 Horae 原数据。
         </p>
@@ -1611,8 +1716,7 @@ function exportPublicApiDocument() {
         <p v-if="migrateMsg" class="bbs-field-hint">{{ migrateMsg }}</p>
       </Collapsible>
 
-      <!-- 获取数据 -->
-      <Collapsible title="获取数据" :open="false">
+      <Collapsible class="prism-settings-card" title="获取数据" :open="false">
         <p class="bbs-field-hint bbs-data-intro">
           宏可用于提示词、变量说明和支持 ST 宏的其他位置。完整接口、命令和返回结构可导出为插件作者文档。
         </p>
@@ -1649,7 +1753,11 @@ function exportPublicApiDocument() {
           </button>
         </div>
       </Collapsible>
+          </div>
+        </section>
+      </div>
     </div>
+    <p class="prism-settings-footnote">{{ INTERNAL_UPDATE_NOTICE }} 原作：柏柏；本版为棱镜宝书内部维护版。</p>
 
     <!-- 带数据创建新对话 / Horae 迁移 的确认弹窗 -->
     <ConfirmDialog
@@ -1674,7 +1782,7 @@ function exportPublicApiDocument() {
       <div v-if="editingChannel" class="bbs-modal" role="dialog" aria-modal="true" aria-label="编辑渠道">
         <header class="bbs-modal-head">
           <span class="bbs-modal-title">编辑渠道</span>
-          <button class="bbs-icon-mini" type="button" title="关闭" @click="closeChannel"><Icon name="close" /></button>
+          <button class="bbs-icon-mini" type="button" title="关闭渠道编辑窗口" aria-label="关闭渠道编辑窗口" @click="closeChannel"><Icon name="close" /></button>
         </header>
 
         <label class="bbs-modal-field">
@@ -1697,7 +1805,7 @@ function exportPublicApiDocument() {
             <button
               class="bbs-icon-mini"
               type="button"
-              :title="showKey ? '隐藏密钥' : '显示密钥'"
+              :title="showKey ? '隐藏密钥' : '显示密钥'" :aria-label="showKey ? '隐藏密钥' : '显示密钥'"
               :aria-pressed="showKey"
               @click="showKey = !showKey"
             >
@@ -1736,7 +1844,7 @@ function exportPublicApiDocument() {
             <button
               class="bbs-icon-mini"
               type="button"
-              :title="loadingModels[editingChannel.id] ? '拉取中…' : '拉取模型'"
+              :title="loadingModels[editingChannel.id] ? '拉取中…' : '拉取模型'" :aria-label="loadingModels[editingChannel.id] ? '拉取中…' : '拉取模型'"
               :disabled="loadingModels[editingChannel.id]"
               @click="pullModels(editingChannel)"
             >
@@ -1825,10 +1933,11 @@ function exportPublicApiDocument() {
       <div v-if="editingPrompt" class="bbs-modal bbs-modal-wide" role="dialog" aria-modal="true" :aria-label="`编辑${editingPrompt.label}`">
         <header class="bbs-modal-head">
           <span class="bbs-modal-title">编辑{{ editingPrompt.label }}</span>
-          <button class="bbs-icon-mini" type="button" title="关闭" @click="closePrompt"><Icon name="close" /></button>
+          <button class="bbs-icon-mini" type="button" title="关闭提示词编辑窗口" aria-label="关闭提示词编辑窗口" @click="closePrompt"><Icon name="close" /></button>
         </header>
 
         <p class="bbs-modal-label">{{ editingPrompt.hint }}</p>
+        <p class="prism-editor-note">当前为编辑草稿。恢复默认后仍需点「完成」保存；点「取消」不会更改已保存的提示词。</p>
 
         <!-- 可用宏:点一下插入到光标处 -->
         <div class="bbs-macro-bar">
@@ -1849,6 +1958,7 @@ function exportPublicApiDocument() {
           ref="promptArea"
           v-model="promptDraft"
           class="bbs-input bbs-prompt-area"
+          :aria-label="editingPrompt.label + '正文'"
           spellcheck="false"
           rows="16"
         ></textarea>
@@ -1869,7 +1979,7 @@ function exportPublicApiDocument() {
       <div class="bbs-modal" role="dialog" aria-modal="true" aria-label="编辑排除名单">
         <header class="bbs-modal-head">
           <span class="bbs-modal-title">排除角色</span>
-          <button class="bbs-icon-mini" type="button" title="关闭" @click="closeExclude"><Icon name="close" /></button>
+          <button class="bbs-icon-mini" type="button" title="关闭角色排除名单" aria-label="关闭角色排除名单" @click="closeExclude"><Icon name="close" /></button>
         </header>
 
         <input
@@ -1907,7 +2017,7 @@ function exportPublicApiDocument() {
       <div class="bbs-modal" role="dialog" aria-modal="true" aria-label="编辑排除世界书名单">
         <header class="bbs-modal-head">
           <span class="bbs-modal-title">整本排除世界书</span>
-          <button class="bbs-icon-mini" type="button" title="关闭" @click="closeExcludeWorld"><Icon name="close" /></button>
+          <button class="bbs-icon-mini" type="button" title="关闭世界书排除名单" aria-label="关闭世界书排除名单" @click="closeExcludeWorld"><Icon name="close" /></button>
         </header>
 
         <input
@@ -1966,41 +2076,23 @@ function exportPublicApiDocument() {
   gap: 12px;
 }
 
-/* —— 标题行:左标题 + 右版本号(及更新按钮) —— */
-.bbs-page-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
 .bbs-ver-row {
   display: inline-flex;
   align-items: center;
   gap: 8px;
 }
-/* 版本标签:实心强调底 + 白字(粉彩=粉底白字,各主题随 --bbs-accent 自适应) */
+/* 版本仅展示真实版本号，不暗示可点击。 */
 .bbs-ver {
-  border: 0;
-  padding: 7px 12px;
+  display: inline-flex;
+  padding: 7px 10px;
+  border: 1px solid var(--bbs-line);
   border-radius: var(--bbs-radius-pill);
-  background: var(--bbs-accent);
-  color: var(--bbs-accent-ink);
-  cursor: pointer;
+  background: var(--bbs-surface-2);
+  color: var(--bbs-ink-soft);
   font-family: var(--bbs-font-mono);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1;
-  transition: opacity var(--bbs-dur) var(--bbs-ease);
-}
-.bbs-ver:hover {
-  opacity: 0.88;
-}
-.bbs-ver:disabled {
-  cursor: default;
-}
-.bbs-ver:focus-visible {
-  outline: 2px solid var(--bbs-accent);
-  outline-offset: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .bbs-field {
@@ -2497,7 +2589,6 @@ function exportPublicApiDocument() {
 }
 
 /* —— 总开关主控卡 —— */
-/* 左缘一道金色书脊,呼应「书」的品牌;停用时整卡褪色、书脊转灰,状态一眼可辨 */
 .bbs-master {
   display: flex;
   align-items: center;
@@ -2509,17 +2600,6 @@ function exportPublicApiDocument() {
   background: var(--bbs-surface);
   box-shadow: var(--bbs-shadow);
   transition: opacity var(--bbs-dur) var(--bbs-ease);
-}
-.bbs-master-spine {
-  flex: 0 0 auto;
-  align-self: stretch;
-  width: 4px;
-  border-radius: var(--bbs-radius-pill);
-  background: var(--bbs-accent);
-  transition: background var(--bbs-dur) var(--bbs-ease);
-}
-.bbs-master.is-off .bbs-master-spine {
-  background: var(--bbs-line-strong);
 }
 .bbs-master.is-off .bbs-master-text {
   opacity: 0.7;
@@ -3182,4 +3262,389 @@ function exportPublicApiDocument() {
     width: 100%;
   }
 }
+
+/* ================= 棱镜宝书 · 设置工作台 =================
+ * 只使用共享语义色；五种主题的 ID、选项与设置值均由原状态源提供。
+ * 容器断点按插件实际可用宽度生效，而非宿主浏览器宽度。
+ */
+.prism-settings {
+  min-width: 0;
+  container: prism-settings / inline-size;
+  color: var(--bbs-ink);
+  padding-bottom: 24px;
+}
+.prism-settings *,
+.bbs-modal * {
+  box-sizing: border-box;
+}
+.prism-settings :deep(.prism-page-header) {
+  flex-wrap: wrap;
+}
+.bbs-ver-row {
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.prism-overview {
+  border: 1px solid var(--bbs-line-strong);
+  border-radius: 20px;
+  background: var(--bbs-surface);
+  box-shadow: var(--bbs-card-shadow, var(--bbs-shadow));
+  overflow: hidden;
+  margin-bottom: 28px;
+}
+.prism-overview .bbs-master {
+  margin: 0;
+  padding: 24px;
+  gap: 16px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: linear-gradient(115deg, var(--bbs-accent-soft), var(--bbs-surface));
+}
+.prism-engine-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 16px;
+  background: var(--bbs-surface);
+  border: 1px solid var(--bbs-line);
+  color: var(--bbs-accent);
+  font-size: 25px;
+}
+.prism-eyebrow {
+  color: var(--bbs-accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .16em;
+}
+.bbs-master-title {
+  margin: 4px 0 0;
+  font-size: 18px;
+  line-height: 1.5;
+  font-weight: 650;
+}
+.prism-master-description {
+  color: var(--bbs-ink-soft);
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.prism-master-control {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.prism-state {
+  color: var(--bbs-accent);
+  background: var(--bbs-surface);
+  border: 1px solid var(--bbs-line);
+  padding: 3px 9px;
+  border-radius: var(--bbs-radius-pill);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.prism-state.is-muted { color: var(--bbs-ink-muted); }
+.bbs-master.is-off .bbs-master-text { opacity: 1; }
+.prism-status-grid {
+  margin: 0;
+  padding: 0 24px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 24px;
+}
+.prism-status-item {
+  min-width: 0;
+  padding: 18px 0;
+  border-top: 1px solid var(--bbs-line);
+}
+.prism-status-item dt {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--bbs-ink-muted);
+  font-size: 11px;
+}
+.prism-status-item dt :deep(svg) { color: var(--bbs-accent); }
+.prism-status-item dd { margin: 8px 0 0; }
+.prism-status-item strong {
+  display: block;
+  color: var(--bbs-ink);
+  font-size: 15px;
+  line-height: 1.5;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.prism-status-item dd > span {
+  display: block;
+  color: var(--bbs-ink-soft);
+  font-size: 11px;
+  line-height: 1.7;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+.prism-overview-note {
+  margin: 0;
+  padding: 12px 24px;
+  border-top: 1px solid var(--bbs-line);
+  color: var(--bbs-ink-muted);
+  background: var(--bbs-surface-2);
+  font-size: 11px;
+  line-height: 1.7;
+}
+.prism-settings-layout { display: grid; gap: 24px; min-width: 0; }
+.prism-settings-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-content: start;
+  align-items: stretch;
+  min-width: 0;
+}
+.prism-nav-label {
+  flex: 1 0 100%;
+  color: var(--bbs-ink-muted);
+  font-size: 10px;
+  letter-spacing: .12em;
+  margin-bottom: 2px;
+}
+.prism-settings-nav button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--bbs-line);
+  border-radius: 12px;
+  background: var(--bbs-surface);
+  color: var(--bbs-ink-soft);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.prism-settings-nav button:hover {
+  color: var(--bbs-accent);
+  border-color: var(--bbs-accent);
+  background: var(--bbs-accent-soft);
+}
+.prism-settings-nav button > span { min-width: 0; }
+.prism-settings-nav strong { display: block; font-size: 12px; font-weight: 600; }
+.prism-settings-nav small { display: none; font-size: 10px; margin-top: 4px; color: var(--bbs-ink-muted); }
+.prism-nav-arrow { display: none; }
+.bbs-sections { min-width: 0; gap: 32px; }
+.prism-settings-group { min-width: 0; }
+.prism-group-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 14px;
+  min-width: 0;
+}
+.prism-group-number {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border: 1px solid var(--bbs-line);
+  border-radius: 10px;
+  background: var(--bbs-accent-soft);
+  color: var(--bbs-accent);
+  font: 600 11px/1 var(--bbs-font-mono);
+}
+.prism-group-head > div { min-width: 0; flex: 1; }
+.prism-group-head h2 {
+  color: var(--bbs-ink);
+  font-size: 17px;
+  line-height: 1.5;
+  margin: 1px 0 4px;
+  font-weight: 650;
+  scroll-margin-block-start: 24px;
+}
+.prism-group-head p {
+  color: var(--bbs-ink-muted);
+  font-size: 12px;
+  line-height: 1.75;
+  margin: 0;
+}
+.prism-group-tag {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--bbs-line);
+  border-radius: var(--bbs-radius-pill);
+  color: var(--bbs-ink-soft);
+  background: var(--bbs-surface-2);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.prism-group-data .prism-group-tag {
+  color: var(--bbs-warning);
+  background: var(--bbs-warning-soft);
+}
+.prism-group-cards { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+.prism-settings-card {
+  min-width: 0;
+  border-radius: 16px;
+  box-shadow: var(--bbs-card-shadow, var(--bbs-shadow));
+}
+.prism-settings-card :deep(.bbs-collapsible-head) {
+  min-height: 52px;
+  gap: 12px;
+  padding: 16px 20px;
+  font-size: 14px;
+}
+.prism-settings-card :deep(.bbs-collapsible-title) { min-width: 0; overflow-wrap: anywhere; }
+.prism-settings-card :deep(.bbs-collapsible-body) { padding: 20px; }
+.prism-settings-card :deep(.bbs-collapsible) { box-shadow: none; }
+.prism-settings-card.is-open,
+.prism-settings-card :deep(.bbs-collapsible.is-open) { overflow: visible; }
+.prism-settings :deep(.bbs-collapsible.is-open > .bbs-collapsible-outer > .bbs-collapsible-inner) { overflow: visible; }
+.prism-settings :deep(.bbs-collapsible:not(.is-open) > .bbs-collapsible-outer) {
+  visibility: hidden;
+}
+.prism-card-intro {
+  margin: 0 0 18px;
+  padding: 0 0 14px;
+  border-bottom: 1px solid var(--bbs-line);
+  color: var(--bbs-ink-soft);
+  font-size: 12px;
+  line-height: 1.8;
+}
+.prism-settings .bbs-field-label { line-height: 1.6; overflow-wrap: anywhere; }
+.prism-settings .bbs-field-hint { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.bbs-switch-row,
+.bbs-num-row { gap: 20px; min-height: 46px; }
+.bbs-switch-row > .bbs-field-label,
+.bbs-num-row > .bbs-field-label { min-width: 0; flex: 1 1 auto; }
+.bbs-switch-row > .bbs-input:not([type='checkbox']) { flex: 0 1 240px; width: 48%; min-width: 0; }
+.bbs-num-row > .bbs-num { flex: 0 0 110px; width: 110px; }
+.prism-settings .bbs-input,
+.bbs-modal .bbs-input { min-width: 0; max-width: 100%; }
+.bbs-input:disabled { cursor: not-allowed; }
+.bbs-segmented { max-width: 100%; flex-wrap: wrap; border: 1px solid var(--bbs-line); }
+.bbs-seg { flex: 1 1 auto; min-height: 40px; justify-content: center; padding: 8px 12px; }
+.bbs-assign-row { flex-wrap: wrap; gap: 10px 20px; }
+.bbs-assign-row .bbs-assign-select { flex: 1 1 190px; min-width: 0; max-width: 100%; }
+.bbs-channel-bar { flex-wrap: wrap; }
+.bbs-channel-open { padding: 14px; min-height: 52px; }
+.prism-channel-edit { flex: 0 0 auto; color: var(--bbs-accent); font-size: 15px; }
+.bbs-channel-item-model { max-width: 48%; }
+.bbs-channel-list + .bbs-field-hint { margin-top: 12px; }
+.bbs-prompt-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.bbs-prompt-open { min-height: 58px; padding: 14px; }
+.bbs-prompt-item { min-width: 0; }
+.bbs-prompt-name { overflow-wrap: anywhere; line-height: 1.6; }
+.bbs-prompt-state { white-space: nowrap; }
+.bbs-vec-ep { padding: 16px; border-radius: 14px; }
+.bbs-vec-ep.is-disabled { opacity: 1; }
+.bbs-vec-ep.is-disabled .prism-endpoint-heading { color: var(--bbs-ink-muted); }
+.bbs-vec-toggle { min-height: 44px; }
+.prism-endpoint-heading { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.prism-endpoint-model { color: var(--bbs-ink-muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.bbs-vec-io { grid-template-columns: repeat(auto-fit, minmax(min(100%, 100px), 1fr)); }
+.bbs-vec-io-item { min-width: 0; }
+.bbs-vec-io .bbs-num-sm { width: 100%; }
+.bbs-vec-index-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.bbs-vec-backend.is-local { color: var(--bbs-warning); background: var(--bbs-warning-soft); border-color: var(--bbs-line); }
+.bbs-model-row { min-width: 0; }
+.bbs-model-row > .bbs-input { width: 0; min-width: 0; }
+.bbs-combo { min-width: 0; }
+.bbs-icon-mini { width: 40px; height: 40px; }
+.bbs-exclude-chip { max-width: 100%; padding: 4px 5px 4px 10px; }
+.bbs-exclude-chip-name { min-width: 0; overflow-wrap: anywhere; }
+.bbs-exclude-chip-x { flex-shrink: 0; width: 28px; height: 28px; }
+.bbs-exclude-chip-x:hover { background: var(--bbs-surface); }
+.bbs-striptag-bar { flex-wrap: wrap; }
+.bbs-striptag-bar .bbs-input { flex: 1 1 160px; }
+.bbs-dbg-banner { flex-wrap: wrap; }
+.bbs-dbg-head { flex-wrap: wrap; }
+.prism-settings-footnote { color: var(--bbs-ink-muted); font-size: 11px; line-height: 1.8; border-top: 1px solid var(--bbs-line); padding-top: 18px; margin: 28px 0 0; }
+.prism-editor-note { margin: 0; padding: 10px 12px; color: var(--bbs-ink-soft); background: var(--bbs-accent-soft); border-radius: 10px; font-size: 12px; line-height: 1.7; }
+.bbs-modal { min-width: 0; max-width: min(100%, 520px); }
+.bbs-modal-wide { max-width: min(100%, 680px); }
+.bbs-modal-head { gap: 12px; }
+.bbs-modal-title { min-width: 0; overflow-wrap: anywhere; }
+.bbs-modal-foot { flex-wrap: wrap; gap: 8px; }
+.bbs-modal .bbs-channel-row { grid-template-columns: repeat(auto-fit, minmax(min(100%, 110px), 1fr)); }
+.bbs-prompt-area { width: 100%; }
+.bbs-macro { max-width: 100%; overflow-wrap: anywhere; }
+.bbs-modal-field > .bbs-modal-label { line-height: 1.6; }
+.prism-settings :is(button, input, select, textarea):focus-visible,
+.bbs-modal :is(button, input, select, textarea):focus-visible,
+.prism-group-head h2:focus-visible {
+  outline: 2px solid var(--bbs-accent);
+  outline-offset: 3px;
+}
+@container prism-settings (min-width: 760px) {
+  .prism-status-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .prism-group-common .prism-group-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .prism-card-wide { grid-column: 1 / -1; }
+  .bbs-prompt-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container prism-settings (min-width: 1100px) {
+  .prism-settings-layout { grid-template-columns: 180px minmax(0, 1fr); gap: 28px; align-items: start; }
+  .prism-settings-nav { position: sticky; top: 20px; flex-direction: column; }
+  .prism-nav-label { flex-basis: auto; padding-left: 12px; }
+  .prism-settings-nav button { padding: 13px 12px; }
+  .prism-settings-nav button > span { flex: 1; }
+  .prism-settings-nav small { display: block; }
+  .prism-nav-arrow { display: block; transform: rotate(-90deg); font-size: 12px; }
+}
+@container prism-settings (max-width: 520px) {
+  .prism-overview { border-radius: 16px; margin-bottom: 20px; }
+  .prism-overview .bbs-master { padding: 18px 16px; gap: 10px; }
+  .prism-engine-icon { display: none; }
+  .bbs-master-title { font-size: 16px; }
+  .prism-master-control { gap: 8px; }
+  .prism-status-grid { padding: 0 16px; gap: 0 16px; }
+  .prism-status-item { padding: 14px 0; }
+  .prism-status-item strong { font-size: 14px; }
+  .prism-overview-note { padding: 12px 16px; }
+  .prism-settings-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .prism-nav-label { grid-column: 1 / -1; }
+  .prism-settings-nav button { padding: 10px; }
+  .prism-group-head { flex-wrap: wrap; gap: 8px; }
+  .prism-group-head > div { flex-basis: calc(100% - 42px); }
+  .prism-group-tag { margin-left: 38px; }
+  .prism-group-head h2 { font-size: 16px; }
+  .prism-settings-card :deep(.bbs-collapsible-head) { padding: 14px; }
+  .prism-settings-card :deep(.bbs-collapsible-body) { padding: 14px; }
+  .bbs-switch-row,
+  .bbs-num-row { gap: 12px; }
+  .bbs-switch-row:has(> .bbs-input:not([type='checkbox'])) { align-items: stretch; flex-direction: column; }
+  .bbs-switch-row > .bbs-input:not([type='checkbox']) { flex: initial; width: 100%; }
+  .bbs-num-row > .bbs-num { width: 88px; flex-basis: 88px; }
+  .bbs-assign-row { align-items: stretch; flex-direction: column; }
+  .bbs-assign-row .bbs-assign-select { flex: initial; width: 100%; }
+  .bbs-vec-ep { padding: 12px; }
+  .bbs-prompt-open { padding: 12px; gap: 8px; }
+  .bbs-prompt-name { font-size: 13px; }
+  .bbs-channel-open { flex-wrap: wrap; gap: 6px; }
+  .bbs-channel-item-name { flex-basis: calc(100% - 22px); }
+  .bbs-channel-item-model { order: 3; flex-basis: 100%; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+  .bbs-vec-index-actions .bbs-btn { width: 100%; justify-content: center; white-space: normal; }
+}
+@media (max-width: 420px) {
+  .bbs-modal { padding: 16px; }
+  .bbs-modal-head { top: -16px; margin: -16px -16px 0; padding: 16px 16px 12px; }
+  .bbs-modal-foot .bbs-modal-foot-spacer { display: none; }
+  .bbs-modal-foot .bbs-btn { flex: 1 1 auto; justify-content: center; }
+  .bbs-prompt-area { min-height: 220px; font-size: 13px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .prism-settings *, .prism-settings :deep(*), .bbs-modal * { transition: none !important; }
+}
+
+
+.prism-config-details { border-top:1px solid var(--bbs-line); }
+.prism-config-details > summary { cursor:pointer; padding:13px 24px; color:var(--bbs-ink-soft); font-size:12px; }
+.prism-config-details > summary span { margin-left:10px; color:var(--bbs-ink-muted); }
+.prism-config-details > summary:focus-visible { outline:2px solid var(--bbs-accent); outline-offset:-3px; }
+@media(max-width:640px){ .prism-config-details > summary { padding:12px 16px; } .prism-config-details > summary span { font-size:11px; } }
 </style>

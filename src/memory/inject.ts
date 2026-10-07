@@ -20,7 +20,7 @@ import { buildSceneLocationIndex, classifyNpcPresence, findCurrentSceneId, getLe
 import { fmtItems, fmtPlans, fmtResolvedPlans, renderVarsState, selectRecentResolvedPlans, MEMORY_BRIEFING_NOTE, MEMORY_BRIEFING_END } from './prompts';
 import { fmtLifeDetail } from './lifeDetails';
 import { fmtNpcAffinity, fmtNpcTiesContext, NPC_AFFINITY_BRIEFING } from './npcRelations';
-import { memory } from './store';
+import { memory, memoryWriteIssue } from './store';
 import { compactTimeLabel, formatRange, latestStoryTime, splitTimeLabel, timeTagPrompt } from './timeTag';
 import { relativeTimeLabel, weekdayLabel, ageDisplay, calculateRelativeDays } from './timeRel';
 import { selectViewNodes, selectLifeDetailsForInjection, type ViewNode } from './select';
@@ -690,6 +690,7 @@ export function estimateInjectionTokenBreakdown(): { summary: number; other: num
 
 /** 把当前记忆刷新到 ST 的扩展提示槽。ST 未就绪/旧版无此 API 时静默跳过。 */
 export function refreshInjection(): void {
+  if (memoryWriteIssue()) { clearInjection(); return; }
   // 引擎在此聊天不生效(总开关关 / 当前角色被排除):清掉已注入的槽。
   // 用 clearInjection 而非直接 return —— 切到被排除角色时必须抹掉上个聊天残留的注入。
   if (!engineActiveHere()) {

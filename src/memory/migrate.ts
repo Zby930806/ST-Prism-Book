@@ -21,7 +21,9 @@ import { getContext, type STMessage } from '@/st/context';
 import { toast } from '@/st/toast';
 import { isAiFloor, syncHiddenNow } from './engine';
 import { makeLeafId } from './apply';
-import { flushLeavesNow, memory, recomputeDerived, saveMemory } from './store';
+import { assertMemoryWritable, memoryWriteIssue, memory, recomputeDerived } from './store';
+import { inspectCompatibility } from './compatibility';
+import { MEMORY_KEY, MEMORY_VERSION } from './types';
 import type { ItemDelta, LeafExtra, MemSummary, StoredDelta } from './types';
 
 /* ============ Horae 源数据形状(只取迁移用得到的字段) ============ */
@@ -123,6 +125,8 @@ function parseHoraeItemName(raw: string): { name: string; qty?: number; consumed
 /* ============ 迁移计划(预览,纯只读) ============ */
 
 export interface MigrationPlan {
+  /** 禁止把保护态的空缓存当成可覆盖数据。 */
+  blockedReason?: string;
   /** 是否检测到任何 Horae 数据 */
   hasData: boolean;
   /** 有叙事可建叶子的 AI 楼数 */
@@ -224,6 +228,8 @@ function flattenHoraeSummaries(
 
 /** 计算迁移计划(只读,不产生副作用),供 UI 预览与按钮启停。 */
 export function computeMigrationPlan(): MigrationPlan {
+  const blockedReason = memoryWriteIssue();
+  if (blockedReason) return { hasData: false, leafFloors: 0, summaryCount: 0, itemCount: 0, planCount: 0, willOverwrite: false, blockedReason };
   const ctx = getContext();
   const chat = ctx?.getCurrentChatId?.() ? ctx?.chat ?? [] : [];
 
@@ -273,19 +279,35 @@ export async function runHoraeMigration(): Promise<boolean> {
     toast('请先进入一个聊天再迁移', 'warning');
     return false;
   }
-  const chat = ctx.chat ?? [];
-  if (!chat.length) {
-    toast('当前聊天为空,无可迁移数据', 'warning');
-    return false;
-  }
-
-  const plan = computeMigrationPlan();
-  if (!plan.hasData) {
-    toast('未在当前聊天检测到 Horae 旧数据', 'warning');
-    return false;
-  }
-
+  const sourceChat = ctx.chat;
+  const meta = ctx.chatMetadata;
+  const sourceId = ctx.getCurrentChatId();
+  const stillHere = () => {
+    const current = getContext();
+    return current?.chat === sourceChat && current?.chatMetadata === meta && current?.getCurrentChatId?.() === sourceId;
+  };
+  const requireSource = () => {
+    if (!stillHere()) throw new Error('迁移期间聊天归属已变化，停止后续操作');
+    assertMemoryWritable();
+  };
+  let rollback: (() => void) | undefined;
+  let persistenceStarted = false;
   try {
+    requireSource(); // 在读计划/快照之前阻断保护态与 V2 待转换。
+    if (!sourceChat?.length) {
+      toast('当前聊天为空,无可迁移数据', 'warning');
+      return false;
+    }
+    if (!meta || typeof ctx.saveChat !== 'function') {
+      throw new Error('宿主缺少可靠保存接口，未修改数据');
+    }
+    const plan = computeMigrationPlan();
+    if (!plan.hasData) {
+      toast('未在当前聊天检测到 Horae 旧数据', 'warning');
+      return false;
+    }
+    // 在独立候选上造叶子/折叠状态。构造中途失败不触碰任何原消息。
+    const chat: STMessage[] = JSON.parse(JSON.stringify(sourceChat));
     // ===== 1. 为每个有叙事的 AI 楼造叶子(时间点→时间段) =====
     // aiFloors:按楼序的 AI 楼索引;每层 timeEnd=本层时间点,timeStart=上一层时间点。
     const aiFloors: number[] = [];
@@ -409,15 +431,55 @@ export async function runHoraeMigration(): Promise<boolean> {
       });
     }
 
-    // ===== 4. 写回:森林覆盖,叶子已写进 extra;落盘 + 重算 =====
+    // 完整候选通过检查后才一次同步安装；保存分步等待，不声称磁盘原子性。
+    const oldRaw = meta[MEMORY_KEY];
+    const hadRaw = Object.prototype.hasOwnProperty.call(meta, MEMORY_KEY);
+    const candidate = {
+      ...(oldRaw as Record<string, unknown> | undefined),
+      version: MEMORY_VERSION,
+      summaries: newSummaries,
+    };
+    const report = inspectCompatibility(candidate, chat);
+    if (report.mode !== 'ready') throw new Error('迁移候选不完整：' + report.issues.join('；'));
+    const operations = [...leafIdByFloor.keys()].map(idx => ({
+      message: sourceChat[idx],
+      hadExtra: Object.prototype.hasOwnProperty.call(sourceChat[idx], 'extra'),
+      original: sourceChat[idx].extra,
+      candidate: chat[idx].extra,
+    }));
+    const oldSummaries = [...memory.summaries];
+    const candidateState = JSON.stringify({ extras: operations.map(op => op.candidate), raw: candidate, summaries: newSummaries });
+    requireSource(); // 首次修改前再检查。
+    rollback = () => {
+      // 不覆盖其他编辑，也不把旧聊天森林装进已经切换的全局缓存。
+      if (!stillHere() || meta[MEMORY_KEY] !== candidate ||
+          operations.some(op => op.message.extra !== op.candidate) ||
+          JSON.stringify({ extras: operations.map(op => op.message.extra), raw: meta[MEMORY_KEY], summaries: memory.summaries }) !== candidateState) return;
+      for (const op of operations) {
+        if (op.hadExtra) op.message.extra = op.original;
+        else delete op.message.extra;
+      }
+      if (hadRaw) meta[MEMORY_KEY] = oldRaw;
+      else delete meta[MEMORY_KEY];
+      memory.summaries.splice(0, memory.summaries.length, ...oldSummaries);
+      recomputeDerived();
+    };
+    for (const op of operations) op.message.extra = op.candidate;
+    meta[MEMORY_KEY] = candidate;
     memory.summaries.splice(0, memory.summaries.length, ...newSummaries);
     recomputeDerived();
-    saveMemory();
-    flushLeavesNow();
-    if (typeof ctx.saveMetadata === 'function') await ctx.saveMetadata();
-    // 检测一次隐藏:把已被摘要覆盖、滚出保留窗口的旧楼层隐藏掉(复用摘要收尾同款逻辑),
-    // 避免迁移后全文与摘要在上下文里重复;内部已含刷新注入。
+    requireSource();
+    persistenceStarted = true;
+    await ctx.saveChat();
+    requireSource();
+    if (typeof ctx.saveMetadata === 'function') {
+      await ctx.saveMetadata();
+      requireSource();
+    }
+    // 保存已确认后，隐藏刷新失败不撤销已保存的迁移。
+    rollback = undefined;
     await syncHiddenNow();
+    requireSource();
 
     toast(
       `迁移完成:叶子 ${leafIdByFloor.size} 片 / 总结 ${newSummaries.length} 条 / 物品 ${items.length} / 计划 ${plans?.add?.length ?? 0}`,
@@ -425,7 +487,9 @@ export async function runHoraeMigration(): Promise<boolean> {
     );
     return true;
   } catch (e) {
-    toast(`迁移失败:${e instanceof Error ? e.message : String(e)}`, 'error');
+    try { rollback?.(); } catch (restoreError) { console.error('[棱镜宝书] 恢复迁移内存失败:', restoreError); }
+    const warning = persistenceStarted ? '；保存可能已部分完成，请返回原聊天核对，未执行磁盘回滚' : '';
+    toast(`迁移失败:${e instanceof Error ? e.message : String(e)}${warning}`, 'error');
     console.error('[棱镜宝书] Horae 迁移失败:', e);
     return false;
   }

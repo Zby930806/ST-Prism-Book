@@ -16,6 +16,7 @@ import { fitMemoryUnits, estimateTokens, slotBudget } from '../budget';
 
 import { getContext, type STMessage } from '@/st/context';
 import { apiSettings, engineActiveHere } from '@/api/settings';
+import { memoryWriteIssue } from '../store';
 import type { VecHit } from '@/api/baibaoku';
 import { vecSearch } from './store';
 import { getLeaf, leafValid } from '../apply';
@@ -196,7 +197,74 @@ function buildRecallCacheKey(chat: STMessage[], cfg: typeof apiSettings.vector.r
   return `${chatId}|${userIdx}|${fnv1a(userText)}|${fnv1a(aiText)}|${recallParamFingerprint(cfg)}`;
 }
 
-let recalling = false;
+interface RecallRun {
+  generation: number;
+  chat: STMessage[];
+  metadata: NonNullable<ReturnType<typeof getContext>>['chatMetadata'];
+  chatId: string | undefined;
+  database: string;
+  scopes: string[];
+  cacheKey: string | null;
+  controller: AbortController;
+  externalSignal?: AbortSignal;
+  promise?: Promise<void>;
+}
+
+let recallGeneration = 0;
+let activeRecall: RecallRun | null = null;
+
+/** 不比较 getContext() 包装对象:宿主可能每次返回新包装,但 chat/meta 必须仍属本聊天。 */
+function ownsRecallContext(run: RecallRun): boolean {
+  const ctx = getContext();
+  return activeRecall === run && run.generation === recallGeneration && !!ctx
+    && ctx.chat === run.chat && ctx.chatMetadata === run.metadata
+    && ctx.getCurrentChatId?.() === run.chatId;
+}
+
+function recallRunAllowed(run: RecallRun): boolean {
+  return ownsRecallContext(run) && !run.controller.signal.aborted
+    && !memoryWriteIssue() && recallActiveHere()
+    && currentVectorDb() === run.database
+    && JSON.stringify(recallScopes()) === JSON.stringify(run.scopes);
+}
+
+function assertRecallCurrent(run: RecallRun): void {
+  if (recallRunAllowed(run)) return;
+  run.controller.abort();
+  const error = new Error('召回已取消或聊天上下文已变化');
+  error.name = 'AbortError';
+  throw error;
+}
+
+function cancelActiveRecall(): void {
+  const previous = activeRecall;
+  activeRecall = null;
+  recallGeneration++;
+  previous?.controller.abort();
+}
+
+/** 即使底层忽略 signal(例如 vecSearch),取消也及时放行旧调用;迟到结果不再继续管线。 */
+async function awaitRecall<T>(run: RecallRun, task: () => Promise<T>): Promise<T> {
+  assertRecallCurrent(run); // 每次外发前重新检查,不让 helper 的下一步绕过保护
+  const signal = run.controller.signal;
+  let onAbort: () => void = () => {};
+  const cancelled = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new Error('召回已取消'));
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    const result = await Promise.race([task(), cancelled]);
+    assertRecallCurrent(run);
+    return result;
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
+/** 内部清槽不取消别的任务;调用者必须先验证 owner。公开清槽则使整条旧管线失效。 */
+function clearRecallSlot(): void {
+  getContext()?.setExtensionPrompt?.(RECALL_INJECT_KEY, '', IN_CHAT, recallInjectionDepth(), false, ROLE_SYSTEM, null);
+}
 
 /** 召回是否在当前聊天生效。 */
 function recallActiveHere(): boolean {
@@ -213,7 +281,8 @@ export function shouldRecallForType(type: string | undefined): boolean {
 
 /** 清空召回注入槽(降级/未命中/切聊天时)。 */
 export function clearRecallInjection(): void {
-  getContext()?.setExtensionPrompt?.(RECALL_INJECT_KEY, '', IN_CHAT, recallInjectionDepth(), false, ROLE_SYSTEM, null);
+  cancelActiveRecall();
+  clearRecallSlot();
 }
 
 /**
@@ -221,98 +290,114 @@ export function clearRecallInjection(): void {
  * 任何失败都清空槽并返回(静默降级)。
  */
 export async function runVectorRecall(signal?: AbortSignal): Promise<void> {
-  if (!recallActiveHere()) {
+  if (memoryWriteIssue() || !recallActiveHere()) {
     clearRecallInjection();
     return;
   }
-  if (recalling) return;
+  // 已取消的调用不接管/清空一个正在正常运行的新任务。
+  if (signal?.aborted) return;
   const database = currentVectorDb();
-  if (!database) return;
-
   const ctx = getContext();
-  const chat = ctx?.chat ?? [];
-  const fn = ctx?.setExtensionPrompt;
-  if (typeof fn !== 'function' || !chat.length) return;
-
-  // 楼层还少 / 全在窗口内且无旧档:本回合无召回价值,跳过整条管线(清空注入槽,避免残留上次召回)。
-  if (!recallWorthRunning(chat)) {
-    setRecallStatus('未召回:楼层未达起召门槛或全在窗口内');
-    clearRecallInjection();
+  if (!database || !ctx || typeof ctx.setExtensionPrompt !== 'function' || !ctx.chat.length) {
+    cancelActiveRecall();
     return;
   }
-
-  const cfg = apiSettings.vector.recall;
-  const scopes = recallScopes();
-
-  // 缓存命中(重生成/翻页且召回输入未变):直接复用上次注入文本 + 调试快照,跳过整条管线。
+  const chat = ctx.chat;
+  const cfg = { ...apiSettings.vector.recall };
   const cacheKey = buildRecallCacheKey(chat, cfg);
-  const cached = cacheKey ? loadRecallCache() : null;
-  if (cacheKey && cached && cached.key === cacheKey && estimateTokens(cached.text) <= slotBudget('recall')) {
-    fn(RECALL_INJECT_KEY, cached.text, IN_CHAT, recallInjectionDepth(), false, ROLE_SYSTEM, null);
-    restoreRecallDebug(cached.debug);
-    setRecallStatus(`${cached.debug.status}(复用缓存)`);
-    return;
+  // 同上下文、同输入的重入仍阻塞等待同一次召回,既不重复计费也不提前放行正文。
+  if (activeRecall && recallRunAllowed(activeRecall) && cacheKey !== null
+    && activeRecall.cacheKey === cacheKey && activeRecall.externalSignal === signal) {
+    return activeRecall.promise;
   }
+  cancelActiveRecall();
+  const run: RecallRun = {
+    generation: recallGeneration, chat, metadata: ctx.chatMetadata,
+    chatId: ctx.getCurrentChatId?.(), database, scopes: recallScopes(), cacheKey,
+    controller: new AbortController(), externalSignal: signal,
+  };
+  activeRecall = run;
+  const onAbort = () => run.controller.abort();
+  signal?.addEventListener('abort', onAbort, { once: true });
+  run.promise = executeRecall(run, cfg).finally(() => {
+    signal?.removeEventListener('abort', onAbort);
+    // 旧任务完成/失败绝不能释放新任务的 owner。
+    if (activeRecall === run && run.generation === recallGeneration) activeRecall = null;
+  });
+  return run.promise;
+}
 
-  recalling = true;
+async function executeRecall(run: RecallRun, cfg: typeof apiSettings.vector.recall): Promise<void> {
+  const { chat, database, scopes, cacheKey } = run;
+  const signal = run.controller.signal;
+  const inject = (text: string) => {
+    assertRecallCurrent(run);
+    getContext()!.setExtensionPrompt!(RECALL_INJECT_KEY, text, IN_CHAT, recallInjectionDepth(), false, ROLE_SYSTEM, null);
+    // 宿主回调也可能触发切换/清槽,后续 debug/cache 同样不得写入。
+    assertRecallCurrent(run);
+  };
   try {
-    // 开一次新调试快照(进入有效召回路径才记录,避免「功能未启用」时反复清空上次结果)
+    assertRecallCurrent(run);
+    if (!recallWorthRunning(chat)) {
+      setRecallStatus('未召回:楼层未达起召门槛或全在窗口内');
+      inject('');
+      return;
+    }
+    const cached = cacheKey ? loadRecallCache() : null;
+    if (cacheKey && cached && cached.key === cacheKey && estimateTokens(cached.text) <= slotBudget('recall')) {
+      inject(cached.text);
+      restoreRecallDebug(cached.debug);
+      setRecallStatus(`${cached.debug.status}(复用缓存)`);
+      return;
+    }
     resetRecallDebug();
-
-    // 召回前先补齐窗口外缺失的向量索引(载入老聊天/向量后开 → 旧叶子可能从未索引),
-    // 否则这些旧剧情会直接漏召回。只阻塞窗口外,窗口内交给防抖增量。
-    await ensureRecallIndex(signal);
-
-    // 1) 查询重写(强制启用,无降级):得多条 query 向量 + rerank 用的 query 文本。
-    // 重写失败/无 query 会抛错 → 落到外层 catch,清空注入槽、结束本次召回。
-    const { queryVectors, rerankQuery } = await resolveQueryVectors(signal);
+    await awaitRecall(run, () => ensureRecallIndex(signal));
+    assertRecallCurrent(run);
+    const { queryVectors, rerankQuery } = await resolveQueryVectors(run);
+    assertRecallCurrent(run);
     if (!queryVectors.length) {
       setRecallStatus('未召回:查询重写未产出 query');
-      clearRecallInjection();
+      inject('');
       return;
     }
 
-    // 2) 后端检索:多路在范围内纯按 embedding 得分取前 rerankCandidates(后端 max 融合,不套阈值),排除窗口内叶子
     const exclude = windowLeafIds(chat);
     const selfScope = currentChatScope();
-    const { results } = await vecSearch(database, scopes, queryVectors, {
-      topK: Math.max(1, cfg.rerankCandidates),
-      excludeLeafIds: exclude,
-    });
-    setRecallEmbedding(
-      results.map(h => ({
-        leafId: h.leafId,
-        similarity: h.similarity,
-        queryIndex: h.queryIndex ?? -1,
-        source: sourceLabel(h, selfScope),
-        storyTime: compactTimeLabel((h.storyTime || '').trim()),
-        preview: previewOf(h.document),
-      })),
-    );
+    const { results } = await awaitRecall(run, () => vecSearch(database, scopes, queryVectors, {
+      topK: Math.max(1, cfg.rerankCandidates), excludeLeafIds: exclude,
+    }));
+    assertRecallCurrent(run);
+    setRecallEmbedding(results.map(h => ({
+      leafId: h.leafId, similarity: h.similarity, queryIndex: h.queryIndex ?? -1,
+      source: sourceLabel(h, selfScope), storyTime: compactTimeLabel((h.storyTime || '').trim()),
+      preview: previewOf(h.document),
+    })));
     if (!results.length) {
       setRecallStatus('未召回:检索无候选');
-      clearRecallInjection();
+      inject('');
       return;
     }
-
-    // 3) rerank(用 INTENT/重写 query;渠道未配 → 降级:用 embedding 序,score 复用 similarity)
-    const ranked = await rerankCandidates(rerankQuery, results, signal);
-
-    // 4) 分档 + 上限(now = 故事内最新时间,作相对时间参照点,对齐历史摘要注入)
-    const now = latestStoryTime(chat);
-    const { text, tiers } = buildRecallText(ranked, cfg, selfScope, now);
+    const ranked = await rerankCandidates(rerankQuery, results, run);
+    assertRecallCurrent(run);
+    const { text, tiers } = buildRecallText(ranked, cfg, selfScope, latestStoryTime(chat));
+    assertRecallCurrent(run);
     recordRerankDebug(ranked, tiers, selfScope);
-    fn(RECALL_INJECT_KEY, text, IN_CHAT, recallInjectionDepth(), false, ROLE_SYSTEM, null);
+    inject(text);
     setRecallInjected(text);
     setRecallStatus(text ? '召回完成' : '召回完成:无内容达标,本回合未注入');
-    // 实算成功才落缓存(失败/降级路径不缓存,下次重试)。存调试快照供命中时还原面板。
+    assertRecallCurrent(run);
     if (cacheKey) saveRecallCache({ key: cacheKey, text, debug: snapshotRecallDebug() });
   } catch (e) {
-    console.warn('[棱镜宝书向量] 召回失败(降级为不召回):', e);
-    setRecallStatus(`失败:${e instanceof Error ? e.message : String(e)}`);
-    clearRecallInjection();
-  } finally {
-    recalling = false;
+    // 切聊天/被更新代次取代:失败收尾也不准动共享槽、debug 或缓存。
+    if (!ownsRecallContext(run)) { run.controller.abort(); return; }
+    if (signal.aborted || !recallRunAllowed(run)) {
+      run.controller.abort();
+      setRecallStatus('未召回:已取消或保护状态变化');
+    } else {
+      console.warn('[棱镜宝书向量] 召回失败(降级为不召回):', e);
+      setRecallStatus(`失败:${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (ownsRecallContext(run)) clearRecallSlot();
   }
 }
 
@@ -346,13 +431,15 @@ function recordRerankDebug(
  * 重写失败 / 无 query → 直接抛错,由 runVectorRecall 结束本次召回(不再降级为单 query)。
  */
 async function resolveQueryVectors(
-  signal?: AbortSignal,
+  run: RecallRun,
 ): Promise<{ queryVectors: string[]; rerankQuery: string }> {
-  const { intent, queries } = await rewriteQuery(signal);
+  const { intent, queries } = await awaitRecall(run, () => rewriteQuery(run.controller.signal));
+  assertRecallCurrent(run);
   setRecallRewrite(intent, queries);
   if (!queries.length) throw new Error('查询重写未产出任何 query');
   // 检索向量:多条 Q(INTENT 偏长偏全文,留给 rerank,不进检索向量以免稀释)
-  const vecs = await embedTexts(queries, signal);
+  const vecs = await awaitRecall(run, () => embedTexts(queries, run.controller.signal));
+  assertRecallCurrent(run);
   const queryVectors = vecs.map(v => encodeFloat32Base64(v));
   return { queryVectors, rerankQuery: intent || queries[0] };
 }
@@ -362,7 +449,7 @@ interface RankedHit extends VecHit {
 }
 
 /** 对候选做 rerank;失败/未配置则用 embedding 相似度序降级。 */
-async function rerankCandidates(query: string, hits: VecHit[], signal?: AbortSignal): Promise<RankedHit[]> {
+async function rerankCandidates(query: string, hits: VecHit[], run: RecallRun): Promise<RankedHit[]> {
   // rerank 渠道未配置 → 直接降级(embedTexts/resolveVectorModel 在 rerank 缺渠道时会抛错)
   try {
     // 全文精排:发楼层原文(mesFull,已含内嵌起止时间)给 rerank,语义比摘要更全;
@@ -377,12 +464,14 @@ async function rerankCandidates(query: string, hits: VecHit[], signal?: AbortSig
       const t = (h.storyTime || '').trim();
       return t ? `【${t}】\n${body}` : body;
     });
-    const order = await rerankDocuments(query, docs, hits.length, signal);
+    const order = await awaitRecall(run, () => rerankDocuments(query, docs, hits.length, run.controller.signal));
+    assertRecallCurrent(run);
     // order 是 {index, score} 降序;映射回 hit
     return order
       .filter(o => hits[o.index])
       .map(o => ({ ...hits[o.index], rerankScore: o.score }));
   } catch {
+    assertRecallCurrent(run); // 仅真实重排失败可降级,取消/切聊天不能变成正常命中
     // 降级:保持 embedding 序,rerankScore 复用 similarity
     return hits.map(h => ({ ...h, rerankScore: h.similarity }));
   }

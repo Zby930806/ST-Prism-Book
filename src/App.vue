@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import Icon from '@/components/Icon.vue';
+import BrandMark from '@/components/BrandMark.vue';
+import { useDialogFocus } from '@/composables/useDialogFocus';
+import { PLUGIN_VERSION } from '@/version';
 import NavBar from '@/components/NavBar.vue';
 import FloatingOrb from '@/components/FloatingOrb.vue';
 import { getPage } from '@/pages/registry';
 import { closeBook, cycleTheme, lastOpenedAt, modalHost, THEMES, ui } from '@/state/ui';
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 
 // 题首主题按钮:显示「下一个」主题的图标与名,点击即切换到它
 const nextTheme = computed(() => {
@@ -27,6 +30,10 @@ const navPlacement = computed<'top' | 'bottom'>(() => {
 });
 
 const current = computed(() => getPage(ui.activePage));
+const bodyEl = ref<HTMLElement | null>(null);
+const windowEl = ref<HTMLElement | null>(null);
+const { onDialogKeydown } = useDialogFocus(windowEl, () => ui.open, closeBook);
+watch(() => ui.activePage, async () => { await nextTick(); bodyEl.value?.scrollTo({ top: 0 }); });
 
 // —— 遮罩点击关闭:仅当按下与松开都在遮罩本身。
 // 避免:1) 移动端打开手势的合成 click 穿透秒关;2) 窗内按下拖到窗外误关。
@@ -96,14 +103,13 @@ const windowStyle = computed(() => {
         class="bbs-overlay"
         @pointerdown="onOverlayPointerDown"
         @click="onOverlayClick"
-        @keydown.esc="closeBook"
         tabindex="-1"
       >
         <!-- 窗口常驻于遮罩内(不独立 v-if、不嵌套 Transition):
              嵌套 Transition 在父子 v-if 同时翻转时,子的 leave 不会触发(实测窗口直接随父被移除,
              无任何动画)。改由遮罩 Transition 的 class 作后代选择器驱动窗口的进出场动画
              (见 <style> 里 .bbs-fade-enter-from/.bbs-fade-leave-to 下的 .bbs-window)。 -->
-        <div class="bbs-window" :style="windowStyle" role="dialog" aria-modal="true" aria-label="棱镜宝书">
+        <div ref="windowEl" class="bbs-window" tabindex="-1" @keydown="onDialogKeydown" :style="windowStyle" role="dialog" aria-modal="true" aria-label="棱镜宝书">
             <!-- 移动端抓手:可下滑关闭 -->
             <div
               v-if="navPlacement !== 'top' || narrowFlag"
@@ -118,12 +124,13 @@ const windowStyle = computed(() => {
 
             <!-- 题首 -->
             <header class="bbs-head">
-              <span class="bbs-brand-name">棱镜宝书</span>
+              <div class="bbs-brand"><BrandMark :size="52" /><div class="bbs-brand-copy"><span class="bbs-brand-name">棱镜宝书</span><span class="bbs-brand-tagline">PRISM BOOK <span aria-hidden="true">·</span> 让故事记得来路</span></div></div>
               <div class="bbs-head-actions">
-                <button class="bbs-icon-btn" type="button" :title="`切换主题:${nextTheme.label}`" @click="cycleTheme">
+                <span class="bbs-version">{{ PLUGIN_VERSION }}</span>
+                <button class="bbs-icon-btn" type="button" :title="`切换主题:${nextTheme.label}`" :aria-label="`切换主题:${nextTheme.label}`" @click="cycleTheme">
                   <Icon :name="nextTheme.icon" />
                 </button>
-                <button class="bbs-icon-btn" type="button" title="关闭" @click="closeBook">
+                <button class="bbs-icon-btn" type="button" title="关闭棱镜宝书" aria-label="关闭棱镜宝书" @click="closeBook">
                   <Icon name="close" />
                 </button>
               </div>
@@ -131,7 +138,7 @@ const windowStyle = computed(() => {
 
             <NavBar v-if="navPlacement === 'top'" placement="top" :narrow="narrowFlag" />
 
-            <main class="bbs-body">
+            <main ref="bodyEl" class="bbs-body" :aria-label="current.label">
               <Transition name="bbs-page" mode="out-in">
                 <component :is="current.component" :key="current.id" />
               </Transition>
@@ -154,13 +161,15 @@ const windowStyle = computed(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
+  padding: 16px 24px;
+  background: var(--bbs-surface);
+  border-bottom: 1px solid var(--bbs-line);
   flex: 0 0 auto;
 }
 
 .bbs-brand-name {
-  font-weight: 600;
-  font-size: 16px;
+  font-weight: 650;
+  font-size: 18px;
   letter-spacing: -0.01em;
   color: var(--bbs-ink);
 }
@@ -170,8 +179,8 @@ const windowStyle = computed(() => {
   gap: 8px;
 }
 .bbs-icon-btn {
-  width: 36px;
-  height: 36px;
+  width: 38px;
+  height: 38px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -269,4 +278,7 @@ const windowStyle = computed(() => {
   }
   /* 窗口滑回底部要走完整 --bbs-dur,不被上面遮罩的短时长牵连(各自 transition 独立,这里仅强调) */
 }
+
+.bbs-brand{display:flex;align-items:center;gap:12px;min-width:0}.bbs-brand-copy{display:flex;flex-direction:column;gap:2px;min-width:0}.bbs-brand-tagline{font-size:10px;letter-spacing:.06em;color:var(--bbs-ink-muted)}.bbs-brand-tagline span{margin:0 4px;color:var(--bbs-warning)}.bbs-head-actions{align-items:center}.bbs-version{font-family:var(--bbs-font-mono);font-size:10px;color:var(--bbs-ink-muted);border:1px solid var(--bbs-line);border-radius:var(--bbs-radius-pill);padding:3px 8px;margin-right:6px}
+@media(max-width:640px){.bbs-brand{gap:7px}.bbs-brand :deep(img){width:40px;height:40px}.bbs-brand-name{font-size:17px}.bbs-brand-tagline{font-size:9px;letter-spacing:0}.bbs-version{display:none}.bbs-head-actions{gap:5px}.bbs-icon-btn{width:38px;height:38px}.bbs-head{background:var(--bbs-bg);padding:0 14px 10px;}.bbs-grabber{height:20px}}
 </style>

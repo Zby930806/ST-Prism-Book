@@ -31,6 +31,32 @@ coverage: {
 
 `getVar()` 以及 `query({ resource: "state" })` 等快捷资源只返回目标值，不附带覆盖信息。需要判断完整性时，应同时读取 `getSnapshot()`，或直接从快照中取对应字段。
 
+## 旧记忆保护状态（1.2.9-prism.2 增量）
+
+API 版本仍为 1。getSnapshot()、getHistory()、getInjectedHistory() 返回 compatibility：
+
+~~~js
+compatibility: {
+  mode: 'protected', // ready / convert / protected
+  converting: false,
+  blocked: true,
+  reason: '阻断原因', // 正常时 null
+  issues: ['具体问题'],
+}
+coverage: {
+  complete: false,
+  missingAiFloors: [],
+  status: 'blocked', // complete / incomplete / blocked
+  reason: '阻断原因', // 正常时 null
+}
+~~~
+
+消费者应优先检查 compatibility.blocked，不能仅检查 mode。转换进行中也会阻断。保护态的 missingAiFloors: [] 表示**没有评估缺口**，不是覆盖完整；complete 始终为 false。楼层上下文及嵌套查询的覆盖率遵守同一约定。
+
+getInjectedHistory() 在受阻时返回空 text、relativeText 和 nodes；{{bbsInjectedHistory}} 宏（新旧宏引擎）及对应斜杠查询不会绕过此保护。普通历史／快照查询仍用于诊断读取，但不得将受阻结果作为完整记忆注入。
+
+这些字段在类型中为可选增量字段，本版对应运行时结果始终提供；issues 是独立副本，不暴露内部转换计划。未新增方法或资源名。完整接续范围见 [兼容说明](docs/LEGACY-COMPATIBILITY.md)。
+
 ## 等待接口就绪
 
 插件加载顺序不固定。推荐先检查全局对象，未就绪时再监听事件：

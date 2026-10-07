@@ -14,7 +14,8 @@ import { clearInjection, refreshInjection, renderHistoryNodes, selectHistoryNode
 import { buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
 import { clampToTimeTags, cleanBody, parseTimeRange, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
-import { memory, recomputeDerived, scheduleLeafFlush } from './store';
+import { memory, memoryWriteIssue, checkCompatibility, recomputeDerived, scheduleLeafFlush } from './store';
+import { legacyLeafIssue } from './compatibility';
 import type { LeafExtra, SummaryDelta } from './types';
 import { scheduleVectorIndex } from './vector';
 import { invalidateRecallCache } from './vector/cache';
@@ -373,6 +374,7 @@ function isBacklogNotice(m: STMessage | undefined): boolean {
  * 返回是否改动过 chat,调用方据此重算与落盘。
  */
 function normalizeBacklogNotices(chat: STMessage[]): boolean {
+  if (memoryWriteIssue()) return false;
   let changed = false;
   for (const m of chat) {
     if (!isBacklogNotice(m)) continue;
@@ -462,10 +464,12 @@ function importedHistoryCovers(floor: number): boolean {
  * 新消息、regenerate 新 swipe、编辑过的楼,都因 leafValid=false 自然落入。
  */
 export function pendingAiFloors(chat: STMessage[]): number[] {
+  if (getContext()?.chat === chat && memoryWriteIssue()) return [];
   const out: number[] = [];
   const imported = importedHistoryRanges();
   for (let i = 0; i < chat.length; i++) {
     if (floorInImportedRanges(i, imported)) continue;
+    if (legacyLeafIssue(chat[i]?.extra?.bbs_leaf, chat[i])) continue; // 旧记录异常不是未摘要
     if (isAiFloor(chat[i]) && !leafValid(chat[i])) out.push(i);
   }
   return out;
@@ -513,6 +517,7 @@ function shouldSkipLastAiForGeneration(chat: STMessage[], type: string | undefin
  * 开场白已带时间标签时不特判(主模型能直接读标签,有锚点),不必多等一次请求。
  */
 export function openingPendingFloor(chat: STMessage[]): number {
+  if (getContext()?.chat === chat && memoryWriteIssue()) return -1;
   let lastAi = -1;
   for (let i = chat.length - 1; i >= 0; i--) {
     if (isAiFloor(chat[i])) { lastAi = i; break; }
@@ -522,6 +527,7 @@ export function openingPendingFloor(chat: STMessage[]): number {
     if (chat[i]?.is_user || isAiFloor(chat[i])) return -1; // 前面已有玩家发言或其他 AI 楼 → 不是开场白
   }
   if (importedHistoryCovers(lastAi)) return -1; // 已由导入历史接管,不再为开场白单独造叶子
+  if (legacyLeafIssue(chat[lastAi]?.extra?.bbs_leaf, chat[lastAi])) return -1;
   if (leafValid(chat[lastAi])) return -1; // 已摘 → 锚点已在
   const tag = parseTimeRange(clampToTimeTags(chat[lastAi].mes));
   if (tag.start && tag.end) return -1; // 开场白自带时间标签 → 主模型能读,不必先摘
@@ -561,6 +567,13 @@ export async function handleGenerationIntercept(
   if (!ctx) return false;
   if (!ctx.getCurrentChatId?.()) return false; // 欢迎页:无聊天不拦
   const chat = ctx.chat ?? [];
+  const compatibilityIssue = memoryWriteIssue();
+  if (compatibilityIssue) {
+    engineState.lastError = compatibilityIssue;
+    toast(compatibilityIssue, 'warning');
+    abort(true);
+    return true; // 不插入“请批量补摘”的误导提示，不请求摘要模型
+  }
   normalizeBacklogNotices(chat); // 兼容升级前已存在但尚未标记的提示楼
   const skipLastAi = shouldSkipLastAiForGeneration(chat, type);
 
@@ -736,6 +749,8 @@ export async function regenerateFloor(floor: number): Promise<boolean> {
  * @param on true=标为番外,false=取消番外
  */
 export async function setFloorOmit(floor: number, on: boolean): Promise<void> {
+  const issue = memoryWriteIssue();
+  if (issue) { engineState.lastError = issue; return; }
   const ctx = getContext();
   if (!ctx) return;
   const chat = ctx.chat ?? [];
@@ -867,6 +882,7 @@ export function coalesceRanges(indices: number[]): Array<[number, number]> {
  * 只隐藏已被摘要覆盖的,绝不制造信息黑洞。
  */
 async function syncWindowHiddenState(chat: STMessage[]): Promise<void> {
+  if (memoryWriteIssue()) return;
   const keepStart = resolveKeepStart(chat);
   const covered = coveredSet(chat);
   const imported = importedHistoryRanges();
@@ -1025,6 +1041,8 @@ interface RunSummaryOptions {
 }
 
 export function runSummary(aiFloor: number, options: RunSummaryOptions = {}): Promise<void> {
+  const issue = memoryWriteIssue();
+  if (issue) { engineState.lastError = issue; return Promise.resolve(); }
   if (busy) return currentRun ?? Promise.resolve();
   const runId = ++summaryRunSeq;
   const chatId = getContext()?.getCurrentChatId?.() ?? '';
@@ -1152,9 +1170,12 @@ async function summarizeFloorWork(
   const targets = floorTargets(chat, aiFloor, covered);
   const content = renderMessages(chat, targets, ctx.name1, ctx.name2);
   const requestChatId = ctx.getCurrentChatId?.();
+  const requestMetadata = ctx.chatMetadata;
   const sources = targets.map(i => ({ i, message: chat[i], text: chat[i].mes, swipe: chat[i].swipe_id }));
   const assertUnchanged = () => {
-    if (getContext()?.chat !== chat || getContext()?.getCurrentChatId?.() !== requestChatId ||
+    const issue = memoryWriteIssue() || legacyLeafIssue(chat[aiFloor]?.extra?.bbs_leaf, chat[aiFloor]);
+    if (issue) throw new Error(issue);
+    if (getContext()?.chat !== chat || getContext()?.chatMetadata !== requestMetadata || getContext()?.getCurrentChatId?.() !== requestChatId ||
         sources.some(s => chat[s.i] !== s.message || s.message.mes !== s.text || s.message.swipe_id !== s.swipe)) {
       throw new Error('摘要期间聊天或目标正文发生变化，本次结果未写入；请重新摘要。');
     }
@@ -1169,7 +1190,9 @@ async function summarizeFloorWork(
   const stateBefore = deriveMemory(chat, beforeIndex);
   const history = renderHistoryNodes(selectHistoryNodesBefore(memory.summaries, chat, beforeIndex));
 
+  assertUnchanged();
   const worldInfo = await fetchWorldInfo(chat, targets, ctx.name1, ctx.name2);
+  assertUnchanged();
   const charCard = fetchCharCard();
   const persona = fetchUserPersona();
 
@@ -1298,6 +1321,8 @@ export interface BatchBackfillResult {
 
 /** 批量按楼序复用完整单楼链；每楼提交后才构造下一楼状态，失败立即停止。 */
 export function batchBackfill(opts: BatchBackfillOpts = {}): Promise<BatchBackfillResult> {
+  const issue = memoryWriteIssue();
+  if (issue) { engineState.lastError = issue; return Promise.resolve({ done: 0, total: 0, cancelled: false }); }
   if (busy) return Promise.resolve({ done: 0, total: 0, cancelled: false });
   const result = batchBackfillWork(opts);
   const tracked = result.then(() => {}, () => {}).finally(() => {
@@ -1464,7 +1489,28 @@ function rootsAtLevel(level: number, chat: STMessage[]): RootView[] {
  * 用 AI 把这批的**叙事文本**融合成一条上层节点,childIds 收纳它们(底层全部保留)。
  * 一次调用会向上连锁(加叶子→可能生 L1→可能生 L2…),按各层阈值递归。
  */
+/** 模型请求不属于切换后的聊天；等待期间来源改变时丢弃结果，不写回另一棵总结树。 */
+function summaryRequestGuard(chat: STMessage[]): () => void {
+  const ctx = getContext();
+  const id = ctx?.getCurrentChatId?.();
+  const meta = ctx?.chatMetadata;
+  const forest = JSON.stringify(memory.summaries);
+  const snapshot = () => JSON.stringify(chat.map(m => [m.mes, m.swipe_id, m.extra?.bbs_omit, m.extra?.bbs_leaf]));
+  const sources = snapshot();
+  return () => {
+    const current = getContext();
+    const issue = memoryWriteIssue();
+    if (issue) throw new Error(issue);
+    if (current?.chat !== chat || current?.chatMetadata !== meta || current?.getCurrentChatId?.() !== id ||
+        JSON.stringify(memory.summaries) !== forest || snapshot() !== sources) {
+      throw new Error('总结期间聊天或来源记忆发生变化，本次结果未写入；请返回原聊天核对。');
+    }
+  };
+}
+
 export async function checkResummary(): Promise<number> {
+  const issue = memoryWriteIssue();
+  if (issue) { engineState.lastError = issue; return 0; }
   if (!engineActiveHere()) return 0;
   const ctx = getContext();
   if (!ctx) return 0;
@@ -1492,6 +1538,7 @@ export async function checkResummary(): Promise<number> {
       return made;
     }
 
+    const assertSourcesUnchanged = summaryRequestGuard(chat);
     const batch = roots.slice(0, threshold);
     const { content, hints } = joinNodesForResummary(batch);
     // 传**输出层级**(level+1):L1(普通总结,300-500字)/ L2+(二次总结,字数随输入动态)
@@ -1508,7 +1555,7 @@ export async function checkResummary(): Promise<number> {
         { role: 'assistant', content: RESUMMARY_THINKING_PREFILL },
       );
       // 发请求 + 解析,失败按设置重试(请求报错或 JSON 无效/缺 summary 都算失败)
-      const delta = await sendAndParse(sender.send, messages, raw => {
+      const delta = await sendAndParse(request => { assertSourcesUnchanged(); return sender.send(request); }, messages, raw => {
         console.log('[棱镜宝书] 总结原始返回(未清洗):\n', raw);
         const d = extractJsonObject<{ summary?: string }>(raw);
         const summary = llmString(d?.summary);
@@ -1520,6 +1567,7 @@ export async function checkResummary(): Promise<number> {
         return { summary };
       });
 
+      assertSourcesUnchanged();
       // 生成上层节点收纳这批(**不删 batch**),时间戳取批内最新,排在它们之后
       const newCreatedAt = Math.max(...batch.map(s => s.createdAt)) + 1;
       // 起止时间:batch 已按时间升序 → 首个有起始的作 start,末个有结束的作 end
@@ -1608,6 +1656,8 @@ function collectSelectableNodes(chat: STMessage[]): Map<string, SelectableNode> 
  * 返回 { made, error }:made=1 成功,0 未生成(error 说明原因)。
  */
 export async function summarizeSelected(nodeIds: string[]): Promise<{ made: number; error?: string }> {
+  const issue = memoryWriteIssue();
+  if (issue) { engineState.lastError = issue; return { made: 0, error: issue }; }
   if (!engineActiveHere()) return { made: 0, error: '插件未在当前聊天生效' };
   if (busy) return { made: 0, error: '正忙,请稍后再试' };
   if (nodeIds.length < 2) return { made: 0, error: '至少选择两条才能合并' };
@@ -1652,6 +1702,7 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
   const sender = resolveSender('resummary');
   if ('error' in sender) return { made: 0, error: sender.error };
 
+  const assertSourcesUnchanged = summaryRequestGuard(chat);
   const level = Math.max(...picked.map(n => n.level)) + 1;
   const { content, hints } = joinNodesForResummary(picked);
   const prompt = buildResummaryPrompt({ user: ctx.name1, char: ctx.name2, content, level });
@@ -1669,7 +1720,7 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
       { role: 'system', content: RESUMMARY_THINKING_CHECKLIST },
       { role: 'assistant', content: RESUMMARY_THINKING_PREFILL },
     );
-    const delta = await sendAndParse(sender.send, messages, raw => {
+    const delta = await sendAndParse(request => { assertSourcesUnchanged(); return sender.send(request); }, messages, raw => {
       console.log('[棱镜宝书] 强制总结原始返回(未清洗):\n', raw);
       const d = extractJsonObject<{ summary?: string }>(raw);
       const summary = llmString(d?.summary);
@@ -1680,6 +1731,7 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
       return { summary };
     });
 
+    assertSourcesUnchanged();
     // 时间范围:picked 已按楼层升序 → 首个有起始的作 start,末个有结束的作 end(同 checkResummary)
     const timeStart = picked.find(s => s.timeStart)?.timeStart;
     const timeEnd = [...picked].reverse().find(s => s.timeEnd)?.timeEnd;
@@ -1731,6 +1783,7 @@ export async function resummarizeNow(): Promise<number> {
  */
 let reactTimer: ReturnType<typeof setTimeout> | null = null;
 function reactToChatMutation(syncHidden = false): void {
+  if (memoryWriteIssue()) { recomputeDerived(); refreshInjection(); return; }
   // 缓存立即失效、索引另行防抖；UI/派生重算仍按下方 200ms 合并。
   scheduleVectorIndex();
   if (reactTimer) clearTimeout(reactTimer);
@@ -1790,7 +1843,7 @@ export function bindEngine(): void {
   }
 
   // 以下三事件只让数据/UI 跟随,不主动生成摘要。
-  if (et.MESSAGE_SWIPED) es.on(et.MESSAGE_SWIPED, () => reactToChatMutation());
+  if (et.MESSAGE_SWIPED) es.on(et.MESSAGE_SWIPED, () => { checkCompatibility(); reactToChatMutation(); });
   // 编辑消息:先把该楼正文里 <bbs_items> 旁注的改动反向同步回叶子 delta(用户手改物品),
   // 再走通用善后(清坏链/重算/刷新)。延迟一拍确保 ST 已把编辑写回 chat[messageId].mes。
   if (et.MESSAGE_EDITED) {
