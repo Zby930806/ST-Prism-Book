@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import Icon from '@/components/Icon.vue';
 import PageHeader from '@/components/PageHeader.vue';
+import OutlinePlanner from '@/pages/outline/index.vue';
+import { outlineState } from '@/outline/store';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { addSummary, appendOpToLatestLeaf, deleteLeafAt, deleteSummary, deleteSummarySubtrees, editLeafAt, editPlan, editSummary, invalidateSummaryAncestors } from '@/memory/apply';
@@ -201,9 +203,8 @@ function toggleFold(kind: 'plan' | 'suspense') {
     persistCollapsed(SUSPENSE_COLLAPSE_KEY, suspenseCollapsed.value);
   }
 }
-// 无条目即无可折叠:不显示箭头,也强制展开(避免删空后卡在收拢的空态)
-const plansFoldable = computed(() => plansOnly.value.length > 0);
-const plansShown = computed(() => !plansCollapsed.value || !plansFoldable.value);
+// 计划区始终含创作规划入口，可以独立折叠；悬念无条目时仍强制展开。
+const plansShown = computed(() => !plansCollapsed.value);
 const suspenseFoldable = computed(() => suspenses.value.length > 0);
 const suspenseShown = computed(() => !suspenseCollapsed.value || !suspenseFoldable.value);
 
@@ -212,8 +213,8 @@ const planPages = ref({ plan: 1, suspense: 1 });
 const foldGroups = computed(() => [
   {
     kind: 'plan' as const, title: '计划', items: plansOnly.value,
-    foldable: plansFoldable.value, shown: plansShown.value,
-    empty: '还没有计划。摘要时会自动记下角色的打算,也可在此手动添加。',
+    foldable: true, shown: plansShown.value,
+    empty: '还没有普通剧情计划。摘要时会自动记下角色的打算,也可在此手动添加；创作规划在上方独立管理。',
   },
   {
     kind: 'suspense' as const, title: '悬念', items: suspenses.value,
@@ -1073,7 +1074,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
     <!-- ===== 计划 / 悬念:顶部两区,各自折叠计数 ===== -->
     <!-- 结构同构、配置驱动(foldGroups):标题行兼折叠开关,右侧「+」独立(disabled 时不响应,不误触折叠) -->
     <section class="bbs-planning" aria-label="进行中的计划与悬念">
-      <div class="bbs-planning-intro"><span class="bbs-section-kicker">02 / 未竟之事</span><p class="bbs-section-description">计划记录角色的打算，悬念保留尚未揭晓的线索。这里只展示进行中的事项。</p></div>
+      <div class="bbs-planning-intro"><span class="bbs-section-kicker">02 / 未竟之事</span><p class="bbs-section-description">计划中可管理角色的打算，也可根据剧情和你的输入生成创作规划。创作规划是未来方向，不是已发生的事实；悬念保留尚未揭晓的线索。</p></div>
       <div class="bbs-planning-grid">
         <div v-for="g in foldGroups" :key="g.kind" class="bbs-fold-section">
           <div class="bbs-section-head">
@@ -1089,6 +1090,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
               <Icon v-if="g.foldable" name="chevron" class="bbs-fold-caret" :class="{ 'is-collapsed': !g.shown }" />
               <h2 class="bbs-title bbs-title-sub">{{ g.title }}</h2>
               <span class="bbs-fold-count">{{ g.items.length }}</span>
+              <span v-if="g.kind === 'plan' && outlineState.active" class="bbs-outline-count">创作规划 {{ outlineState.active.content.chapters.length }} 阶段</span>
             </button>
             <button
               class="bbs-add-mini"
@@ -1104,6 +1106,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           <!-- grid 1fr↔0fr 收展:高度自适应、无需写死 max-height;reduced-motion 下瞬切(见样式) -->
           <div class="bbs-fold-wrap" :class="{ 'is-collapsed': !g.shown }" :inert="!g.shown" :aria-hidden="!g.shown">
             <div v-if="g.shown" class="bbs-fold-inner">
+              <OutlinePlanner v-if="g.kind === 'plan'" :disabled="editingBlocked" />
               <div v-if="g.items.length" class="bbs-plan-group">
                 <div v-for="p in arrayPage(g.items, planPages[g.kind]).items" :key="p.id" class="bbs-plan">
                   <div class="bbs-plan-head">
@@ -2593,6 +2596,8 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
  .bbs-time-col { min-width:0; width:100%; }
 }
 .bbs-summary-failure { min-width: 0; overflow-wrap: anywhere; }
+.bbs-planning .bbs-fold-head { flex-wrap:wrap; min-height:44px; }
+.bbs-outline-count { min-width:0; font-size:10px; font-weight:400; color:var(--bbs-accent); white-space:normal; }
 .bbs-summary-failure details { margin-block: 8px; }
 .bbs-summary-failure summary { cursor: pointer; font-size: 13px; }
 </style>

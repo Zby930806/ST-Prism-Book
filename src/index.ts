@@ -1,3 +1,5 @@
+import { hydrateOutlineSettings } from '@/outline/settings';
+import { bindOutlineLifecycle, refreshOutlineInjection } from '@/outline/service';
 import { hydrateNotesSettings } from '@/notes/settings';
 import { bindNotesLifecycle, refreshNotesInjection } from '@/notes/service';
 import { hydrateSettings } from '@/api/settings';
@@ -39,6 +41,7 @@ const HOST_ID = 'bbs-app-host';
   try {
     // 先走积压拦截:返回 true = 已 abort 本次生成,无需召回(生成不会发生)。
     refreshNotesInjection();
+    refreshOutlineInjection();
     const intercepted = await handleGenerationIntercept(type, abort);
     // 放行且该类型需要召回 → 阻塞式向量召回(写注入槽后再放行生成)。
     // 召回内部自带向量开关/可用性判断,失败静默降级,绝不影响生成。
@@ -138,6 +141,8 @@ function bindMemoryWhenReady(attempt = 0) {
       bindChatLifecycle();
       hydrateNotesSettings();
       bindNotesLifecycle();
+      hydrateOutlineSettings();
+      bindOutlineLifecycle();
       // 公共读取接口不依赖记忆引擎开关；聊天载入后立即暴露，供其它插件/脚本读取。
       void registerPublicInterface();
       bindEngine();

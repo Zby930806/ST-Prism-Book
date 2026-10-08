@@ -400,6 +400,7 @@ const STATUS_URL = '/api/backends/chat-completions/status';
  */
 export async function fetchModels(
   channel: Pick<ApiChannel, 'url' | 'key'> & Partial<Pick<ApiChannel, 'timeoutSec'>>,
+  opts: Pick<RequestOptions, 'signal'> = {},
 ): Promise<string[]> {
   const ctx = getContext();
   if (!ctx) throw new ApiError('SillyTavern 上下文不可用');
@@ -412,7 +413,7 @@ export async function fetchModels(
   };
 
   const timeoutSec = validTimeoutSec(channel.timeoutSec);
-  return withTimeout(timeoutSec, undefined, '拉取模型', async signal => {
+  return withTimeout(timeoutSec, opts.signal, '拉取模型', async signal => {
     const resp = await fetch(STATUS_URL, {
       method: 'POST',
       headers: ctx.getRequestHeaders(),
@@ -422,7 +423,7 @@ export async function fetchModels(
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      throw new ApiError(`拉取模型失败 (${resp.status}): ${text.slice(0, 200)}`);
+      throw new ApiError(`拉取模型失败 (${resp.status}): ${text.slice(0, 200)}`, resp.status);
     }
 
     const data = await resp.json();

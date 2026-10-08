@@ -10,6 +10,7 @@ import {
 } from '@/notes/store';
 import type { NoteRecord, NoteDecision } from '@/notes/types';
 import { ORIGINAL_NOTES_PROMPT } from '@/notes/prompt';
+import { useNotesModelCatalog } from '@/notes/modelCatalog';
 
 const actionError = ref('');
 const notice = ref('');
@@ -18,6 +19,20 @@ const pendingAction = ref(false);
 const startingRun = ref(false);
 const locked = computed(() => pendingAction.value || startingRun.value || notesRun.busy);
 const apiDraft = reactive({ ...notesSettings.channel });
+const { models, loading: modelsLoading, message: modelsMessage, error: modelsError, pull: pullModels, cancel: cancelModels } = useNotesModelCatalog(apiDraft);
+const modelSearch = ref('');
+const matchingModels = computed(() => {
+  const query = modelSearch.value.trim().toLowerCase();
+  return query ? models.value.filter(model => model.toLowerCase().includes(query)) : models.value;
+});
+const visibleModels = computed(() => matchingModels.value.slice(0, 200));
+watch(() => [apiDraft.url, apiDraft.key], () => { modelSearch.value = ''; });
+function chooseModel(event: Event) {
+  const value = (event.target as HTMLSelectElement).value;
+  if (!value) return;
+  apiDraft.model = value;
+  apiDirty.value = true;
+}
 const apiDirty = ref(false);
 const apiOpen = ref(false);
 const page = ref(1);
@@ -256,7 +271,27 @@ function importNotes() {
           <div class="notes-grid">
             <label class="notes-field notes-full">API 地址<input v-model="apiDraft.url" class="bbs-input" type="url" required autocomplete="off" spellcheck="false" aria-label="札记独立 API 地址" placeholder="https://your-api.example/v1" /></label>
             <label class="notes-field notes-full">API 密钥<input v-model="apiDraft.key" class="bbs-input" type="password" autocomplete="new-password" spellcheck="false" aria-label="札记独立 API 密钥" placeholder="按服务商要求填写" /></label>
-            <label class="notes-field notes-full">模型<input v-model="apiDraft.model" class="bbs-input" type="text" required autocomplete="off" spellcheck="false" aria-label="札记独立 API 模型" placeholder="填写模型名称" /></label>
+            <div class="notes-field notes-full notes-model-picker">
+              <div class="notes-model-heading">
+                <span>模型</span>
+                <div class="notes-actions">
+                  <button type="button" class="bbs-btn" :disabled="modelsLoading || !apiDraft.url.trim()" @click="pullModels"><Icon name="refresh" />{{ modelsLoading ? '拉取中…' : '拉取模型列表' }}</button>
+                  <button v-if="modelsLoading" type="button" class="bbs-btn" @click="cancelModels">取消拉取</button>
+                </div>
+              </div>
+              <label v-if="models.length" class="notes-field">搜索列表<input v-model="modelSearch" class="bbs-input" type="search" autocomplete="off" aria-label="搜索札记模型" placeholder="输入关键词筛选模型" @input.stop /></label>
+              <label class="notes-field">下拉选择
+                <select class="bbs-input" :value="visibleModels.includes(apiDraft.model) ? apiDraft.model : ''" :disabled="!visibleModels.length || modelsLoading" aria-label="札记模型下拉选择" @change="chooseModel">
+                  <option value="" disabled>{{ models.length ? (matchingModels.length ? '请选择模型' : '没有匹配模型，可手动填写') : '先填写地址并拉取模型列表' }}</option>
+                  <option v-for="model in visibleModels" :key="model" :value="model">{{ model }}</option>
+                </select>
+              </label>
+              <p v-if="matchingModels.length > 200" class="notes-hint">匹配 {{ matchingModels.length }} 个模型，仅显示前 200 个；请搜索缩小范围。</p>
+              <label class="notes-field">当前模型 / 手动输入<input v-model="apiDraft.model" class="bbs-input" type="text" required autocomplete="off" spellcheck="false" aria-label="札记独立 API 模型" placeholder="也可填写服务商提供的模型 ID" /></label>
+              <p class="notes-hint">使用上方尚未保存的地址和密钥拉取，不需要先填模型；不会调用生成接口，也不会自动保存或替换当前模型。</p>
+              <p v-if="modelsMessage" class="notes-hint" role="status">{{ modelsMessage }}</p>
+              <p v-if="modelsError" class="notes-warning" role="alert">{{ modelsError }}</p>
+            </div>
             <label class="notes-field">温度<input v-model.number="apiDraft.temperature" class="bbs-input" type="number" required min="0" max="2" step="0.1" inputmode="decimal" aria-label="札记独立 API 温度" /></label>
             <label class="notes-field">最大输出 tokens<input v-model.number="apiDraft.maxTokens" class="bbs-input" type="number" required min="256" max="16000" step="1" inputmode="numeric" aria-label="札记独立 API 最大输出 tokens" /></label>
             <label class="notes-field">超时（秒）<input v-model.number="apiDraft.timeoutSec" class="bbs-input" type="number" required min="10" max="600" step="1" inputmode="numeric" aria-label="札记独立 API 超时秒数" /></label>
@@ -377,6 +412,11 @@ function importNotes() {
 .notes-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-bottom:16px; }
 .notes-full { grid-column:1 / -1; }
 .notes-field { display:flex; flex-direction:column; gap:6px; font-size:12px; color:var(--bbs-ink-soft); }
+.notes-model-picker { gap:10px; }
+.notes-model-heading { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; }
+.notes-model-picker select { width:100%; text-overflow:ellipsis; color:var(--bbs-ink); background:var(--bbs-surface); }
+.notes-model-picker option { color:var(--bbs-ink); background:var(--bbs-surface); }
+.notes-model-picker .notes-hint { margin-top:0; }
 .notes-page .bbs-input { box-sizing:border-box; min-width:0; max-width:100%; }
 .notes-page textarea { resize:vertical; min-height:90px; }
 .notes-page .bbs-btn { min-height:40px; max-width:100%; justify-content:center; white-space:normal; overflow-wrap:anywhere; }
