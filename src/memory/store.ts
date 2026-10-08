@@ -4,7 +4,7 @@ import { reactive } from 'vue';
 import { convertedForest, inspectCompatibility, isRecord, legacyLeafIssue, type CompatibilityReport } from './compatibility';
 import { deriveMemory, getLeaf, leafValid } from './apply';
 import { isAiFloor, pendingAiFloors } from './engine';
-import { latestStoryTime } from './timeTag';
+import { initialStoryTime, latestStoryTime } from './timeTag';
 import type { BaibaiMemory, LeafExtra, MemSummary, VarTemplate, VarTier } from './types';
 import { createEmptyMemory, MEMORY_KEY, MEMORY_VERSION, normalizeTemplate } from './types';
 
@@ -189,7 +189,7 @@ export function recomputeDerived(): void {
   }
   derivedMeta.leaves = leaves;
   derivedMeta.hasLeaf = leaves.some(l => !l.stale);
-  derivedMeta.latestStoryTime = latestStoryTime(chat);
+  derivedMeta.latestStoryTime = latestStoryTime(chat) || (chat ? initialStoryTime() : '');
   // 待摘要楼层(AI 楼且无有效叶子),供摘要页「未摘要楼层」列表逐楼补摘
   derivedMeta.pendingFloors = chat ? pendingAiFloors(chat) : [];
   derivedMeta.rev++; // 通知外部视图(楼内面板)派生已刷新

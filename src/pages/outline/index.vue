@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue';
 import PageHeader from '@/components/PageHeader.vue';
+import OutlineDiscussion from './OutlineDiscussion.vue';
 import { getContext } from '@/st/context';
 import type { ApiChannel } from '@/api/settings';
 import { engineActiveHere } from '@/api/settings';
@@ -8,7 +9,8 @@ import type { OutlineContent, OutlineDraft } from '@/outline/types';
 import { OUTLINE_LIMITS as L } from '@/outline/limits';
 import { validateOutlineContent } from '@/outline/protocol';
 import { outlineSettings, outlineSettingsIssue, resolveOutlineChannel, saveOutlineSettings } from '@/outline/settings';
-import { outlineRun, generateOutline, cancelOutline } from '@/outline/service';
+import { outlineRun, generateOutline, cancelOutline, discussionRun } from '@/outline/service';
+import { discussionState } from '@/outline/discussionStore';
 import {
   outlineState, saveOutlineDraft, activateOutlineDraft, setOutlineEnabled,
   setOutlineChapter, reconfirmOutline, outlineSourceCurrent,
@@ -55,7 +57,7 @@ const generating = ref(false);
 const protectedData = computed(() => /版本|格式|只读|保护/.test(outlineState.issue));
 const protectedSettings = computed(() => /版本|格式|只读|保护/.test(outlineSettingsIssue.value));
 const engineEnabled = computed(() => engineActiveHere());
-const locked = computed(() => !!props.disabled || protectedData.value || pending.value || generating.value || outlineRun.busy || outlineState.saving);
+const locked = computed(() => !!props.disabled || protectedData.value || pending.value || generating.value || outlineRun.busy || outlineState.saving || discussionRun.busy || discussionState.saving);
 const active = computed(() => outlineState.active);
 const currentStage = computed(() => active.value?.content.chapters[active.value.currentChapter]);
 function sourceCurrent(record: OutlineDraft): boolean {
@@ -307,6 +309,7 @@ async function startGeneration(confirmed = false) {
       </details>
     </section>
 
+    <OutlineDiscussion :disabled="locked" :unsaved="dirty" :configuration-issue="configurationIssue" :api-dirty="apiDirty" />
     <details class="planner-workbench">
       <summary>{{ active ? '编辑 / 重新生成创作规划' : '大纲规划 · 生成草稿并确认加入计划' }}<span v-if="dirty">（未保存）</span></summary>
       <PageHeader title="大纲规划" description="结合当前剧情与你的创作要求，规划剧情要点和发展方式。" icon="plans" />

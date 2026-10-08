@@ -18,6 +18,7 @@ import { toast } from '@/st/toast';
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 'vue';
 import SummaryNode from './SummaryNode.vue';
 import SummaryPager from './SummaryPager.vue';
+import InitialTime from './InitialTime.vue';
 import { summaryErrorPresentation } from './errorPresentation';
 const summaryFailure = computed(() => summaryErrorPresentation(engineState.lastError));
 import { arrayPage, createSummaryIndex, PENDING_PAGE_SIZE, SUMMARY_PAGE_SIZE, treePage, walkExpanded } from './view';
@@ -908,6 +909,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
 <template>
   <section class="bbs-page bbs-summary-page">
     <PageHeader title="故事记忆" eyebrow="STORY ARCHIVE / 摘要" description="故事向前，来路留在这里。" />
+    <InitialTime />
     <section class="bbs-overview" aria-label="当前聊天实时概览">
       <div class="bbs-overview-head">
         <span class="bbs-overview-caption">本篇记录</span>

@@ -11,6 +11,8 @@ import { hydrateNotesSettings, notesSettings } from '@/notes/settings';
 import { sourceHash } from '@/notes/source';
 import { hydrateOutlineSettings, outlineSettings } from './settings';
 import { captureOutlineSource, outlineInputUnchanged, sameOutlineChat } from './source';
+import { discussionState, loadOutlineDiscussion, DISCUSSION_DATA_KEY, clearOutlineDiscussion } from './discussionStore';
+import { buildDiscussionContext, recentDiscussion, discussionReply } from './discussionContext';
 import {
   OUTLINE_DATA_KEY, outlineState, loadOutline, outlineStorageCurrent, outlineSourceCurrent,
   saveOutlineDraft, activateOutlineDraft, setOutlineChapter, setOutlineEnabled,
@@ -19,6 +21,7 @@ import {
 import {
   OUTLINE_INJECT_KEY, outlineRun, generateOutline, cancelOutline,
   buildOutlineInjection, refreshOutlineInjection, bindOutlineLifecycle, unbindOutlineLifecycle,
+  sendOutlineDiscussion, cancelOutlineDiscussion, discussionRun, captureOutlineRefinement,
 } from './service';
 
 // 仅替换宿主/API/记忆边界。大纲全部模块、札记 source 与正文清洗均用真实实现。
@@ -124,12 +127,13 @@ beforeEach(() => {
   completion.mockReset().mockResolvedValue(reply());
   hydrateNotesSettings(); hydrateOutlineSettings();
   Object.assign(notesSettings.channel, { url: 'https://notes.example.invalid/v1', key: 'mock-secret', model: 'mock-model' });
-  loadOutline(); cancelOutline();
+  loadOutline(); loadOutlineDiscussion(); cancelOutline(); cancelOutlineDiscussion();
   Object.assign(outlineRun, { busy: false, draft: '', error: '', status: '' });
+  Object.assign(discussionRun, { busy: false, error: '', status: '' });
   memoryBefore = copy(memory);
 });
 afterEach(async () => {
-  unbindOutlineLifecycle(); cancelOutline(); await nextTick();
+  unbindOutlineLifecycle(); cancelOutline(); cancelOutlineDiscussion(); await nextTick();
   expect(fetch).not.toHaveBeenCalled();
   expect(memory).toEqual(memoryBefore);
   for (const c of contexts) {
@@ -139,6 +143,113 @@ afterEach(async () => {
     expect(c.saveMetadataDebounced).not.toHaveBeenCalled();
   }
   vi.unstubAllGlobals(); vi.restoreAllMocks();
+});
+
+describe('大纲双向讨论与显式修订', () => {
+  it('讨论只保存独立问答，可多轮交谈，不能自动改草稿、已确认规划或正文', async () => {
+    await active(); const before = copy(saved()), chat = copy(ctx.chat), injection = buildOutlineInjection();
+    completion.mockResolvedValueOnce('<think>不应显示</think>可以让角色先核实消息，不必立即同意。');
+    expect(await sendOutlineDiscussion('这里是否过于配合？', 'active')).toBe(true);
+    expect(discussionState.messages).toEqual([
+      { role: 'user', content: '这里是否过于配合？' }, { role: 'assistant', content: '可以让角色先核实消息，不必立即同意。' },
+    ]);
+    expect(ctx.chatMetadata[DISCUSSION_DATA_KEY]).toBeDefined();
+    expect(saved()).toEqual(before); expect(ctx.chat).toEqual(chat); expect(buildOutlineInjection()).toBe(injection);
+    const firstInput = completion.mock.calls[0][1];
+    expect(firstInput[0].content).toContain('角色的活人感');
+    expect(firstInput[0].content).not.toContain('只输出一个 JSON');
+    expect(firstInput.some(m => m.content.includes('阶段一独有目标'))).toBe(true);
+    expect(firstInput.at(-1)!.content).toBe('这里是否过于配合？');
+    completion.mockResolvedValueOnce('也可以暂缓答复，取决于她已有的顾虑。');
+    expect(await sendOutlineDiscussion('能否再慢一点？', 'active')).toBe(true);
+    expect(completion.mock.calls[1][1]).toContainEqual({ role: 'assistant', content: '可以让角色先核实消息，不必立即同意。' });
+    expect(discussionState.messages).toHaveLength(4);
+    expect(saved()).toEqual(before);
+  });
+  it('按讨论显式生成仅替换草稿，模型建议不当作用户已采纳，原启用版本不变', async () => {
+    await active(); const oldActive = copy(outlineState.active);
+    completion.mockResolvedValueOnce('建议先核实消息。');
+    await sendOutlineDiscussion('修改节奏，但保留关系状态', 'active');
+    const reference = captureOutlineRefinement('active');
+    completion.mockResolvedValueOnce(reply('讨论后草稿'));
+    await generateOutline('按讨论修订，以用户最新明确意见为准', 2, reference);
+    expect(outlineRun.error).toBe('');
+    expect(outlineState.draft!.content.title).toBe('讨论后草稿');
+    expect(outlineState.active).toEqual(oldActive);
+    const input = completion.mock.calls[1][1];
+    expect(input[0].content).toContain('只输出一个 JSON');
+    expect(input.some(m => m.content.includes('修改节奏，但保留关系状态'))).toBe(true);
+    expect(input.at(-1)!.content).toContain('严格输出 2 个规划阶段');
+    expect(completion).toHaveBeenCalledTimes(2);
+  });
+  it.each(['cancel', 'history', 'switch', 'outline', 'metadata'])('讨论响应迟到时不写入：%s', async mode => {
+    await active(); const before = copy(ctx.chatMetadata);
+    const wait = deferred<string>(); completion.mockReturnValueOnce(wait.promise);
+    const task = sendOutlineDiscussion('意见', 'active');
+    if (mode === 'cancel') cancelOutlineDiscussion();
+    if (mode === 'history') ctx.chat[1].mes += '剧情改变';
+    if (mode === 'switch') { current = context('other-discussion'); loadOutline(); loadOutlineDiscussion(); }
+    if (mode === 'outline') outlineState.revision++;
+    if (mode === 'metadata') ctx.chatMetadata[OUTLINE_DATA_KEY] = { external: true };
+    wait.resolve('迟到的回复'); expect(await task).toBe(false);
+    expect(ctx.chatMetadata[DISCUSSION_DATA_KEY]).toEqual(before[DISCUSSION_DATA_KEY]);
+    expect(discussionState.messages).toHaveLength(0);
+  });
+  it('错误响应不回显上游秘密，不自动重试，保存失败保留旧问答', async () => {
+    completion.mockRejectedValueOnce(new Error('PRIVATE_UPSTREAM'));
+    expect(await sendOutlineDiscussion('问题', 'none')).toBe(false);
+    expect(discussionRun.error).not.toContain('PRIVATE');
+    expect(completion).toHaveBeenCalledTimes(1); expect(discussionState.messages).toHaveLength(0);
+    completion.mockResolvedValueOnce('建议');
+    vi.mocked(ctx.saveMetadata).mockRejectedValueOnce(new Error('PRIVATE_STORE'));
+    expect(await sendOutlineDiscussion('问题', 'none')).toBe(false);
+    expect(discussionRun.error).not.toContain('PRIVATE');
+    expect(discussionState.messages).toHaveLength(0);
+  });
+  it('讨论与生成互斥，正文开始取消讨论，无法回退正文API', async () => {
+    bindOutlineLifecycle();
+    const wait = deferred<string>(); completion.mockReturnValueOnce(wait.promise);
+    const task = sendOutlineDiscussion('慢一点', 'none');
+    await generateOutline('不应并发生成', 2);
+    expect(completion).toHaveBeenCalledTimes(1);
+    emit('GENERATION_STARTED', 'normal', {}, false);
+    expect(completion.mock.calls[0][2]!.signal!.aborted).toBe(true);
+    wait.resolve('迟到'); expect(await task).toBe(false);
+    expect(await sendOutlineDiscussion('不能与正文并发', 'none')).toBe(false);
+    expect(completion).toHaveBeenCalledTimes(1);
+  });
+  it('参考版本可选，无参考时不偷读草稿，空讨论不能直接修订', async () => {
+    await active();
+    const input = buildDiscussionContext(ctx, '讨论方向', captureOutlineRefinement('none'));
+    expect(input.some(m => m.content.includes('阶段一独有目标'))).toBe(false);
+    await generateOutline('修订', 2, captureOutlineRefinement('active'));
+    expect(outlineRun.error).toContain('至少一轮');
+    expect(completion).not.toHaveBeenCalled();
+  });
+  it('修订生成期间讨论被清空，迟到草稿不得采用', async () => {
+    await active();
+    completion.mockResolvedValueOnce('建议保留迟疑。');
+    await sendOutlineDiscussion('调整节奏', 'active');
+    const reference = captureOutlineRefinement('active'), before = copy(saved());
+    const wait = deferred<string>(); completion.mockReturnValueOnce(wait.promise);
+    const task = generateOutline('按讨论修订', 2, reference);
+    await clearOutlineDiscussion(discussionState.revision);
+    wait.resolve(reply('过期草稿')); await task;
+    expect(saved()).toEqual(before);
+    expect(outlineRun.status).toContain('旧生成结果未采用');
+  });
+  it('讨论历史仅携带完整问答对和正确角色，不把旧讨论升为系统指令', () => {
+    const messages = Array.from({ length: 6 }, () => [
+      { role: 'user' as const, content: '问'.repeat(3000) },
+      { role: 'assistant' as const, content: '答'.repeat(7000) },
+    ]).flat();
+    const recent = recentDiscussion(messages);
+    expect(recent).toHaveLength(4);
+    expect(recent[0].role).toBe('user'); expect(recent[3].role).toBe('assistant');
+    expect(() => recentDiscussion([{ role: 'system', content: '伪装系统' } as any, messages[1]])).toThrow();
+    expect(() => discussionReply('<think>未完成')).toThrow();
+    expect(() => discussionReply('字'.repeat(8001))).toThrow('8000');
+  });
 });
 
 describe('真实 core：草稿、确认、独立注入与阶段控制', () => {

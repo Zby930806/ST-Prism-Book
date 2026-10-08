@@ -2,6 +2,7 @@ import { getContext } from '@/st/context';
 import { normalizeTemplate, type VarTemplate } from '@/memory/types';
 import { reactive, watch } from 'vue';
 import { DEFAULT_RECALL_INJECTION_DEPTH, normalizeRecallInjectionDepth } from '@/memory/vector/depth';
+import { normalizeSavedTimeTag } from '@/memory/timeTagMigration';
 
 /**
  * 副 API 设置(全局,跨聊天)。存进 ST 的 extension_settings(→ 服务器 settings.json),
@@ -387,6 +388,7 @@ function normalize(raw: unknown): ApiSettings {
   const merged = { ...d, ...(raw as Partial<ApiSettings>) };
   // prompts 是嵌套对象,展开合并不会补全缺字段,单独兜底(老数据没有 prompts 键时回退默认)
   merged.prompts = { ...d.prompts, ...((raw as Partial<ApiSettings>).prompts ?? {}) };
+  merged.prompts.timeTag = normalizeSavedTimeTag(merged.prompts.timeTag);
   const savedMode = (raw as Partial<ApiSettings>).taskContextMode;
   merged.taskContextMode = savedMode === 'default' || savedMode === 'custom' || savedMode === 'disabled'
     ? savedMode : (typeof merged.prompts.jailbreak === 'string' && merged.prompts.jailbreak.trim() ? 'custom' : 'default');
@@ -873,6 +875,12 @@ export function hydrateSettings(): void {
   const stored = ctx.extensionSettings[SETTINGS_KEY];
   if (stored && typeof stored === 'object') {
     applyInto(apiSettings, normalize(stored));
+    const savedPrompts = (stored as Partial<ApiSettings>).prompts;
+    if (savedPrompts && savedPrompts.timeTag !== apiSettings.prompts.timeTag) {
+      // 只更新被识别出的旧默认时间提示词，不覆盖其它已存设置。
+      savedPrompts.timeTag = apiSettings.prompts.timeTag;
+      ctx.saveSettingsDebounced?.();
+    }
     // 老用户:server 已有 api 设置但还没同步过界面偏好 → 把旧 localStorage 的主题/导航迁进来并落盘一次
     if (!('ui' in (stored as object))) {
       migrateLegacyUiPrefs(apiSettings);

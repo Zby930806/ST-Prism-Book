@@ -16,7 +16,7 @@ const WEEKDAY_NAMES = ['日', '一', '二', '三', '四', '五', '六'];
 
 /** 解析出的故事日期:standard 可精确换算,fantasy 仅同月可比 */
 interface StoryDate {
-  type: 'standard' | 'fantasy';
+  type: 'standard' | 'fantasy' | 'relative';
   year?: number;
   month?: number;
   day?: number | null;
@@ -126,6 +126,13 @@ export function parseStoryDate(dateStr: string): StoryDate | null {
   s = s.replace(/\s*\([日一二三四五六]\)\s*/g, ' ').trim();
   s = normalizeNumericDateSeparators(s);
 
+  // 插件的新开场虚构时间轴：只在同一故事相对轴内比较，不映射公历/星期。
+  const relative = s.match(/^故事第([1-9]\d*)天(?:\s|$)/);
+  if (relative) {
+    const day = Number(relative[1]);
+    return Number.isSafeInteger(day) ? { type: 'relative', day, raw: s } : null;
+  }
+
   // 含 XX/?? 占位 → 架空
   if (/[xX]{2}|[?？]{2}/.test(s)) {
     return { type: 'fantasy', raw: dateStr.trim() };
@@ -215,6 +222,9 @@ export function calculateRelativeDays(fromDate: string, toDate: string): number 
   const from = parseStoryDate(fromDate);
   const to = parseStoryDate(toDate);
   if (!from || !to) return null;
+  if (from.type === 'relative' || to.type === 'relative') {
+    return from.type === 'relative' && to.type === 'relative' ? to.day! - from.day! : null;
+  }
 
   // 标准日历:精确算(用 setFullYear 避开 Date 对小年份的偏移)
   if (from.type === 'standard' && to.type === 'standard') {

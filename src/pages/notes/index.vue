@@ -11,6 +11,7 @@ import {
 import type { NoteRecord, NoteDecision } from '@/notes/types';
 import { ORIGINAL_NOTES_PROMPT } from '@/notes/prompt';
 import { useNotesModelCatalog } from '@/notes/modelCatalog';
+import { getContext } from '@/st/context';
 
 const actionError = ref('');
 const notice = ref('');
@@ -40,6 +41,27 @@ const PAGE_SIZE = 5;
 const orderedRecords = computed(() => [...notesState.records].sort((a, b) => b.createdAt - a.createdAt));
 const pageCount = computed(() => Math.max(1, Math.ceil(orderedRecords.value.length / PAGE_SIZE)));
 const visibleRecords = computed(() => orderedRecords.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE));
+const expandedRecords = reactive(new Set<string>());
+const recordExpansionScope = ref(0);
+let expansionChat: NonNullable<ReturnType<typeof getContext>>['chat'] | undefined;
+let expansionChatId: string | undefined;
+// revision 同时覆盖切聊和同聊保存；只有聊天身份改变才清空手动展开状态。
+watch(() => notesState.revision, () => {
+  const context = getContext();
+  const chatId = context?.getCurrentChatId();
+  if (context?.chat === expansionChat && chatId === expansionChatId) return;
+  expansionChat = context?.chat;
+  expansionChatId = chatId;
+  expandedRecords.clear();
+  recordExpansionScope.value++;
+}, { immediate: true, flush: 'sync' });
+function toggleRecord(recordId: string, event: Event) {
+  const details = event.currentTarget as HTMLDetailsElement;
+  // 原生 toggle 延迟派发，旧聊天的事件不得写入新聊天的展开状态。
+  if (details.dataset.expansionScope !== String(recordExpansionScope.value)) return;
+  if (details.open) expandedRecords.add(recordId);
+  else expandedRecords.delete(recordId);
+}
 const decisions = computed(() => [...notesState.decisions]
   .filter(decision => decision.status !== 'rejected')
   .sort((a, b) => b.createdAt - a.createdAt));
@@ -323,7 +345,7 @@ function importNotes() {
     <section class="notes-section" aria-label="最近札记与历史">
       <div class="notes-section-heading"><h2>最近札记</h2><span class="notes-hint">共 {{ orderedRecords.length }} 份 · 每页最多 5 份</span></div>
       <div v-if="!orderedRecords.length" class="notes-empty"><Icon name="notes" :size="28" /><p>先在戏外聊聊下一步。</p><p class="notes-hint">启用并配置独立 API 后生成，或在下方导入已有 aftertalk。</p></div>
-      <details v-for="(record, index) in visibleRecords" :key="record.id" class="notes-card notes-record" :open="index === 0">
+      <details v-for="(record, index) in visibleRecords" :key="JSON.stringify([recordExpansionScope, record.id])" class="notes-card notes-record" :data-expansion-scope="recordExpansionScope" :open="expandedRecords.has(record.id)" @toggle="toggleRecord(record.id, $event)">
         <summary>
           <span>{{ page === 1 && index === 0 ? '最新札记' : '历史札记' }} · 第 {{ record.floor }} 楼</span>
           <span v-if="!isCurrent(record)" class="notes-invalid">已失效</span>

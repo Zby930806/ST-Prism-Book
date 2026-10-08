@@ -15,6 +15,7 @@ import { apiSettings } from '@/api/settings';
 import { getContext, type STMessage } from '@/st/context';
 import { stripBaiBaiImageTags } from './imageTag';
 import type { LeafExtra } from './types';
+import { normalizeSavedTimeTag } from './timeTagMigration';
 
 /** 标签固定标识(解析正则与隐藏正则都依赖它) */
 export const START_TAG = 'bbs_start';
@@ -23,6 +24,23 @@ export const END_TAG = 'bbs_end';
 export const ITEMS_TAG = 'bbs_items';
 /** 变量变动旁注标签:与 bbs_items 同机制,写本楼自定义变量净变动,供主模型看到「已改过」防重复改 */
 export const VARS_TAG = 'bbs_vars';
+/** 协议状态，不是故事日期；不得写入时钟、计算相对时间或期限。 */
+export const TIME_PENDING = '时间待设定';
+export const INITIAL_TIME_KEY = 'prism_book_initial_time';
+export const INITIAL_TIME_ORIGIN_KEY = 'prism_book_initial_time_origin';
+export const FICTIONAL_OPENING_TIME = '故事第1天 08:00';
+
+export function storyTimeValue(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim();
+  return !text || /^(时间待设定|未知|未设定|null|undefined)$/i.test(text) ? undefined : text;
+}
+
+/** 只读当前聊天的用户设定，不从现实日期、变量、角色生日或回忆猜开场日期。 */
+export function initialStoryTime(): string {
+  const ctx = getContext();
+  return ctx?.getCurrentChatId?.() ? storyTimeValue(ctx.chatMetadata?.[INITIAL_TIME_KEY]) || '' : '';
+}
 
 /**
  * 所有「时间锚点生产提示词」共用的完整格式协议。
@@ -30,20 +48,21 @@ export const VARS_TAG = 'bbs_vars';
  */
 export const RULE_COMPLETE_TIME_ANCHOR = `【时间锚点证据与精度】
 - 已知完整日期/纪年时保留年份,起止端各自写全已有信息;不能缩掉已知锚点。
-- 原文只给季节、日期或时段时保持该精度,不补未知年份/分钟。没有时间依据时用空字符串,不自行初始化时钟。
+- 原文只给季节、日期或时段时保持该精度,不补未知年份/分钟。仅深夜/黄昏/清晨等时段也算依据,不得被虚构08:00覆盖。确无时间依据的新开场才用系统统一虚构起点。
 - 只有明确锚点和明确经过时长才能直接换算。推测不作为确定时间,不按楼数推算时长。
 - 时间标签维护当前主线时钟;闪回/插叙的过去时间写在正文叙述中,不倒灌当前时间。`;
 
 /** 注入主对话的固定提示词默认值(可在设置里覆盖)。 */
 export const TIME_TAG_PROMPT = `【主线时间锚点】
-正文前后各输出一次 <${START_TAG}>时间</${START_TAG}> 与 <${END_TAG}>时间</${END_TAG}>。只写主线已明确的时间或明确时长的直接换算,保持原有精度,不按对话/用餐的经验强加时间。
-没有依据时标签内容留空,不要写“未知”占位或设定日期。纯闪回沿用主线已有时间(可空),过去事件的时间在正文中自然交代。正文无需复述记忆简报或状态表。
-${RULE_COMPLETE_TIME_ANCHOR}`;
+正文前后各输出一次 <${START_TAG}>时间</${START_TAG}> 与 <${END_TAG}>时间</${END_TAG}>。标签不留空:优先用户时间与正文主线时间;仅深夜/黄昏/清晨等时段也保留,不得被虚构08:00覆盖。确无依据的新开场才用系统统一虚构起点,不另选日期或用现实日期。明确推进才更新,不每楼重置。保留已知年份及原精度,不补未知年份/分钟,不按经验推算。仅明确锚点与时长可换算。纯闪回沿用主线时间,过去时间只写正文。`;
 
 /** 当前生效的固定提示词(用户自定义优先,空则用内置默认)。 */
 export function timeTagPrompt(): string {
-  const custom = apiSettings.prompts.timeTag.trim();
-  return custom || TIME_TAG_PROMPT;
+  const custom = normalizeSavedTimeTag(apiSettings.prompts.timeTag).trim();
+  const ctx = getContext();
+  const current = ctx?.getCurrentChatId?.() ? latestStoryTime(ctx.chat) || initialStoryTime() : '';
+  const fictional = current && current === initialStoryTime() && ctx?.chatMetadata?.[INITIAL_TIME_ORIGIN_KEY] === 'fictional';
+  return (custom || TIME_TAG_PROMPT) + (current ? `\n当前主线时间基准:${current}${fictional ? '(虚构后备;正文明确时间优先)' : ''}` : '');
 }
 
 // 解析用正则:容忍标签名大小写与首尾空白;非贪婪取内部文本。
@@ -53,8 +72,8 @@ const RE_END = new RegExp(`<${END_TAG}\\b[^>]*>([\\s\\S]*?)</${END_TAG}>`, 'i');
 /** 从一段正文里解析起止时间;取不到的为 undefined(降级:调用方各自兜底)。 */
 export function parseTimeRange(mes: string): { start?: string; end?: string } {
   const s = String(mes ?? '');
-  const start = s.match(RE_START)?.[1]?.trim() || undefined;
-  const end = s.match(RE_END)?.[1]?.trim() || undefined;
+  const start = storyTimeValue(s.match(RE_START)?.[1]);
+  const end = storyTimeValue(s.match(RE_END)?.[1]);
   return { start, end };
 }
 
@@ -84,7 +103,7 @@ export function latestStoryTime(chat: STMessage[] | null): string {
     // ② 标签缺失 → 回退该楼有效叶子的时间(旧聊天补摘:正文无标签但叶子有时间)
     const leaf = m.extra?.bbs_leaf as LeafExtra | undefined;
     if (leaf?.id && leaf.delta && leafSwipeMatches(leaf, m)) {
-      const leafTime = leaf.timeEnd?.trim() || leaf.timeStart?.trim();
+      const leafTime = storyTimeValue(leaf.timeEnd) || storyTimeValue(leaf.timeStart);
       if (leafTime) return leafTime;
     }
   }
@@ -137,7 +156,7 @@ function stripCustomTags(s: string): string {
  * 现已废弃 stripHtml,改为只整块删、保留其余标签原文(主/副模型都能消化残留标签)。
  */
 // 思维链块正则(配对块,含内部内容)。供 clampToTimeTags 与入库前预清洗共用,避免两处漂移。
-const RE_THINK_BLOCK = /<think(?:ing)?\b[\s\S]*?<\/think(?:ing)?>/gi;
+const RE_THINK_BLOCK = /<think(?:ing)?\b[^>]*>[\s\S]*?(?:<\/think(?:ing)?\s*>|$)/gi;
 
 /**
  * 只剥思维链 <think>/<thinking> 块(含内部内容)。
@@ -289,15 +308,22 @@ export function clampToTimeTags(mes: string): string {
     .replace(/<horae[\s\S]*?>[\s\S]*?<\/horae[\s\S]*?>/gi, ''); // 旧 horae 格式
   s = stripBaiBaiImageTags(s); // 柏宝绘标签(含跨行提示词);独占行时恢复插入前换行
   s = stripCustomTags(s); // 用户自定义标签
-  s = stripManagedTags(s); // 仅清理插件托管的尾部旁注
+  // 读取正文先排除托管块，再定位边界。旁注内部可能引用时间标签，不能用它裁正文。
+  // 写回/反解析仍使用上方严格的尾部所有权规则，不因此扩大可改写范围。
+  for (const tag of [ITEMS_TAG, VARS_TAG]) {
+    s = s.replace(new RegExp(`<${tag}\\b(?=[^>]*\\bsource=["']baibai-book["'])[^>]*>[\\s\\S]*?(?:</${tag}\\s*>|$)`, 'gi'), '');
+  }
+  const tail = tailManagedGroupStart(s);
+  if (tail >= 0) s = s.slice(0, tail);
+  s = stripManagedTags(s);
 
   // 最后一个 <bbs_start> 的位置:全局扫一遍取末次
-  const startRe = new RegExp(`<${START_TAG}\\b`, 'gi');
+  const startRe = new RegExp(RE_START.source, 'gi');
   let lastStart = -1;
   for (let m = startRe.exec(s); m; m = startRe.exec(s)) lastStart = m.index;
   if (lastStart >= 0) s = s.slice(lastStart);
   // 第一个 </bbs_end>(在已裁过前缀的串里找)
-  const endMatch = s.match(new RegExp(`</${END_TAG}>`, 'i'));
+  const endMatch = s.match(RE_END);
   if (endMatch && endMatch.index !== undefined) {
     s = s.slice(0, endMatch.index + endMatch[0].length);
   }
@@ -314,6 +340,21 @@ export function clampToTimeTags(mes: string): string {
  */
 export function cleanBody(mes: string): string {
   return inlineTimeTags(clampToTimeTags(mes));
+}
+
+/** 时间标签只是边界/元数据，不能把只有标签与旁注的空楼当作故事事实。 */
+export function hasStoryBody(mes: string): boolean {
+  return !!clampToTimeTags(mes).replace(RE_START, '').replace(RE_END, '').trim();
+}
+
+/** 缺端点的本地兜底仅识别明确时间行/开头时段，不扫描正文中的任意年份或闪回。 */
+export function explicitOpeningTime(mes: string): string | undefined {
+  const body = clampToTimeTags(mes).replace(RE_START, '').replace(RE_END, '').trim();
+  const line = body.split(/[，,。；;\n]/, 1)[0].trim();
+  const labelled = line.match(/^(?:当前(?:主线)?时间|开场时间)\s*[：:]\s*(.{1,80})$/);
+  if (labelled && !/[<>]|回忆|闪回|插叙|往事|当年|曾经/.test(labelled[1])) return storyTimeValue(labelled[1]);
+  const period = line.match(/^(?:此刻|此时|现在)?(?:是|为)?(深夜|黄昏|清晨|黎明|凌晨|早晨|上午|中午|下午|傍晚|晚上|夜晚)$/);
+  return period?.[1];
 }
 
 /**

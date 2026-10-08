@@ -586,8 +586,8 @@ export const TIME_FIELD_NO_TAGS = `  "timeStart": "本段开始时的故事内�
   "timeEnd": "本段结束时的故事内时间,见下方【时间规则】。",`;
 export const TIME_RULE_NO_TAGS = `═══ 【时间规则】(timeStart / timeEnd 字段) ═══
 没有标签时,只提取正文明确时间或从明确锚点与明确时长可直接算出的时间。普通对话、用餐不能按经验强加分钟数。
-没有依据的端点写空字符串;保留原文日期/时段精度,不为定位制造年份或具体时刻。需要推算但不能直接确定时,在 summary 保留事件相对关系,时间字段留空。
-整段为闪回/插叙时,时间字段写主线锚点(可空),过去事件时间写在 summary 并标明回忆;不得以回忆覆盖当前时钟。没有主线新变化时不输出状态补丁。
+优先正文明确的主线时间与用户设定;新开场没有时间依据时沿用系统给定的统一虚构起点,起止端均须填写,不独立选日期,不每楼重置。没有推进依据时沿用当前锚点。保留原文精度,不补未知年份或分钟。旧聊天的未知/空时间仍兼容,不因此拒绝摘要或补造日期。
+整段为闪回/插叙时沿用主线锚点,过去事件时间只写在 summary 并标明回忆;不得以回忆覆盖当前时钟。没有主线新变化时不输出状态补丁。
 ${RULE_COMPLETE_TIME_ANCHOR}`;
 
 const RESUMMARY_INPUT = `【主角】{{user}}  【角色】{{char}}
@@ -710,6 +710,8 @@ interface BuildArgs {
   user: string;
   char: string;
   time: string;
+  /** 程序初始化的后备起点，不得压过本楼明确的故事时间。 */
+  timeIsFictional?: boolean;
   location: string;
   /** 用户操控主角的当前客观档案 */
   protagonist: MemProtagonist;
@@ -1020,12 +1022,12 @@ ${RULE_PROTAGONIST}`;
 
 /** 自定义摘要可能没用 {{time_field}}/{{time_rule}},无标签楼仍须强制产出锚点字段。 */
 const TIME_ANCHOR_PROTOCOL_SUPPLEMENT = `【棱镜宝书时间锚点兼容协议】
-本轮正文没有可读取的时间标签。无论上方自定义模板是否提到时间,最终 JSON 根对象都必须包含:
+本轮正文缺少完整的有据时间标签。无论上方自定义模板是否提到时间,最终 JSON 根对象使用以下协议:
 {
-  "timeStart": "本段开始时的完整故事内时间",
-  "timeEnd": "本段结束时的完整故事内时间"
+  "timeStart": "本段开始时的主线时间",
+  "timeEnd": "本段结束时的主线时间"
 }
-两字段均不得省略;若本段时间没有推进,写相同的完整时间。
+新开场优先正文明确时间与用户设定,无依据才用系统提供的统一虚构起点,起止端都须填写;无推进依据则沿用。旧聊天未知时间兼容空字符串或省略,不因此拒绝摘要或补造日期。回忆时间不得冒充当前。
 
 ${RULE_COMPLETE_TIME_ANCHOR}`;
 
@@ -1068,7 +1070,7 @@ export function buildSummaryPrompt(a: BuildArgs): { system: string; user: string
     user: a.user || '主角',
     char: a.char || '角色',
     history_block: a.history.trim() || '(无,这是开篇)',
-    state_time: a.time || '(未知)',
+    state_time: a.time ? a.time + (a.timeIsFictional ? '(程序虚构后备起点；本楼正文/用户明确的主线时间优先，不当作真实日期)' : '') : '(未知)',
     state_location: a.location || '(未知)',
     protagonist_block: fmtProtagonist(a.protagonist),
     items_block: fmtItems(a.items),
@@ -1109,12 +1111,12 @@ export function buildSummaryPrompt(a: BuildArgs): { system: string; user: string
   if (!prompt.includes('【关系线保留】')) supplements.push(RULE_RELATION_MOMENTUM);
   // {{time_rule}} 在无时间标签时本身已经带有完整时间协议;
   // 只有自定义模板没有带入它时,才追加兼容协议,避免完整时间要求重复注入。
-  if (!a.hasTimeTags && !prompt.includes('【完整时间锚点格式(系统强制)】')) {
+  if (!a.hasTimeTags && !prompt.includes('【时间锚点证据与精度】')) {
     supplements.push(TIME_ANCHOR_PROTOCOL_SUPPLEMENT);
   }
   return {
     system: fill(supplements.join('\n\n'), macros),
-    user: `${prompt}\n\n【主角当前档案(本轮之前,只读参考)】\n${macros.protagonist_block}`
+    user: `${prompt}\n\n【本轮之前的主线时间基准(不是回忆日期)】\n${macros.state_time}\n\n【主角当前档案(本轮之前,只读参考)】\n${macros.protagonist_block}`
       + (prompt.includes(macros.npcs_block) ? '' : `\n\n【已登场NPC(本轮之前,好感估计只作基线,不重复结算)】\n${macros.npcs_block}`)
       + (prompt.includes(macros.lifedetails_block.trim()) ? '' : `\n\n${macros.lifedetails_block}`),
   };

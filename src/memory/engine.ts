@@ -12,7 +12,7 @@ import { parseSummaryResponse, SummaryResponseError } from './summaryResponse';
 import { buildConditionPatchContext } from './conditionPatch';
 import { clearInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
 import { buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
-import { clampToTimeTags, cleanBody, parseTimeRange, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
+import { clampToTimeTags, cleanBody, explicitOpeningTime, hasStoryBody, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, latestStoryTime, parseTimeRange, storyTimeValue, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import { memory, memoryWriteIssue, checkCompatibility, recomputeDerived, scheduleLeafFlush } from './store';
 import { legacyLeafIssue } from './compatibility';
@@ -21,6 +21,7 @@ import { scheduleVectorIndex } from './vector';
 import { invalidateRecallCache } from './vector/cache';
 import { clearRecallInjection } from './vector/recall';
 import { reactive, watch } from 'vue';
+import { ensureOpeningStoryTime } from './initialTime';
 
 function llmString(v: unknown): string {
   return typeof v === 'string' ? v.trim() : '';
@@ -511,9 +512,8 @@ function shouldSkipLastAiForGeneration(chat: STMessage[], type: string | undefin
  * 返回该开场白楼层索引;不匹配返回 -1。
  *
  * 为何要特判:开场白不是本插件提示词生成的(卡片预设),通常既无 <bbs_start>/<bbs_end> 标签、
- * 也还没摘要 —— 此刻没有任何时间锚点。若放任首次正文生成,主模型会自行编一个时间,而开场白摘要
- * 又会独立编另一个,两者对不上(用户实测的时间错乱)。解法:先摘开场白,把时间落进叶子,主模型
- * 生成时经 latestStoryTime 的「无标签→回退叶子时间」兜底 + 注入的当前时间,即以此为基准推进,同步。
+ * 也还没摘要。先整理已有正文与用户开场时间，有据时间落入叶子供主模型共用。
+ * 无依据时仍可保存摘要，但不声称已建立时钟，不让摘要/正文各自编造开场日期。
  * 开场白已带时间标签时不特判(主模型能直接读标签,有锚点),不必多等一次请求。
  */
 export function openingPendingFloor(chat: STMessage[]): number {
@@ -577,18 +577,27 @@ export async function handleGenerationIntercept(
   normalizeBacklogNotices(chat); // 兼容升级前已存在但尚未标记的提示楼
   const skipLastAi = shouldSkipLastAiForGeneration(chat, type);
 
-  // 开场白特判(不拦,只等):开场白无时间标签、又还没摘时,先摘它建立时间锚点,再放行首次生成。
-  // 否则主模型与开场白摘要会各自凭空编一个开场时间,导致正文与摘要时间对不上(用户实测)。
+  if (!skipLastAi) {
+    const metadata = ctx.chatMetadata;
+    const chatId = ctx.getCurrentChatId();
+    try { await ensureOpeningStoryTime(); }
+    catch { engineState.lastError = '开场时间尚未保存，请在摘要页核对开场时间后重试。'; abort(true); return true; }
+    if (getContext()?.chat !== chat || getContext()?.chatMetadata !== metadata || getContext()?.getCurrentChatId?.() !== chatId) {
+      abort(true); return true;
+    }
+  }
+
+  // 开场白特判(不拦,只等):先整理开场事实，共享有据时间；未知时间不妨碍摘要。
   // 摘完(或失败退化)即继续放行——开场白摘要失败不该挡住用户开始游戏。
   // 正在翻页/重生成的末楼尚未定稿,即使是真开场白也不能摘旧页来建立锚点。
   const opening = skipLastAi ? -1 : openingPendingFloor(chat);
   if (opening >= 0) {
     const inflight = currentSummaryPromise();
     if (inflight) {
-      toast('正在为开场白建立时间锚点,请稍候…', 'info');
+      toast('正在整理开场白；仅提取有依据的时间，请稍候…', 'info');
       await inflight; // promise 永不 reject,不会卡死生成
     } else if (!busy) {
-      toast('正在为开场白建立时间锚点,请稍候…', 'info');
+      toast('正在整理开场白；仅提取有依据的时间，请稍候…', 'info');
       await runSummary(opening);
     }
     // 摘要落盘后 refreshInjection 已把「当前时间」刷成开场白时间;继续走洞判定(通常放行)。
@@ -788,6 +797,7 @@ export async function setFloorOmit(floor: number, on: boolean): Promise<void> {
 export async function maybeSummarizePrevAi(
   skipLastAi: boolean,
   waitUntilRequestStarts = false,
+  initializeOpening = false,
 ): Promise<void> {
   const ctx = getContext();
   const chat = ctx?.chat ?? [];
@@ -820,7 +830,7 @@ export async function maybeSummarizePrevAi(
     const started = new Promise<'request-started'>(resolve => {
       markStarted = () => resolve('request-started');
     });
-    const run = runSummary(target, { onRequestStart: markStarted });
+    const run = runSummary(target, { onRequestStart: markStarted, initializeOpening });
     void run
       .then(async () => {
         await afterSummaryHideAndInject(chat);
@@ -836,7 +846,7 @@ export async function maybeSummarizePrevAi(
     return;
   }
 
-  await runSummary(target);
+  await runSummary(target, { initializeOpening });
   await afterSummaryHideAndInject(chat);
 }
 
@@ -1035,6 +1045,7 @@ async function sendAndParse<T>(
  * 注:早退(busy/非 AI 楼等)也会经历「置 p → 立即 finally 清回 null」,只是 p 几乎瞬间 resolve,不构成有效在飞。
  */
 interface RunSummaryOptions {
+  initializeOpening?: boolean;
   replaceLeaf?: LeafExtra;
   checkResummary?: boolean;
   /** 内部启动屏障:摘要上下文准备完毕、即将调用 API 时触发。 */
@@ -1078,7 +1089,7 @@ function floorTargets(chat: STMessage[], aiFloor: number, covered: Set<number>):
     if (covered.has(i)) break;
     if (chat[i]?.extra?.bbs_omit) continue; // 番外楼:不把它正文并进摘要上下文(但不作屏障)
     if (isAiFloor(chat[i])) break; // 碰到上一个 AI 楼层就停
-    if (chat[i]) targets.unshift(i);
+    if (chat[i]?.is_user && !chat[i].is_system) targets.unshift(i); // 系统通知不是待摘要正文。
   }
   return targets;
 }
@@ -1117,10 +1128,11 @@ function applyLeafForFloor(
   const storedDelta = finalizeDelta(delta, openPlansOrdered, stateBefore.lifeDetails);
 
   // 时间起止:标签优先(与新剧情同源不漂移);标签缺的那端用 AI 补的 timeStart/timeEnd 兜底。
-  const timeStart = tag.start || llmOptionalScalar(delta.timeStart) || undefined;
-  const timeEnd = tag.end || llmOptionalScalar(delta.timeEnd) || llmOptionalScalar(delta.time) || undefined;
+  const timeStart = tag.start || storyTimeValue(delta.timeStart);
+  const timeEnd = tag.end || storyTimeValue(delta.timeEnd) || storyTimeValue(delta.time);
   // 状态当前时间(覆盖型):用结束时间(本段最后时刻);取不到则保留既有状态。
   if (timeEnd) storedDelta.time = timeEnd;
+  else delete storedDelta.time; // 协议状态/空值不覆盖既有时钟。
 
   const leaf: LeafExtra = {
     id: replaceLeaf?.id ?? makeLeafId(),
@@ -1159,7 +1171,7 @@ async function summarizeFloorWork(
   chat: STMessage[],
   aiFloor: number,
   sender: { send: (messages: ChatMsg[]) => Promise<string>; label: string },
-  options: Pick<RunSummaryOptions, 'replaceLeaf' | 'onRequestStart'> = {},
+  options: Pick<RunSummaryOptions, 'replaceLeaf' | 'onRequestStart' | 'initializeOpening'> = {},
 ): Promise<void> {
   const ctx = getContext();
   if (!ctx) throw new Error('无 ST 上下文');
@@ -1169,14 +1181,26 @@ async function summarizeFloorWork(
 
   const covered = options.replaceLeaf ? coveredBeforeFloor(chat, aiFloor) : coveredSet(chat);
   const targets = floorTargets(chat, aiFloor, covered);
+  if (!hasStoryBody(chat[aiFloor].mes)) {
+    throw new Error(`楼层 #${aiFloor} 没有可提取的故事正文（仅时间标签、思考或旁注）；未请求模型，也未保存摘要。请先核对该楼正文。`);
+  }
+  if (options.initializeOpening) {
+    const metadata = ctx.chatMetadata;
+    const chatId = ctx.getCurrentChatId?.();
+    await ensureOpeningStoryTime();
+    if (getContext()?.chat !== chat || getContext()?.chatMetadata !== metadata || getContext()?.getCurrentChatId?.() !== chatId) {
+      throw new Error('开场初始化期间聊天发生变化，未请求摘要。');
+    }
+  }
   const content = renderMessages(chat, targets, ctx.name1, ctx.name2);
   const requestChatId = ctx.getCurrentChatId?.();
   const requestMetadata = ctx.chatMetadata;
+  const requestInitialTime = initialStoryTime();
   const sources = targets.map(i => ({ i, message: chat[i], text: chat[i].mes, swipe: chat[i].swipe_id }));
   const assertUnchanged = () => {
     const issue = memoryWriteIssue() || legacyLeafIssue(chat[aiFloor]?.extra?.bbs_leaf, chat[aiFloor]);
     if (issue) throw new Error(issue);
-    if (getContext()?.chat !== chat || getContext()?.chatMetadata !== requestMetadata || getContext()?.getCurrentChatId?.() !== requestChatId ||
+    if (getContext()?.chat !== chat || getContext()?.chatMetadata !== requestMetadata || getContext()?.getCurrentChatId?.() !== requestChatId || initialStoryTime() !== requestInitialTime ||
         sources.some(s => chat[s.i] !== s.message || s.message.mes !== s.text || s.message.swipe_id !== s.swipe)) {
       throw new Error('摘要期间聊天或目标正文发生变化，本次结果未写入；请重新摘要。');
     }
@@ -1198,10 +1222,13 @@ async function summarizeFloorWork(
   const persona = fetchUserPersona();
 
   const openPlansOrdered = stateBefore.plans.filter(p => p.status === 'open');
+  const priorTime = latestStoryTime(chat.slice(0, beforeIndex)) || storyTimeValue(stateBefore.state.time);
+  const fictionalOpening = !priorTime && !!initialStoryTime() && ctx.chatMetadata?.[INITIAL_TIME_ORIGIN_KEY] === 'fictional';
   const prompt = buildSummaryPrompt({
     user: ctx.name1,
     char: ctx.name2,
-    time: stateBefore.state.time,
+    time: priorTime || initialStoryTime(),
+    timeIsFictional: fictionalOpening,
     location: stateBefore.state.location,
     sceneFocus: stateBefore.state.sceneFocus,
     lifeDetails: stateBefore.lifeDetails,
@@ -1252,6 +1279,19 @@ async function summarizeFloorWork(
       conditionContext: { ...stateBefore, content, strict: builtin },
       finalize: value => finalizeDelta(value, openPlansOrdered, stateBefore.lifeDetails),
     });
+    if (initialStoryTime()) {
+      // 只补缺失端点，不能把后续楼层的完整日期降为正文中的“夜晚”等时段。
+      // 只有尚无历史叶子的真正新开场，明确原文才可纠正模型照抄的虚构默认值。
+      const newOpening = fictionalOpening && aiFloor === chat.findIndex(isAiFloor) && !chat.some(m => m.extra?.bbs_leaf);
+      const explicit = newOpening ? explicitOpeningTime(chat[aiFloor].mes) : undefined;
+      const modelStart = storyTimeValue(d.timeStart);
+      const modelEnd = storyTimeValue(d.timeEnd) || storyTimeValue(d.time);
+      const start = tag.start || (explicit && modelStart === initialStoryTime() ? explicit : modelStart);
+      const end = tag.end || (explicit && modelEnd === initialStoryTime() ? explicit : modelEnd);
+      // 一端缺失优先沿用另一端，不推测额外时长；两端都缺才使用原文/统一基准。
+      d.timeStart = start || end || explicit || priorTime || initialStoryTime();
+      d.timeEnd = end || start || explicit || priorTime || initialStoryTime();
+    }
     console.log('[棱镜宝书] 摘要校验通过:', { floor: aiFloor, chars: Array.from(d.summary).length, fields: Object.keys(d) });
     return d;
   }).catch((error: unknown) => {
@@ -1895,7 +1935,7 @@ export function bindEngine(): void {
   // 发新消息:此刻末尾 AI 是「上一条已定稿」的回复,从最早缺口开始顺序追赶到它。
   es.on(et.USER_MESSAGE_RENDERED, () => {
     console.log('[棱镜宝书] USER_MESSAGE_RENDERED → 摘上一条 AI');
-    void maybeSummarizePrevAi(false);
+    void maybeSummarizePrevAi(false, false, true);
   });
 
   // 重新生成 / 翻页:聊天末尾实际是 AI 时才视为正在改写并跳过;
@@ -1909,7 +1949,7 @@ export function bindEngine(): void {
       const chat = getContext()?.chat ?? [];
       const skipLastAi = shouldSkipLastAiForGeneration(chat, type);
       console.log('[棱镜宝书] GENERATION_STARTED → 自动摘要, type =', type, '| skipLastAi =', skipLastAi);
-      void maybeSummarizePrevAi(skipLastAi);
+      void maybeSummarizePrevAi(skipLastAi, false, !skipLastAi);
     });
   }
 
