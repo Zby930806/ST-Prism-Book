@@ -210,8 +210,8 @@ onUnmounted(() => window.removeEventListener('resize', onResize));
   cursor: grab;
   touch-action: none;
   user-select: none;
-  /* drop-shadow 对 clip-path(书签)与 border-radius(圆/方)都跟随轮廓,统一用它 */
-  filter: drop-shadow(0 6px 14px oklch(0 0 0 / 0.28));
+  /* 由公共令牌提供轻阴影；触屏和窄屏直接关闭滤镜。 */
+  filter: var(--bbs-orb-shadow);
   opacity: var(--orb-rest-opacity, 0.62);
   transition:
     transform var(--bbs-dur) var(--bbs-ease),

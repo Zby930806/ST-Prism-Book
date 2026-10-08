@@ -124,7 +124,7 @@ const windowStyle = computed(() => {
 
             <!-- 题首 -->
             <header class="bbs-head">
-              <div class="bbs-brand"><BrandMark :size="52" /><div class="bbs-brand-copy"><span class="bbs-brand-name">棱镜宝书</span><span class="bbs-brand-tagline">PRISM BOOK <span aria-hidden="true">·</span> 让故事记得来路</span></div></div>
+              <div class="bbs-brand"><BrandMark :size="32" /><div class="bbs-brand-copy"><span class="bbs-brand-name">棱镜宝书</span><span class="bbs-brand-tagline">PRISM BOOK</span></div></div>
               <div class="bbs-head-actions">
                 <span class="bbs-version">{{ PLUGIN_VERSION }}</span>
                 <button class="bbs-icon-btn" type="button" :title="`切换主题:${nextTheme.label}`" :aria-label="`切换主题:${nextTheme.label}`" @click="cycleTheme">
@@ -215,7 +215,7 @@ const windowStyle = computed(() => {
 
 /* 窗口进出场:由遮罩 Transition 的 class 作后代选择器驱动(窗口自身不再套 Transition——
    父子 v-if 同时翻转时子 Transition 的 leave 不触发,实测窗口会无动画直接被移除)。
-   进出场两端同款 transform → 对称。PC 微升+略放大;移动端在 media query 里改成滑回底部。 */
+   进出场两端同款 transform → 对称。PC 微升+略放大；触屏和窄屏仅切换可见状态。 */
 .bbs-fade-enter-from .bbs-window,
 .bbs-fade-leave-to .bbs-window {
   opacity: 0;
@@ -245,7 +245,7 @@ const windowStyle = computed(() => {
     opacity var(--bbs-dur) var(--bbs-ease);
 }
 
-/* ============ 移动端:抓手 + 抽屉上滑入场 ============ */
+/* ============ 移动端:保留抓手与真实下拉手势 ============ */
 @media (max-width: 640px) {
   .bbs-grabber {
     display: flex;
@@ -265,20 +265,46 @@ const windowStyle = computed(() => {
   .bbs-head {
     padding: 4px 16px 12px;
   }
-  /* 抽屉从底部滑入 / 滑回底部(纯位移,不淡透明) */
-  .bbs-fade-enter-from .bbs-window,
-  .bbs-fade-leave-to .bbs-window {
-    opacity: 1;
-    transform: translateY(100%) scale(1);
-  }
-  /* 遮罩离场延后淡出:让抽屉先滑回底部,背景殿后再撤,否则窗口随遮罩一起被拉透明,
-     滑动过程看不见(窗口是遮罩子元素,父 opacity 会合成到子)。 */
-  .bbs-fade-leave-active {
-    transition: opacity 0.16s var(--bbs-ease) 0.18s;
-  }
-  /* 窗口滑回底部要走完整 --bbs-dur,不被上面遮罩的短时长牵连(各自 transition 独立,这里仅强调) */
 }
 
-.bbs-brand{display:flex;align-items:center;gap:12px;min-width:0}.bbs-brand-copy{display:flex;flex-direction:column;gap:2px;min-width:0}.bbs-brand-tagline{font-size:10px;letter-spacing:.06em;color:var(--bbs-ink-muted)}.bbs-brand-tagline span{margin:0 4px;color:var(--bbs-warning)}.bbs-head-actions{align-items:center}.bbs-version{font-family:var(--bbs-font-mono);font-size:10px;color:var(--bbs-ink-muted);border:1px solid var(--bbs-line);border-radius:var(--bbs-radius-pill);padding:3px 8px;margin-right:6px}
+.bbs-brand{display:flex;align-items:center;gap:12px;min-width:0}.bbs-brand-copy{display:flex;flex-direction:column;gap:2px;min-width:0}.bbs-brand-tagline{font-size:10px;letter-spacing:.06em;color:var(--bbs-ink-muted)}.bbs-brand-tagline span{margin:0 4px;color:var(--bbs-ink-muted)}.bbs-head-actions{align-items:center}.bbs-version{font-family:var(--bbs-font-mono);font-size:10px;color:var(--bbs-ink-muted);border:1px solid var(--bbs-line);border-radius:var(--bbs-radius-pill);padding:3px 8px;margin-right:6px}
 @media(max-width:640px){.bbs-brand{gap:7px}.bbs-brand :deep(img){width:40px;height:40px}.bbs-brand-name{font-size:17px}.bbs-brand-tagline{font-size:9px;letter-spacing:0}.bbs-version{display:none}.bbs-head-actions{gap:5px}.bbs-icon-btn{width:38px;height:38px}.bbs-head{background:var(--bbs-bg);padding:0 14px 10px;}.bbs-grabber{height:20px}}
+/* 移动端不再滑动整张长内容页或延迟退场；不覆盖 windowStyle 的拖动位移。
+   桌面减少动效同样直接到终态，避免 0.001ms 的循环/延迟仍被调度。 */
+@media (max-width: 640px), (hover: none) and (pointer: coarse), (prefers-reduced-motion: reduce) {
+  .bbs-window,
+  .bbs-icon-btn,
+  .bbs-fade-enter-active,
+  .bbs-fade-leave-active,
+  .bbs-page-enter-active,
+  .bbs-page-leave-active {
+    transition: none;
+  }
+  .bbs-fade-enter-from,
+  .bbs-fade-leave-to,
+  .bbs-fade-enter-from .bbs-window,
+  .bbs-fade-leave-to .bbs-window,
+  .bbs-page-enter-from,
+  .bbs-page-leave-to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* 轻量书脊式题首：品牌退后，让当前阅读内容成为视觉重心。 */
+.bbs-head { padding: 16px 28px; background: var(--bbs-bg); border-bottom: 1px solid var(--bbs-line); }
+.bbs-brand { gap: 9px; }
+.bbs-brand-copy { flex-direction: row; align-items: baseline; gap: 12px; }
+.bbs-brand-name { font-size: 16px; font-weight: 650; letter-spacing: .04em; }
+.bbs-brand-tagline { font-size: 9px; letter-spacing: .16em; }
+.bbs-icon-btn { background: transparent; border-radius: 50%; width: 40px; height: 40px; font-size: 17px; }
+.bbs-icon-btn:hover { background: var(--bbs-surface-2); }
+.bbs-version { border: 0; }
+@media(max-width:640px) {
+  .bbs-head { padding: 0 16px 9px; border-bottom: 0; }
+  .bbs-brand-copy { gap: 9px; }
+  .bbs-brand-name { font-size: 15px; }
+  .bbs-brand-tagline { font-size: 8px; letter-spacing: .13em; }
+  .bbs-grabber { height: 18px; }
+  .bbs-grabber-bar { width: 30px; height: 3px; opacity: .65; }
+}
 </style>

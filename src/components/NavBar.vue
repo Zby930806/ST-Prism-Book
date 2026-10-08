@@ -47,17 +47,20 @@ function onNavClick(id: string) {
 </template>
 
 <style scoped>
-.bbs-nav{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;flex:0 0 auto;padding:10px 24px;background:var(--bbs-surface)}
-.bbs-nav.is-top{border-bottom:1px solid var(--bbs-line)}
-.bbs-nav-item{display:flex;align-items:center;justify-content:center;gap:8px;position:relative;min-width:0;min-height:42px;padding:9px 8px;border:1px solid transparent;border-radius:10px;background:transparent;color:var(--bbs-ink-soft);cursor:pointer;transition:background .16s,color .16s;font:500 13px/1.4 var(--bbs-font-sans)}
-.bbs-nav-item:hover{background:var(--bbs-surface-2);color:var(--bbs-ink)}
-.bbs-nav-item.is-active{background:var(--bbs-accent-soft);color:var(--bbs-accent);border-color:color-mix(in srgb,var(--bbs-accent) 25%,transparent);font-weight:650}
-.bbs-nav-icon{font-size:18px}.bbs-nav-icon-wrap{position:relative;display:inline-flex}
-.bbs-nav-dot{position:absolute;top:-3px;right:-4px;width:6px;height:6px;border-radius:50%;background:var(--bbs-danger);box-shadow:0 0 0 2px var(--bbs-surface)}
-.bbs-nav-item:focus-visible{outline:2px solid var(--bbs-accent);outline-offset:2px}
-.bbs-nav.is-bottom{border-top:1px solid var(--bbs-line);padding-bottom:max(8px,env(safe-area-inset-bottom))}
-.bbs-nav.is-narrow{gap:2px;padding:6px 8px}
-.bbs-nav.is-narrow.is-bottom{padding-bottom:max(7px,env(safe-area-inset-bottom))}
-.bbs-nav.is-narrow .bbs-nav-item{flex-direction:column;gap:3px;min-height:48px;padding:5px 2px;border-radius:9px;font-size:10px}
-.bbs-nav.is-narrow .bbs-nav-icon{font-size:20px}
+.bbs-nav { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:6px; flex:0 0 auto; padding:9px 24px; background:var(--bbs-bg); }
+.bbs-nav.is-top { border-bottom:1px solid var(--bbs-line); }
+.bbs-nav-item { display:flex; align-items:center; justify-content:center; gap:8px; position:relative; min-width:0; min-height:44px; padding:8px; border:0; border-radius:8px; background:transparent; color:var(--bbs-ink-soft); cursor:pointer; font:500 13px/1.4 var(--bbs-font-sans); }
+.bbs-nav-item:hover { background:var(--bbs-surface-2); color:var(--bbs-ink); }
+.bbs-nav-item.is-active { color:var(--bbs-accent); font-weight:650; }
+.bbs-nav-icon { font-size:19px; }
+.bbs-nav-icon-wrap { position:relative; display:inline-flex; align-items:center; justify-content:center; }
+.bbs-nav-dot { position:absolute; top:-3px; right:-4px; width:6px; height:6px; border-radius:50%; background:var(--bbs-danger); }
+.bbs-nav-item:focus-visible { outline:2px solid var(--bbs-accent); outline-offset:2px; }
+.bbs-nav.is-bottom { border-top:1px solid var(--bbs-line); padding-bottom:max(8px,env(safe-area-inset-bottom)); }
+.bbs-nav.is-narrow { gap:0; padding:7px 8px; }
+.bbs-nav.is-narrow.is-bottom { padding-bottom:max(9px,env(safe-area-inset-bottom)); }
+.bbs-nav.is-narrow .bbs-nav-item { flex-direction:column; gap:3px; min-height:50px; padding:3px 0; font-size:10px; }
+.bbs-nav.is-narrow .bbs-nav-icon-wrap { width:100%; max-width:42px; height:26px; border-radius:20px; }
+.bbs-nav.is-narrow .is-active .bbs-nav-icon-wrap { background:var(--bbs-accent-soft); }
+.bbs-nav.is-narrow .bbs-nav-icon { font-size:19px; }
 </style>

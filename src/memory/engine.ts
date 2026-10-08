@@ -1012,6 +1012,7 @@ async function sendAndParse<T>(
       return parse(await send(request));
     } catch (e) {
       lastErr = e;
+      if (e instanceof SummarySourceChangedError) throw e;
       if (e instanceof SummaryResponseError) {
         const correction: ChatMsg = { role: 'system', content: '上一次摘要结果未通过校验：' + e.message + '\n请重新输出完整结果；只依据原材料，不添加事实。' };
         // 保持 assistant 预填位于末尾；仅携带稳定校验错误，不回灌原始响应或累积纠错消息。
@@ -1247,11 +1248,18 @@ async function summarizeFloorWork(
       maxChars,
       requireStateChanges: builtin,
       sourceContent: content,
+      sourceTexts: targets.map(i => cleanBody(chat[i].mes)),
       conditionContext: { ...stateBefore, content, strict: builtin },
       finalize: value => finalizeDelta(value, openPlansOrdered, stateBefore.lifeDetails),
     });
     console.log('[棱镜宝书] 摘要校验通过:', { floor: aiFloor, chars: Array.from(d.summary).length, fields: Object.keys(d) });
     return d;
+  }).catch((error: unknown) => {
+    if (error instanceof SummaryResponseError) {
+      // 只标记解析失败：尚未进入 applyLeafForFloor，不把提交后的其他故障说成未保存。
+      throw new SummaryResponseError('楼层 #' + aiFloor + ' 摘要未保存（该楼已有记录保持不变）。' + error.message);
+    }
+    throw error;
   });
   assertUnchanged();
 
@@ -1489,22 +1497,85 @@ function rootsAtLevel(level: number, chat: STMessage[]): RootView[] {
  * 用 AI 把这批的**叙事文本**融合成一条上层节点,childIds 收纳它们(底层全部保留)。
  * 一次调用会向上连锁(加叶子→可能生 L1→可能生 L2…),按各层阈值递归。
  */
-/** 模型请求不属于切换后的聊天；等待期间来源改变时丢弃结果，不写回另一棵总结树。 */
-function summaryRequestGuard(chat: STMessage[]): () => void {
+/** 本次压缩失效后不能靠重试旧请求恢复；保留原摘要，交还用户重新选择。 */
+class SummarySourceChangedError extends Error {}
+
+/**
+ * 只跟踪本次压缩引用的子树，而非整段聊天。
+ * 新楼续写、无关摘要编辑不使旧楼压缩失效；来源编辑/删除/换页、重复收纳、
+ * 切换聊天仍阻止写入。对下层叶子也检查，避免上层摘要掩盖其来源变化。
+ */
+function summaryRequestGuard(chat: STMessage[], sourceIds: string[]): () => void {
   const ctx = getContext();
   const id = ctx?.getCurrentChatId?.();
   const meta = ctx?.chatMetadata;
-  const forest = JSON.stringify(memory.summaries);
-  const snapshot = () => JSON.stringify(chat.map(m => [m.mes, m.swipe_id, m.extra?.bbs_omit, m.extra?.bbs_leaf]));
+  const roots = new Set(sourceIds);
+  const changed = () => new SummarySourceChangedError('本次总结的来源摘要已被修改、删除或重新收纳，结果未写入；原摘要仍保留，请重新选择后总结。');
+  function snapshot(): string {
+    const comps = new Map(memory.summaries.map(s => [s.id, s]));
+    const duplicateIds = new Set<string>();
+    const compIds = new Set<string>();
+    const parents = new Map<string, string[]>();
+    for (const comp of memory.summaries) {
+      if (compIds.has(comp.id)) duplicateIds.add(comp.id);
+      compIds.add(comp.id);
+      for (const child of comp.childIds) {
+        const owners = parents.get(child) ?? [];
+        owners.push(comp.id);
+        parents.set(child, owners);
+      }
+    }
+    const leaves = new Map<string, { floor: number; message: STMessage; leaf: LeafExtra }>();
+    for (let floor = 0; floor < chat.length; floor++) {
+      const message = chat[floor];
+      if (!message || !leafValid(message)) continue;
+      const leaf = getLeaf(message) as LeafExtra;
+      if (leaves.has(leaf.id)) duplicateIds.add(leaf.id);
+      leaves.set(leaf.id, { floor, message, leaf });
+    }
+    // 来源必须仍是根，防止另一次合并把同一条摘要收纳两次。
+    if (memory.summaries.some(s => s.childIds.some(child => roots.has(child)))) throw changed();
+    const seen = new Set<string>();
+    const visiting = new Set<string>();
+    const result: unknown[] = [];
+    const visit = (nodeId: string) => {
+      if (visiting.has(nodeId) || duplicateIds.has(nodeId)) throw changed();
+      if (seen.has(nodeId)) return;
+      seen.add(nodeId);
+      visiting.add(nodeId);
+      const owners = parents.get(nodeId) ?? [];
+      // 不允许子树中的任何来源被重复收纳；快照同时跟踪归属，覆盖等待期间的新引用。
+      if (owners.length > 1) throw changed();
+      result.push(['parents', nodeId, [...owners].sort()]);
+      const comp = comps.get(nodeId);
+      const entry = leaves.get(nodeId);
+      if (comp && entry) throw changed();
+      if (comp) {
+        result.push(['summary', comp.id, comp.text, comp.level, comp.createdAt, comp.timeStart,
+          comp.timeEnd, comp.childIds, comp.imported, comp.importedFloorStart, comp.importedFloorEnd]);
+        for (const child of comp.childIds) visit(child);
+      } else if (entry) {
+        const { floor, message, leaf } = entry;
+        result.push(['leaf', floor, leaf.id, leaf.text, leaf.createdAt, leaf.timeStart, leaf.timeEnd,
+          leaf.timeLabel, leaf.swipe ?? 0, leaf.seed, message.swipe_id ?? 0, !!message.extra?.bbs_omit, cleanBody(message.mes)]);
+      } else {
+        // 旧导入节点可能没有可用底层；记录缺口而非制造或重建叶子。
+        result.push(['missing', nodeId]);
+      }
+      visiting.delete(nodeId);
+    };
+    sourceIds.forEach(visit);
+    return JSON.stringify(result);
+  }
   const sources = snapshot();
   return () => {
     const current = getContext();
     const issue = memoryWriteIssue();
-    if (issue) throw new Error(issue);
-    if (current?.chat !== chat || current?.chatMetadata !== meta || current?.getCurrentChatId?.() !== id ||
-        JSON.stringify(memory.summaries) !== forest || snapshot() !== sources) {
-      throw new Error('总结期间聊天或来源记忆发生变化，本次结果未写入；请返回原聊天核对。');
+    if (issue) throw new SummarySourceChangedError(issue);
+    if (current?.chat !== chat || current?.chatMetadata !== meta || current?.getCurrentChatId?.() !== id) {
+      throw new SummarySourceChangedError('总结期间已切换聊天，结果未写入；请回到原聊天后重试。');
     }
+    if (snapshot() !== sources) throw changed();
   };
 }
 
@@ -1538,13 +1609,13 @@ export async function checkResummary(): Promise<number> {
       return made;
     }
 
-    const assertSourcesUnchanged = summaryRequestGuard(chat);
     const batch = roots.slice(0, threshold);
     const { content, hints } = joinNodesForResummary(batch);
     // 传**输出层级**(level+1):L1(普通总结,300-500字)/ L2+(二次总结,字数随输入动态)
     const prompt = buildResummaryPrompt({ user: ctx.name1, char: ctx.name2, content, level: level + 1 });
 
     try {
+      const assertSourcesUnchanged = summaryRequestGuard(chat, batch.map(n => n.id));
       const jb = taskContextPrompt();
       const messages: ChatMsg[] = [];
       if (jb) messages.push({ role: 'system', content: jb });
@@ -1702,7 +1773,6 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
   const sender = resolveSender('resummary');
   if ('error' in sender) return { made: 0, error: sender.error };
 
-  const assertSourcesUnchanged = summaryRequestGuard(chat);
   const level = Math.max(...picked.map(n => n.level)) + 1;
   const { content, hints } = joinNodesForResummary(picked);
   const prompt = buildResummaryPrompt({ user: ctx.name1, char: ctx.name2, content, level });
@@ -1711,6 +1781,7 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
   engineState.running = true;
   engineState.lastError = '';
   try {
+    const assertSourcesUnchanged = summaryRequestGuard(chat, picked.map(n => n.id));
     const jb = taskContextPrompt();
     const messages: ChatMsg[] = [];
     if (jb) messages.push({ role: 'system', content: jb });

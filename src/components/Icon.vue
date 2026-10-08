@@ -29,6 +29,8 @@ const PATHS: Record<string, string> = {
   // 物品:立方体
   items:
     '<path d="M12 3.5 20 8v8l-8 4.5L4 16V8z"/><path d="M4 8l8 4.5L20 8"/><path d="M12 12.5V20.5"/>',
+  // 双子札记:并排书签，与既有书签品牌统一描边。
+  notes: '<path d="M5 4.5h6v15L8 17l-3 2.5z"/><path d="M14 4.5h5v15L16.5 17 14 19.5z"/>',
   // 设置:滑块
   settings:
     '<path d="M5 8h9M18 8h1"/><path d="M5 16h1M10 16h9"/><circle cx="16" cy="8" r="2.2"/><circle cx="8" cy="16" r="2.2"/>',

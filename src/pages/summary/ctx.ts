@@ -1,6 +1,6 @@
 /**
- * 摘要节点(SummaryNode)递归渲染所需的共享上下文。
- * 卡片渲染下沉到递归组件后,父页(index.vue)通过 provide 把状态、helper、动作一次性注入,
+ * 摘要单卡片(SummaryNode)渲染所需的共享上下文。
+ * 卡片渲染下沉到单卡片组件后,父页(index.vue)通过 provide 把状态、helper、动作一次性注入,
  * 免去逐层 props 透传。默认/搜索/选择三视图共用同一张卡片,只此一份实现。
  */
 import type { ComputedRef, InjectionKey, Ref } from 'vue';
@@ -30,6 +30,8 @@ export interface SummaryCtx {
   searching: ComputedRef<boolean>;
   selectedIds: Ref<Set<string>>;
   toggleExpand: (id: string) => void;
+  revealNode: (id: string) => void;
+  childCount: (node: ViewNode) => number;
   toggleSelect: (id: string) => void;
   openEdit: (r: SummaryRow) => void;
   onDelete: (r: SummaryRow) => void;

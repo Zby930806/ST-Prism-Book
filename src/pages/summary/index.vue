@@ -6,7 +6,7 @@ import ModalMask from '@/components/ModalMask.vue';
 import { addSummary, appendOpToLatestLeaf, deleteLeafAt, deleteSummary, deleteSummarySubtrees, editLeafAt, editPlan, editSummary, invalidateSummaryAncestors } from '@/memory/apply';
 import { apiSettings } from '@/api/settings';
 import { batchBackfill, batchState, cancelBatchBackfill, engineState, floorBackfillState, isAiFloor, resummarizeNow, summarizeFloor, summarizeSelected, syncHiddenNow } from '@/memory/engine';
-import { estimateInjectionTokenBreakdown, refreshInjection, selectViewNodes, type ViewNode } from '@/memory/inject';
+import { estimateInjectionTokenBreakdown, refreshInjection, type ViewNode } from '@/memory/inject';
 import { compactTimeLabel, formatRange, splitTimeLabel } from '@/memory/timeTag';
 import { relativeTimeLabel, weekdayLabel } from '@/memory/timeRel';
 import { compatibilityState, convertLegacyMemory, derivedMeta, memory, memoryWriteIssue, recomputeDerived } from '@/memory/store';
@@ -15,6 +15,10 @@ import { getContext } from '@/st/context';
 import { toast } from '@/st/toast';
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 'vue';
 import SummaryNode from './SummaryNode.vue';
+import SummaryPager from './SummaryPager.vue';
+import { summaryErrorPresentation } from './errorPresentation';
+const summaryFailure = computed(() => summaryErrorPresentation(engineState.lastError));
+import { arrayPage, createSummaryIndex, PENDING_PAGE_SIZE, SUMMARY_PAGE_SIZE, treePage, walkExpanded } from './view';
 import { SUMMARY_CTX, type SummaryRow } from './ctx';
 
 /* 兼容报告是最近一次加载/检查时的快照，不作为实时摘要计数。 */
@@ -109,6 +113,10 @@ const resetViewStates = () => {
   expanded.value = new Set();
   searchQuery.value = '';
   searchOpen.value = false;
+  summaryPage.value = 1;
+  pendingPage.value = 1;
+  showInjectionEstimate.value = false;
+  planPages.value = { plan: 1, suspense: 1 };
   closeImportHistory();
   exitSelectMode();
 };
@@ -200,6 +208,7 @@ const suspenseFoldable = computed(() => suspenses.value.length > 0);
 const suspenseShown = computed(() => !suspenseCollapsed.value || !suspenseFoldable.value);
 
 // 两区渲染配置:结构同构、仅类型/文案/计数色不同,用配置驱动一套模板避免两处漂移。
+const planPages = ref({ plan: 1, suspense: 1 });
 const foldGroups = computed(() => [
   {
     kind: 'plan' as const, title: '计划', items: plansOnly.value,
@@ -310,6 +319,9 @@ function clearFocus() {
 /* ============ 未摘要楼层 ============
  * derivedMeta.pendingFloors = AI 楼且无有效叶子,由旧到新;此处倒序展示(新楼在前)。 */
 const pendingFloors = computed(() => [...derivedMeta.pendingFloors].sort((a, b) => b - a));
+const pendingPage = ref(1);
+const pendingWindow = computed(() => arrayPage(pendingFloors.value, pendingPage.value, PENDING_PAGE_SIZE));
+watch(() => pendingWindow.value.page, page => { pendingPage.value = page; });
 const summarizingFloor = computed<number | null>(() => {
   // derivedMeta.rev 让切聊天后的 computed 重新核对当前 chatId。
   void derivedMeta.rev;
@@ -370,6 +382,8 @@ let resummaryHintTimer: ReturnType<typeof setTimeout> | null = null;
 const resummaryEvery = computed(() => (Math.max(0, apiSettings.keepRecent) + apiSettings.leafBatchThreshold + apiSettings.leafKeepRecent) * 2);
 const showCadence = computed(() => apiSettings.leafBatchThreshold >= 2);
 
+// 估算涉及引擎的全量注入选择，仅在用户需要时计算，避免进入/滑动阅读页额外构造全树。
+const showInjectionEstimate = ref(false);
 // 纯前端估算当前实际注入量。derivedMeta.rev 补上 chat/is_system 这类非 Vue 响应式数据的刷新信号。
 const injectionTokenEstimate = computed(() => {
   void derivedMeta.rev;
@@ -407,7 +421,7 @@ async function doResummarize() {
 /* ============ 摘要列表(下方)============ */
 /**
  * 平铺展示行:搜索(全森林命中平铺)与选择(根 + 复选框)两视图用。
- * 默认视图(根 + 逐层展开)改由递归组件 SummaryNode 直接渲染,不经此结构。
+ * 默认视图按展开结果平铺分页，由 SummaryNode 渲染单张卡片。
  */
 interface DisplayRow extends SummaryRow {
   isChild: boolean; // 搜索命中的深层(已压缩)节点:只读,不给编辑/删除键
@@ -443,26 +457,10 @@ const byId = computed<Map<string, ViewNode>>(() => {
   return m;
 });
 
-/** 递归解析某节点覆盖的叶子楼层集合(comp 取全部后代有效叶子;失效 child 取不到则跳过)。 */
-function nodeFloors(n: ViewNode, map: Map<string, ViewNode>): [number, number] {
-  const acc: number[] = [];
-  const seen = new Set<string>();
-  const walk = (x: ViewNode): void => {
-    if (seen.has(x.id)) return;
-    seen.add(x.id);
-    if (x.atomic) {
-      if (typeof x.floorStart === 'number') acc.push(x.floorStart);
-      if (typeof x.floorEnd === 'number') acc.push(x.floorEnd);
-      return;
-    }
-    if (x.kind === 'leaf') { acc.push(x.msgIndex); return; }
-    for (const cid of x.childIds) {
-      const c = map.get(cid);
-      if (c) walk(c);
-    }
-  };
-  walk(n);
-  return acc.length ? [Math.min(...acc), Math.max(...acc)] : [-1, -1];
+// 楼层范围在数据变化时计算一次；搜索、排序、选择复用同一索引。
+const summaryIndex = computed(() => createSummaryIndex(byId.value));
+function nodeFloors(n: ViewNode, _map: Map<string, ViewNode>): [number, number] {
+  return summaryIndex.value.floors(n);
 }
 
 /** ViewNode → 展示行核心字段(供卡片渲染) */
@@ -486,15 +484,7 @@ function toRow(n: ViewNode, map: Map<string, ViewNode>): SummaryRow {
 }
 
 /** 根节点(倒序:楼层越靠后越在上面),供默认视图与选择视图。 */
-const rootNodes = computed<ViewNode[]>(() => {
-  const map = byId.value;
-  const referenced = new Set<string>();
-  for (const s of memory.summaries) for (const c of s.childIds ?? []) referenced.add(c);
-  const roots = [...map.values()].filter(n => !referenced.has(n.id));
-  // 含失效后代的压缩节点不完整 → selectViewNodes 自动降级,只拆受影响那条链(旁支完好的整条保留)
-  const chosen = selectViewNodes({ byId: map, roots }, () => true);
-  return chosen.sort((a, b) => nodeFloors(b, map)[1] - nodeFloors(a, map)[1]);
-});
+const rootNodes = computed(() => summaryIndex.value.roots);
 
 /* ---- 视图态:展开 / 搜索 / 选择(三者互斥,均为临时 UI 态,不持久化) ---- */
 const expanded = ref<Set<string>>(new Set()); // 已展开的 comp id
@@ -504,6 +494,21 @@ const searchOpen = ref(false);
 const searchInput = ref<HTMLInputElement | null>(null);
 const selectMode = ref(false);
 const selectedIds = ref<Set<string>>(new Set());
+const summaryPage = ref(1);
+const summaryList = ref<HTMLElement | null>(null);
+const treeWindow = computed(() => treePage(summaryIndex.value, expanded.value, summaryPage.value));
+watch([searchQuery, selectMode], () => { summaryPage.value = 1; });
+function changeSummaryPage(page: number) {
+  summaryPage.value = page;
+  void nextTick(() => summaryList.value?.scrollIntoView?.({ block: 'start' }));
+}
+function revealNode(id: string) {
+  let position = 0;
+  for (const row of walkExpanded(rootNodes.value, summaryIndex.value.children, expanded.value)) {
+    if (row.node.id === id) { changeSummaryPage(Math.floor(position / SUMMARY_PAGE_SIZE) + 1); return; }
+    position++;
+  }
+}
 
 /* ---- 导入旧总结:第一版只接收粘贴文本 + 从 #0 起的覆盖截止楼层。 ---- */
 const importHistoryOpen = ref(false);
@@ -608,39 +613,29 @@ function toggleExpand(id: string) {
   expanded.value = next;
 }
 
-/** 搜索视图:遍历**全森林**(含已压缩深层节点),命中平铺、按楼层倒序。 */
-function buildSearchRows(): DisplayRow[] {
-  const map = byId.value;
-  const q = searchQuery.value.trim();
-  const qLower = q.toLowerCase();
-  // 楼层查询:纯数字 / #数字 → 命中覆盖该楼的节点
-  const floorNum = /^#?\d+$/.test(q) ? Number(q.replace(/^#/, '')) : null;
-  const rootIdSet = new Set(rootNodes.value.map(n => n.id));
-
-  const rows: DisplayRow[] = [];
-  for (const n of map.values()) {
-    const base = toRow(n, map);
-    let hit = false;
-    if (n.text && n.text.toLowerCase().includes(qLower)) hit = true;
-    if (!hit && floorNum !== null && base.floorLo >= 0 && floorNum >= base.floorLo && floorNum <= base.floorHi) hit = true;
-    if (!hit) {
-      const t = base.timeStart || base.timeEnd ? formatRange(base.timeStart, base.timeEnd) : (base.timeLabel ? compactTimeLabel(base.timeLabel) : '');
-      if (t && t.toLowerCase().includes(qLower)) hit = true;
-    }
-    if (!hit) continue;
-    // 命中的根行可编辑/删除;已被压缩的深层节点只读(展开语义一致,避免误删祖先链)
-    const isRoot = rootIdSet.has(n.id);
-    rows.push({ ...base, isChild: !isRoot });
-  }
-  return rows.sort((a, b) => b.floorHi - a.floorHi);
-}
-
-/** 平铺视图行:搜索命中平铺 / 选择态的根;默认视图不走这里(由 SummaryNode 递归渲染)。 */
+/** 搜索索引只随内容重建；关键词变更不再逐行转换时间/递归求范围。 */
+const searchIndex = computed(() => [...byId.value.values()].map(node => ({
+  node,
+  text: (node.text + '\n' + rowTime(toRow(node, byId.value))).toLowerCase(),
+})));
+const searchNodes = computed(() => {
+  if (!searching.value) return [];
+  const query = searchQuery.value.trim().toLowerCase();
+  const floor = /^#?\d+$/.test(query) ? Number(query.replace(/^#/, '')) : null;
+  return searchIndex.value.filter(({ node, text }) => {
+    if (text.includes(query)) return true;
+    const [lo, hi] = summaryIndex.value.floors(node);
+    return floor !== null && lo >= 0 && floor >= lo && floor <= hi;
+  }).map(hit => hit.node).sort((a, b) => nodeFloors(b, byId.value)[1] - nodeFloors(a, byId.value)[1]);
+});
+const rootIds = computed(() => new Set(rootNodes.value.map(n => n.id)));
+const flatWindow = computed(() => arrayPage(searching.value ? searchNodes.value : rootNodes.value, summaryPage.value));
+const activeWindow = computed(() => searching.value || selectMode.value ? flatWindow.value : treeWindow.value);
+watch(() => activeWindow.value.page, page => { summaryPage.value = page; });
+/** 仅转换当前页；默认树视图不额外转换全量根列表。 */
 const visibleRows = computed<DisplayRow[]>(() => {
-  if (searching.value) return buildSearchRows();
-  const map = byId.value;
-  // 选择模式:仅根,倒序,带复选框
-  return rootNodes.value.map(n => ({ ...toRow(n, map), isChild: false }));
+  if (!searching.value && !selectMode.value) return [];
+  return flatWindow.value.items.map(n => ({ ...toRow(n, byId.value), isChild: !rootIds.value.has(n.id) }));
 });
 
 /** 搜索命中文本切片:把 text 按命中词切成 [{t, hit}] 片段,模板用 span 渲染(不走 v-html,防 XSS)。 */
@@ -761,23 +756,18 @@ const selectionDeleteSummary = computed(() => {
   const map = byId.value;
   const visited = new Set<string>();
   let leaves = 0, summaries = 0, imported = 0;
-  const walk = (id: string): void => {
-    if (visited.has(id)) return;
+  const stack = [...selectedIds.value];
+  while (stack.length) {
+    const id = stack.pop()!;
+    if (visited.has(id)) continue;
     visited.add(id);
     const node = map.get(id);
-    if (!node) return;
-    if (node.kind === 'leaf') {
-      leaves++;
-      return;
-    }
+    if (!node) continue;
+    if (node.kind === 'leaf') { leaves++; continue; }
     summaries++;
-    if (node.atomic) {
-      imported++;
-      return;
-    }
-    for (const childId of node.childIds) walk(childId);
-  };
-  for (const id of selectedIds.value) walk(id);
+    if (node.atomic) { imported++; continue; }
+    for (const childId of node.childIds) stack.push(childId);
+  }
   return { leaves, summaries, imported };
 });
 
@@ -903,10 +893,11 @@ function saveEdit() {
   editing.value = null;
 }
 
-// 注入递归卡片(SummaryNode)所需的状态、helper 与动作,免逐层 props 透传
+// 注入单张卡片所需的状态、helper 与动作；SummaryNode 不再递归。
 provide(SUMMARY_CTX, {
   byId, expanded, selectMode, searching, selectedIds,
-  toggleExpand, toggleSelect, openEdit, onDelete,
+  toggleExpand, toggleSelect, openEdit, onDelete, revealNode,
+  childCount: n => summaryIndex.value.childCount(n),
   nodeFloors, toRow, levelLabel, floorLabel, rowTime, rowRelative, highlightParts,
 });
 // 概览仅取当前响应式记忆；兼容报告是历史快照，不参与实时计数。
@@ -915,24 +906,27 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
 
 <template>
   <section class="bbs-page bbs-summary-page">
-    <PageHeader icon="summary" title="摘要与计划" eyebrow="记忆阅读室" description="回看故事脉络，整理眼下局势与未竟之事。所有内容归属于当前聊天。" />
+    <PageHeader title="故事记忆" eyebrow="STORY ARCHIVE / 摘要" description="故事向前，来路留在这里。" />
     <section class="bbs-overview" aria-label="当前聊天实时概览">
       <div class="bbs-overview-head">
-        <span class="bbs-overview-caption">当前记忆概览</span>
-        <span class="bbs-overview-status" :class="{ 'is-protected': editingBlocked }">{{ conversionBusy ? '转换保存中' : compatibilityState.mode === 'ready' ? '可阅读 · 可编辑' : compatibilityState.mode === 'convert' ? '待本地转换 · 暂停编辑' : '保护中 · 暂停编辑' }}</span>
+        <span class="bbs-overview-caption">本篇记录</span>
+        <span class="bbs-overview-status" :class="{ 'is-protected': editingBlocked }">{{ conversionBusy ? '转换保存中' : compatibilityState.mode === 'ready' ? '记忆可用' : compatibilityState.mode === 'convert' ? '待本地转换' : '写入保护中' }}</span>
       </div>
       <dl class="bbs-overview-stats">
-        <div><dt>有效逐楼摘要</dt><dd>{{ editingBlocked ? '—' : liveLeafCount }}</dd></div>
-        <div><dt>上层总结 / 导入</dt><dd>{{ editingBlocked ? '—' : memory.summaries.length }}</dd></div>
-        <div><dt>当前顶层条目</dt><dd>{{ editingBlocked ? '—' : rootNodes.length }}</dd></div>
-        <div class="bbs-overview-pending"><dt>待补摘楼层</dt><dd>{{ editingBlocked ? '—' : pendingFloors.length }}</dd></div>
+        <div><dt>逐楼摘要</dt><dd>{{ editingBlocked ? '—' : liveLeafCount }}</dd></div>
+        <div><dt>上层总结</dt><dd>{{ editingBlocked ? '—' : memory.summaries.length }}</dd></div>
+        <div><dt>阅读入口</dt><dd>{{ editingBlocked ? '—' : rootNodes.length }}</dd></div>
+        <div class="bbs-overview-pending"><dt>待补录</dt><dd>{{ editingBlocked ? '—' : pendingFloors.length }}</dd></div>
       </dl>
-      <p class="bbs-overview-note">{{ editingBlocked ? '当前格式尚未确认可安全编辑，请先查看下方兼容说明；暂不展示实时计数。' : '实时统计含已收纳的有效摘要；顶层条目是阅读入口，不等于全部摘要数量。' }}</p>
+      <div class="bbs-backfill-entry">
+        <p>{{ editingBlocked ? '先核对下方兼容说明，再继续编辑。' : pendingFloors.length ? '有缺失楼层，只补录，不重建。' : '已记录的故事，无需重新摘要。' }}</p>
+        <button class="bbs-btn bbs-btn-primary" type="button" :disabled="editingBlocked || engineState.running || batchState.running || !pendingFloors.length" title="调用 AI 补齐缺失摘要及状态；不覆盖已有摘要，不是手动补写" @click="openBatchConfirm"><Icon name="plus" />补录摘要（AI）</button>
+      </div>
     </section>
     <aside class="bbs-compatibility" :class="{ 'bbs-compatibility-warning': compatibilityState.mode !== 'ready' }" aria-label="旧记忆兼容状态" aria-live="polite">
       <h2 v-if="compatibilityState.mode !== 'ready'" class="bbs-title bbs-title-sub">{{ compatibilityState.mode === 'convert' ? '旧记忆兼容 · 待本地转换' : '旧记忆兼容 · 保护中' }}</h2>
       <details v-if="compatibilityState.mode === 'ready'" class="bbs-compatibility-ready">
-        <summary>旧记忆兼容 · 可继续使用<span>升级无需重建 · 查看说明</span></summary>
+        <summary>旧版记忆已兼容<span>无需重建</span></summary>
         <p>已按兼容格式读取本聊天已有摘要及 L1 / L2 等上层总结（如有），不需要因升级重新摘要或重建。</p>
         <p class="bbs-field-hint">最近一次加载／兼容检查报告：{{ compatibilityState.leaves }} 条逐楼摘要、{{ compatibilityState.summaries }} 条上层总结。这是检查时快照，不是实时数量；当前内容以下方列表为准。</p>
       </details>
@@ -966,6 +960,9 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
     </ConfirmDialog>
     <fieldset class="bbs-memory-editors" :disabled="editingBlocked" aria-label="本聊天记忆编辑">
 
+    <details class="bbs-reader-context">
+      <summary><span class="bbs-context-icon"><Icon name="plans" /></span><span>当前局势与计划<small>{{ focus?.situation || '查看此刻的场景与未竟之事' }}</small></span><Icon name="chevron" class="bbs-context-chevron" /></summary>
+      <div class="bbs-reader-context-body">
     <!-- ===== 眼下局势卡:当前场面快照(覆盖型;省略=不动,清空=落幕) ===== -->
     <div class="bbs-fold-section">
       <div class="bbs-section-head">
@@ -1106,9 +1103,9 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
 
           <!-- grid 1fr↔0fr 收展:高度自适应、无需写死 max-height;reduced-motion 下瞬切(见样式) -->
           <div class="bbs-fold-wrap" :class="{ 'is-collapsed': !g.shown }" :inert="!g.shown" :aria-hidden="!g.shown">
-            <div class="bbs-fold-inner">
+            <div v-if="g.shown" class="bbs-fold-inner">
               <div v-if="g.items.length" class="bbs-plan-group">
-                <div v-for="p in g.items" :key="p.id" class="bbs-plan">
+                <div v-for="p in arrayPage(g.items, planPages[g.kind]).items" :key="p.id" class="bbs-plan">
                   <div class="bbs-plan-head">
                     <span class="bbs-plan-kind" :class="p.kind">{{ p.kind === 'suspense' ? '悬念' : '计划' }}</span>
                     <span v-if="planFloor(p.id) !== undefined" class="bbs-plan-floor">#{{ planFloor(p.id) }}</span>
@@ -1126,12 +1123,16 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
                 </div>
               </div>
               <p v-else class="bbs-plan-empty">{{ g.empty }}<span v-if="!hasLeaf" class="bbs-empty-prerequisite">手动添加需先有一条摘要。</span></p>
+              <SummaryPager :page="arrayPage(g.items, planPages[g.kind]).page" :total="g.items.length" :size="SUMMARY_PAGE_SIZE" :label="g.title" @update:page="planPages[g.kind] = $event" />
             </div>
           </div>
         </div>
 
       </div>
     </section>
+
+      </div>
+    </details>
 
     <!-- 分章分隔:两侧细线 + 居中金色菱形(古籍分章鱼尾标记),比普通 hr 更明确地隔开两区 -->
     <div class="bbs-divider" role="separator" aria-hidden="true">
@@ -1167,10 +1168,10 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
         </button>
 
       </div>
-      <p class="bbs-backfill-description">日常整理从这里开始：只补齐未摘要楼层。点楼层号单独补摘，或按楼序批量生成摘要与状态；会调用 AI。</p>
+      <p class="bbs-backfill-description">点楼层号补摘该楼，或批量按楼序处理。每楼一次 AI 请求，包含摘要与状态更新。</p>
       <div class="bbs-pending-chips">
         <button
-          v-for="f in pendingFloors"
+          v-for="f in pendingWindow.items"
           :key="f"
           class="bbs-pending-chip"
           type="button"
@@ -1184,11 +1185,13 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
       </div>
     </section>
 
+    <SummaryPager :page="pendingWindow.page" :total="pendingWindow.total" :size="PENDING_PAGE_SIZE" label="待补录楼层" @update:page="pendingPage = $event" />
+
     <!-- 批量补摘确认弹窗 -->
     <ConfirmDialog
       v-if="!editingBlocked"
       v-model:open="batchConfirmOpen"
-      title="批量补摘"
+      title="补录摘要（AI 批量补摘）"
       confirmText="开始"
       @confirm="runBatchBackfill"
     >
@@ -1199,10 +1202,9 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
     <!-- ===== 摘要 ===== -->
     <div class="bbs-section-head bbs-reading-head">
       <div class="bbs-summary-heading">
-        <span class="bbs-section-kicker">03 / 故事脉络</span>
-        <h2 class="bbs-title bbs-title-sub">摘要与总结树</h2>
-        <p class="bbs-section-description">新楼在前，逐层展开回看原始摘要。</p>
-        <div class="bbs-token-estimate" title="按 UTF-8 字节数估算,不会请求后端">
+        <h2 class="bbs-title bbs-title-sub">故事脉络</h2>
+        <button class="bbs-btn bbs-btn-sm bbs-estimate-toggle" type="button" :aria-expanded="showInjectionEstimate" @click="showInjectionEstimate = !showInjectionEstimate">{{ showInjectionEstimate ? '收起注入量估算' : '按需估算注入量' }}</button>
+        <div v-if="showInjectionEstimate" class="bbs-token-estimate" title="按 UTF-8 字节数估算,不会请求后端">
           <span>摘要注入 ≈ {{ injectionTokenEstimate.summary }} tokens</span>
           <span>其他注入 ≈ {{ injectionTokenEstimate.other }} tokens</span>
         </div>
@@ -1285,14 +1287,23 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
       </button>
     </div>
 
-    <p v-if="engineState.lastError" class="bbs-error" role="alert">{{ engineState.lastError }}</p>
+    <div v-if="engineState.lastError" class="bbs-summary-failure" role="alert">
+      <p class="bbs-error">{{ summaryFailure.title }}</p>
+      <p v-if="summaryFailure.help" class="bbs-field-hint">{{ summaryFailure.help }}</p>
+      <details v-if="summaryFailure.details">
+        <summary>查看校验原因</summary>
+        <p class="bbs-field-hint">{{ summaryFailure.details }}</p>
+      </details>
+    </div>
 
-    <p v-if="searching" class="bbs-result-note" role="status">全树搜索 · 找到 {{ visibleRows.length }} 条匹配（包含已收纳的下层摘要）</p>
-    <p v-else-if="selectMode" class="bbs-result-note">多选整理 · 点击顶层条目选择；合并需连续，删除总结将同时删除其下层内容。</p>
-    <p v-else-if="rootNodes.length" class="bbs-result-note">共 {{ rootNodes.length }} 个顶层条目 · 展开总结可查看下层来源</p>
-    <!-- 默认视图:根倒序,逐层展开由 SummaryNode 递归承载(grid 高度过渡,不脱流、无闪烁) -->
+    <p v-if="searching" class="bbs-result-note" role="status">找到 {{ searchNodes.length }} 条匹配（包含已收纳的下层摘要）</p>
+    <p v-else-if="selectMode" class="bbs-result-note">多选整理 · 翻页保留勾选，全选覆盖所有页；合并需连续，删除总结将同时删除其下层内容。</p>
+    <p v-else-if="rootNodes.length" class="bbs-result-note">{{ rootNodes.length }} 个阅读入口</p>
+    <div ref="summaryList" tabindex="-1"></div>
+    <SummaryPager :page="activeWindow.page" :total="activeWindow.total" :size="SUMMARY_PAGE_SIZE" label="摘要" @update:page="changeSummaryPage" />
+    <!-- 展开结果平铺后统一分页；整页最多 20 张摘要卡片，无递归组件/折叠 DOM。 -->
     <div v-if="!searching && !selectMode && rootNodes.length" class="bbs-summary-list">
-      <SummaryNode v-for="n in rootNodes" :key="`${n.kind}:${n.id}`" :node="n" :depth="0" />
+      <SummaryNode v-for="r in treeWindow.items" :key="`${r.node.kind}:${r.node.id}`" :node="r.node" :depth="r.depth" :parent-id="r.parentId" />
     </div>
 
     <!-- 搜索 / 选择视图:平铺列表(无逐层展开)。搜索命中含已压缩的深层节点 -->
@@ -1379,6 +1390,8 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
       <span class="bbs-empty-icon"><Icon name="summary" /></span>
       <h3>{{ editingBlocked ? '记忆已进入保护状态' : '从第一条摘要开始' }}</h3><p>{{ editingBlocked ? '请先核对上方兼容说明。这不代表原聊天没有记忆，请勿用重建或导入覆盖来解除保护。' : pendingFloors.length ? '上方已有待补摘楼层，点楼层号即可生成摘要。你也可以等待对话累积到设定楼层后自动生成。' : '对话累积到设定楼层后会自动生成摘要；已有旧总结可通过阅读工具栏导入。' }}</p>
     </div>
+
+    <SummaryPager :page="activeWindow.page" :total="activeWindow.total" :size="SUMMARY_PAGE_SIZE" label="摘要" @update:page="changeSummaryPage" />
 
     <!-- 选择模式底部操作条:显示已选统计 + 全选/删除/合并。sticky 在页面底部 -->
     <div v-if="selectMode" class="bbs-select-bar" role="group" aria-label="已选摘要操作">
@@ -1763,7 +1776,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
 .bbs-kind.is-on {
   background: var(--bbs-surface);
   color: var(--bbs-accent);
-  box-shadow: 0 1px 2px oklch(0 0 0 / 0.08);
+  box-shadow: none;
 }
 .bbs-plan-group {
   display: flex;
@@ -2372,7 +2385,6 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
   border: 1px solid var(--bbs-accent);
   border-radius: var(--bbs-radius);
   background: var(--bbs-accent-soft);
-  backdrop-filter: blur(3px);
 }
 .bbs-select-info {
   flex: 1 1 auto;
@@ -2462,142 +2474,125 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
 
 }
 
-/* 阅读室：概览用一条信息带，事项用分栏清单，正文保留安静的阅读宽度。 */
-.bbs-summary-page {
-  height: auto;
-  min-height: 100%;
-  min-width: 0;
-  color: var(--bbs-ink);
-  overflow-wrap: anywhere;
+/* 阅读器：纸面、细线和文字层级，避免每个信息块都变成带框表单。 */
+.bbs-summary-page :deep(.prism-page-header) { margin-bottom:16px; }
+.bbs-summary-page :deep(.prism-page-description) { margin-top:5px; }
+.bbs-summary-page { height:auto; min-height:100%; min-width:0; max-width:860px; margin:0 auto; color:var(--bbs-ink); overflow-wrap:anywhere; }
+.bbs-overview { margin:0 0 10px; padding:17px 20px; border:0; border-radius:14px; background:var(--bbs-surface); box-shadow:0 2px 12px -8px #00000020; }
+.bbs-overview-head { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.bbs-overview-caption { font-size:11px; color:var(--bbs-ink-muted); letter-spacing:.08em; }
+.bbs-overview-status { font-size:10px; color:var(--bbs-ink-soft); }
+.bbs-overview-status::before { content:''; display:inline-block; width:5px; height:5px; margin:0 6px 1px 0; border-radius:50%; background:var(--bbs-accent); }
+.bbs-overview-status.is-protected { color:var(--bbs-warning); }
+.bbs-overview-stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin:10px 0; }
+.bbs-overview-stats > div { display:flex; flex-direction:column; min-width:0; }
+.bbs-overview-stats dd { order:-1; margin:0 0 3px; font:500 27px/1.2 var(--bbs-font-reading); font-variant-numeric:tabular-nums; }
+.bbs-overview-stats dt { font-size:10px; color:var(--bbs-ink-muted); }
+.bbs-overview-pending dd { color:var(--bbs-accent); }
+.bbs-backfill-entry { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-top:8px; border-top:1px solid var(--bbs-line); }
+.bbs-backfill-entry p { font-size:11px; line-height:1.7; margin:0; color:var(--bbs-ink-muted); }
+.bbs-backfill-entry .bbs-btn { flex-shrink:0; min-height:40px; font-size:11px; padding:7px 11px; border-radius:8px; }
+.bbs-compatibility { margin:0 0 7px; padding:0 3px; border:0; background:transparent; border-radius:0; }
+.bbs-compatibility-ready summary { display:flex; align-items:center; gap:9px; padding:8px 0; font-size:10px; font-weight:400; color:var(--bbs-ink-muted); list-style:none; cursor:pointer; }
+.bbs-compatibility-ready summary::before { content:'✓'; color:var(--bbs-accent); font-size:11px; }
+.bbs-compatibility-ready summary span { margin-left:auto; font-size:10px; }
+.bbs-compatibility-ready summary::after { content:'›'; font-size:15px; }
+.bbs-compatibility-ready[open] summary::after { transform:rotate(90deg); }
+.bbs-compatibility-ready p { font-size:12px; line-height:1.8; }
+.bbs-compatibility-warning { padding:16px; border:1px solid var(--bbs-warning); border-radius:10px; background:var(--bbs-warning-soft); }
+.bbs-compatibility-warning p { font-size:12px; line-height:1.9; }
+.bbs-compatibility-ready summary:focus-visible { outline:2px solid var(--bbs-accent); outline-offset:3px; }
+.bbs-reader-context { margin-bottom:17px; border-top:1px solid var(--bbs-line); border-bottom:1px solid var(--bbs-line); }
+.bbs-reader-context > summary { display:flex; align-items:center; gap:12px; padding:12px 0; cursor:pointer; list-style:none; font-size:13px; color:var(--bbs-ink); }
+.bbs-reader-context summary::-webkit-details-marker,.bbs-compatibility-ready summary::-webkit-details-marker { display:none; }
+.bbs-reader-context > summary > span:nth-child(2) { min-width:0; flex:1; }
+.bbs-reader-context > summary small { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:4px; font-size:11px; font-weight:400; color:var(--bbs-ink-muted); }
+.bbs-context-icon { font-size:18px; color:var(--bbs-accent); }
+.bbs-context-chevron { color:var(--bbs-ink-muted); transform:rotate(-90deg); }
+.bbs-reader-context[open] > summary .bbs-context-chevron { transform:rotate(0); }
+.bbs-reader-context-body { padding:10px 0 20px; }
+.bbs-reader-context-body .bbs-section-kicker,.bbs-reader-context-body .bbs-section-description { display:none; }
+.bbs-section-head { align-items:center; gap:14px; margin-bottom:12px; }
+.bbs-section-kicker { display:block; font:500 9px/1.5 var(--bbs-font-sans); letter-spacing:.18em; color:var(--bbs-accent); margin-bottom:5px; }
+.bbs-section-description { color:var(--bbs-ink-muted); font-size:11px; margin:5px 0 0; }
+.bbs-title-sub { font-family:var(--bbs-font-reading); font-size:21px; font-weight:600; letter-spacing:.05em; }
+.bbs-focus,.bbs-plan { border:0; border-radius:8px; background:var(--bbs-surface); box-shadow:none; }
+.bbs-focus { border-left:2px solid var(--bbs-accent); padding:14px 16px; }
+.bbs-focus-head { flex-wrap:wrap; gap:6px; }
+.bbs-focus-situation { font-size:14px; line-height:1.9; }
+.bbs-focus-time,.bbs-plan-times { font-size:10px; color:var(--bbs-ink-muted); }
+.bbs-focus-acts { margin-left:auto; }
+.bbs-focus-field { grid-template-columns:32px minmax(0,1fr); }
+.bbs-focus-fields dd { font-size:12px; }
+.bbs-planning { margin-top:20px; }
+.bbs-planning-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:22px; }
+.bbs-plan { padding:12px; margin-top:8px; }
+.bbs-plan-kind { font-size:10px; }
+.bbs-state { background:transparent; padding:12px 0; border:0; }
+.bbs-state-key { font-size:10px; }
+.bbs-state-val { font-size:12px; }
+.bbs-divider { display:none; }
+.bbs-reading-head { display:flex; align-items:flex-end; flex-wrap:wrap; gap:12px; margin:0 0 10px; }
+.bbs-summary-heading { min-width:0; flex:1; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; }
+.bbs-summary-heading .bbs-token-estimate { flex-basis:100%; }
+.bbs-estimate-toggle { margin-top:0; padding:0; min-height:32px; border:0; background:transparent; font-size:10px; color:var(--bbs-ink-muted); text-decoration:underline; text-underline-offset:3px; }
+.bbs-summary-tools { display:flex; flex-wrap:wrap; gap:4px; padding:0; background:transparent; border:0; }
+.bbs-summary-tools .bbs-btn,.bbs-summary-tools .bbs-add-mini { min-height:40px; height:auto; width:auto; padding:7px 11px; border:0; border-radius:7px; font-size:11px; background:var(--bbs-surface-2); color:var(--bbs-ink-soft); }
+.bbs-summary-tools .bbs-resummary-btn { color:var(--bbs-accent); background:var(--bbs-accent-soft); }
+.bbs-btn-label { display:inline; }
+.bbs-result-note { color:var(--bbs-ink-muted); font-size:10px; margin:14px 0 0; }
+.bbs-summary-list { display:block; margin:0; }
+.bbs-summary-page :deep(.bbs-summary-card) { margin:0; padding:22px 0; border:0; border-bottom:1px solid var(--bbs-line); border-radius:0; background:transparent; box-shadow:none; gap:10px; }
+.bbs-summary-page :deep(.bbs-summary-card.is-deep) { margin:14px 0 0; padding:18px 20px; background:var(--bbs-surface); border:0; border-radius:10px; }
+.bbs-summary-page :deep(.bbs-summary-card.is-child) { padding-left:17px; border-left:1px solid var(--bbs-line); margin-left:5px; }
+.bbs-summary-page :deep(.bbs-summary-main) { min-width:0; flex:1; }
+.bbs-summary-page :deep(.bbs-summary-meta) { display:flex; flex-wrap:wrap; gap:7px; align-items:center; margin-bottom:7px; }
+.bbs-summary-page :deep(.bbs-summary-badge) { border-radius:4px; background:var(--bbs-accent-soft); color:var(--bbs-accent); font-size:10px; padding:3px 7px; font-weight:600; }
+.bbs-summary-page :deep(.bbs-summary-loc) { padding:0; border:0; background:transparent; color:var(--bbs-ink-muted); font:400 10px/1.5 var(--bbs-font-mono); }
+.bbs-summary-page :deep(.bbs-summary-rel) { color:var(--bbs-ink-soft); font-size:11px; }
+.bbs-summary-page :deep(.bbs-summary-text) { margin:0; font-size:14px; line-height:2; letter-spacing:.025em; color:var(--bbs-ink); overflow-wrap:anywhere; }
+.bbs-summary-page :deep(.bbs-summary-acts) { flex:0 0 auto; margin-left:auto; opacity:1; gap:0; }
+.bbs-summary-page :deep(.bbs-summary-act) { width:36px; height:36px; font-size:12px; border:0; background:transparent; color:var(--bbs-ink-muted); }
+.bbs-summary-page :deep(.bbs-summary-act:hover) { color:var(--bbs-accent); background:var(--bbs-accent-soft); }
+.bbs-summary-page :deep(.bbs-summary-time),.bbs-summary-page :deep(.bbs-summary-dateline) { font-size:10px; color:var(--bbs-ink-muted); }
+.bbs-summary-page :deep(.bbs-expand-bar) { min-height:40px; margin-top:10px; padding:7px 0 0; border-top:1px solid var(--bbs-line); font-size:11px; color:var(--bbs-accent); }
+.bbs-summary-list.is-selecting .bbs-summary-card.is-selected { background:var(--bbs-accent-soft); }
+.bbs-summary-check { flex:0 0 auto; }
+.bbs-select-bar { background:var(--bbs-surface); border-color:var(--bbs-line); box-shadow:none; padding-bottom:max(12px,env(safe-area-inset-bottom)); }
+.bbs-select-info { line-height:1.7; }
+.bbs-empty { padding:35px 10px; border:0; background:transparent; }
+.bbs-empty h3 { font:500 18px/1.7 var(--bbs-font-reading); }
+.bbs-empty p { font-size:12px; line-height:1.9; }
+.bbs-maintenance { margin-top:28px; border-top:1px solid var(--bbs-line); }
+.bbs-maintenance summary { display:flex; align-items:center; gap:10px; padding:16px 0; font-size:11px; color:var(--bbs-ink-muted); cursor:pointer; list-style:none; }
+.bbs-maintenance summary::-webkit-details-marker { display:none; }
+.bbs-maintenance summary > span { flex:1; min-width:0; }
+.bbs-maintenance summary small { display:block; font-size:10px; margin-top:4px; }
+.bbs-maintenance-body { padding:16px; border-radius:8px; background:var(--bbs-danger-soft); }
+.bbs-maintenance-warning { color:var(--bbs-danger); font-size:12px; line-height:1.8; }
+.bbs-summary-page :deep(button:focus-visible),.bbs-summary-page summary:focus-visible { outline:2px solid var(--bbs-accent); outline-offset:3px; }
+.bbs-modal { min-width:0; overflow-wrap:anywhere; }
+@media(max-width:640px) {
+ .bbs-overview { padding:12px 16px; }
+ .bbs-overview-stats dd { font-size:26px; }
+ .bbs-backfill-entry { gap:7px; }
+ .bbs-backfill-entry p { font-size:10px; }
+ .bbs-backfill-entry .bbs-btn { font-size:10px; padding:7px 9px; }
+ .bbs-reading-head { display:block; }
+ .bbs-summary-tools { margin-top:10px; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:5px; }
+ .bbs-summary-tools .bbs-btn,.bbs-summary-tools .bbs-add-mini { justify-content:center; padding:6px 3px; gap:4px; font-size:10px; white-space:nowrap; }
+ .bbs-summary-tools .bbs-btn-label { display:inline; }
+ .bbs-planning-grid { grid-template-columns:minmax(0,1fr); gap:20px; }
+ .bbs-focus-time { flex-basis:100%; order:3; }
+ .bbs-summary-page :deep(.bbs-summary-text) { font-size:14px; line-height:1.95; }
+ .bbs-summary-page :deep(.bbs-summary-dateline),.bbs-summary-page :deep(.bbs-summary-time) { flex-basis:100%; order:9; }
+ .bbs-summary-page :deep(.bbs-summary-card.is-deep) { padding:16px; }
+ .bbs-select-bar { flex-wrap:wrap; gap:8px; padding:12px; }
+ .bbs-select-info,.bbs-select-warn { flex-basis:100%; }
+ .bbs-time-pair { flex-direction:column; }
+ .bbs-time-col { min-width:0; width:100%; }
 }
-.bbs-overview {
-  margin: 20px 0 16px;
-  padding: 20px 22px 16px;
-  border: 1px solid var(--bbs-line);
-  border-radius: 18px;
-  background: linear-gradient(120deg, var(--bbs-accent-soft), var(--bbs-surface) 72%);
-  box-shadow: var(--bbs-card-shadow);
-}
-.bbs-overview-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
-.bbs-overview-caption { font-size: 13px; font-weight: 650; color: var(--bbs-ink-soft); }
-.bbs-overview-status { padding: 4px 9px; border-radius: 8px; font-size: 11px; color: var(--bbs-accent); background: var(--bbs-accent-soft); }
-.bbs-overview-status.is-protected { color: var(--bbs-warning); background: var(--bbs-warning-soft); }
-.bbs-overview-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 20px 0 14px; gap: 16px; }
-.bbs-overview-stats > div { min-width: 0; padding-left: 14px; border-left: 1px solid var(--bbs-line-strong); }
-.bbs-overview-stats > div:first-child { padding-left: 0; border-left: 0; }
-.bbs-overview-stats dt { font-size: 11px; line-height: 1.5; color: var(--bbs-ink-soft); }
-.bbs-overview-stats dd { margin: 6px 0 0; font-size: 28px; line-height: 1.2; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -.04em; }
-.bbs-overview-pending dd { color: var(--bbs-warning); }
-.bbs-overview-note { margin: 0; font-size: 11px; line-height: 1.7; color: var(--bbs-ink-muted); }
-.bbs-compatibility { padding: 14px 16px; margin-bottom: 26px; border-color: var(--bbs-line); border-radius: 12px; background: var(--bbs-surface-2); font-size: 12px; }
-.bbs-compatibility .bbs-title-sub { font-size: 13px; }
-.bbs-compatibility-warning { border-color: var(--bbs-warning); background: var(--bbs-warning-soft); }
-.bbs-section-kicker { display: block; margin-bottom: 6px; font-size: 10px; font-weight: 650; letter-spacing: .12em; color: var(--bbs-accent); }
-.bbs-section-description { margin: 5px 0 0; font-size: 12px; line-height: 1.7; color: var(--bbs-ink-muted); }
-.bbs-section-head { min-width: 0; gap: 12px; }
-.bbs-focus { padding: 16px 18px; border-radius: 14px; box-shadow: var(--bbs-card-shadow); }
-.bbs-focus::before { width: 3px; opacity: 1; }
-.bbs-focus-head { flex-wrap: wrap; gap: 8px; }
-.bbs-focus-names { min-width: 0; overflow-wrap: anywhere; }
-.bbs-focus-situation { margin-top: 6px; font-size: 14px; line-height: 1.85; }
-.bbs-focus-fields { margin-top: 8px; gap: 8px; }
-.bbs-state { margin: 12px 0 0; padding: 10px 0; border: 0; border-bottom: 1px solid var(--bbs-line); border-radius: 0; background: transparent; }
-.bbs-planning { margin-top: 28px; }
-.bbs-planning-intro { margin-bottom: 18px; }
-.bbs-planning-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 26px; }
-.bbs-planning-grid > .bbs-fold-section { min-width: 0; margin-top: 0; }
-.bbs-planning-grid .bbs-section-head { padding-bottom: 10px; border-bottom: 1px solid var(--bbs-line-strong); }
-.bbs-fold-head { min-width: 0; flex-wrap: wrap; gap: 8px; }
-.bbs-fold-count { border: 0; margin-top: 0; padding: 3px 9px; color: var(--bbs-accent); }
-.bbs-plan-group { gap: 0; margin-top: 0; }
-.bbs-plan { padding: 14px 0; gap: 8px; border: 0; border-bottom: 1px solid var(--bbs-line); border-radius: 0; background: transparent; }
-.bbs-plan-head { flex-wrap: wrap; }
-.bbs-plan-content { line-height: 1.8; }
-.bbs-plan-empty { margin: 12px 0 0; padding: 14px 16px; border: 1px dashed var(--bbs-line-strong); border-radius: 12px; background: var(--bbs-surface-2); color: var(--bbs-ink-muted); font-size: 12px; line-height: 1.8; }
-.bbs-empty-prerequisite { display: block; margin-top: 6px; color: var(--bbs-ink-soft); }
-.bbs-plan-acts, .bbs-focus-acts { opacity: 1; }
-.bbs-plan-act, .bbs-add-mini { width: 36px; height: 36px; }
-.bbs-divider { margin: 30px 0 24px; }
-.bbs-divider-mark { background: var(--bbs-accent); width: 5px; height: 5px; }
-.bbs-pending { margin-top: 0; margin-bottom: 18px; padding: 16px; border: 1px solid var(--bbs-line-strong); border-radius: 14px; background: var(--bbs-surface-2); }
-.bbs-backfill { border-color: var(--bbs-line-strong); border-left: 3px solid var(--bbs-accent); }
-.bbs-backfill-description { margin: 0; font-size: 12px; line-height: 1.75; color: var(--bbs-ink-soft); }
-.bbs-pending-head { flex-wrap: wrap; }
-.bbs-pending-chip { min-width: 42px; height: 40px; border-color: var(--bbs-line-strong); }
-.bbs-job-progress { background: var(--bbs-accent-soft); }
-.bbs-batch-progress { flex-wrap: wrap; flex: 1 1 auto; margin-left: 0; line-height: 1.7; }
-.bbs-batch-cancel { min-height: 36px; margin-left: auto; }
-.bbs-reading-head { flex-wrap: wrap; align-items: flex-start; }
-.bbs-summary-heading { flex: 1 1 210px; }
-.bbs-token-estimate { flex-direction: row; flex-wrap: wrap; gap: 4px 12px; margin-top: 10px; }
-.bbs-summary-tools { flex: 0 1 auto; flex-wrap: wrap; gap: 6px; }
-.bbs-summary-tools .bbs-add-mini, .bbs-summary-tools .bbs-btn-sm { width: auto; height: auto; min-height: 38px; padding: 8px 10px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--bbs-line-strong); border-radius: 9px; background: var(--bbs-surface); color: var(--bbs-ink-soft); font-size: 12px; }
-.bbs-summary-tools .bbs-btn-primary { background: var(--bbs-accent); border-color: var(--bbs-accent); color: var(--bbs-accent-ink); }
-.bbs-summary-tools .bbs-add-mini.is-on { background: var(--bbs-accent-soft); color: var(--bbs-accent); border-color: var(--bbs-accent); }
-.bbs-summary-tools .bbs-btn-label { display: inline; }
-.bbs-search-input { min-width: 0; min-height: 44px; padding-right: 46px; }
-.bbs-search-clear { width: 36px; height: 36px; }
-.bbs-result-note { margin: 16px 0 0; font-size: 11px; line-height: 1.7; color: var(--bbs-ink-muted); }
-.bbs-summary-list { gap: 16px; margin-top: 12px; }
-/* 本页独立约束递归节点与搜索结果，不改共享 base。 */
-.bbs-summary-page :deep(.bbs-summary-card) { min-width: 0; padding: 18px 20px; border: 1px solid var(--bbs-line); border-radius: 14px; background: var(--bbs-surface); box-shadow: var(--bbs-card-shadow); }
-.bbs-summary-page :deep(.bbs-summary-card.is-deep) { border-left: 3px solid var(--bbs-accent); background: var(--bbs-surface); }
-.bbs-summary-page :deep(.bbs-summary-card.is-child) { box-shadow: none; background: var(--bbs-surface-2); }
-.bbs-summary-page :deep(.bbs-summary-card.is-expanded) { border-color: var(--bbs-line-strong); border-left-color: var(--bbs-accent); }
-.bbs-summary-page :deep(.bbs-summary-main) { min-width: 0; flex: 1; }
-.bbs-summary-page :deep(.bbs-summary-meta) { flex-wrap: wrap; gap: 7px; align-items: center; margin-bottom: 12px; }
-.bbs-summary-page :deep(.bbs-summary-text) { font-size: 14px; line-height: 1.95; letter-spacing: .01em; color: var(--bbs-ink); overflow-wrap: anywhere; }
-.bbs-summary-page :deep(.bbs-summary-acts) { flex: 0 0 auto; opacity: 1; }
-.bbs-summary-page :deep(.bbs-summary-act) { width: 36px; height: 36px; }
-.bbs-summary-page :deep(.bbs-summary-time), .bbs-summary-page :deep(.bbs-summary-dateline) { min-width: 0; overflow-wrap: anywhere; }
-.bbs-summary-page :deep(.bbs-expand-bar) { min-height: 40px; margin-top: 14px; padding-top: 10px; color: var(--bbs-accent); }
-.bbs-summary-page :deep(.bbs-collapse-footer) { min-height: 40px; color: var(--bbs-ink-soft); }
-.bbs-summary-list.is-selecting .bbs-summary-card.is-selected { border-color: var(--bbs-accent); background: var(--bbs-accent-soft); }
-.bbs-summary-check { flex: 0 0 auto; }
-.bbs-select-bar { border-color: var(--bbs-line-strong); background: var(--bbs-surface); box-shadow: var(--bbs-card-shadow); padding-bottom: max(12px, env(safe-area-inset-bottom)); }
-.bbs-select-info { line-height: 1.7; }
-.bbs-select-bar .bbs-btn { min-height: 40px; }
-.bbs-empty { min-height: 180px; margin-top: 16px; padding: 30px 20px; border: 1px dashed var(--bbs-line-strong); border-radius: 16px; background: var(--bbs-surface-2); }
-.bbs-empty h3 { margin: 12px 0 0; font-size: 16px; color: var(--bbs-ink); }
-.bbs-empty p { max-width: 460px; font-size: 13px; line-height: 1.85; }
-.bbs-maintenance { margin-top: 28px; border-top: 1px solid var(--bbs-line-strong); color: var(--bbs-ink-soft); }
-.bbs-maintenance summary { display: flex; align-items: center; gap: 10px; padding: 18px 0; cursor: pointer; font-size: 13px; list-style: none; }
-.bbs-maintenance summary::-webkit-details-marker { display: none; }
-.bbs-maintenance summary > span { flex: 1; min-width: 0; }
-.bbs-maintenance summary small { display: block; margin-top: 5px; font-size: 11px; color: var(--bbs-ink-muted); }
-.bbs-maintenance[open] summary { color: var(--bbs-danger); }
-.bbs-maintenance-body { display: flex; align-items: flex-start; flex-direction: column; gap: 12px; padding: 16px; border: 1px solid var(--bbs-danger); border-radius: 12px; background: var(--bbs-danger-soft); }
-.bbs-maintenance-warning { margin: 0; font-size: 13px; line-height: 1.8; color: var(--bbs-danger); }
-.bbs-maintenance .bbs-btn-danger { background: var(--bbs-surface); color: var(--bbs-danger); border-color: var(--bbs-danger); }
-.bbs-summary-page :deep(button:focus-visible), .bbs-maintenance summary:focus-visible { outline: 2px solid var(--bbs-accent); outline-offset: 3px; }
-.bbs-modal { min-width: 0; overflow-wrap: anywhere; }
-.bbs-modal .bbs-summary-act { width: 40px; height: 40px; }
-@media (max-width: 640px) {
-  .bbs-overview { padding: 16px; border-radius: 14px; }
-  .bbs-overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 12px; }
-  .bbs-overview-stats > div:nth-child(3) { padding-left: 0; border-left: 0; }
-  .bbs-overview-stats dd { font-size: 26px; }
-  .bbs-planning-grid { grid-template-columns: minmax(0, 1fr); gap: 24px; }
-  .bbs-focus { padding: 14px; }
-  .bbs-focus-time { flex-basis: 100%; order: 3; }
-  .bbs-plan-act, .bbs-add-mini { width: 40px; height: 40px; }
-  .bbs-reading-head { display: block; }
-  .bbs-summary-tools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; margin-top: 14px; padding: 8px; border: 1px solid var(--bbs-line); border-radius: 12px; background: var(--bbs-surface-2); }
-  .bbs-summary-tools .bbs-add-mini, .bbs-summary-tools .bbs-btn-sm { width: 100%; min-width: 0; min-height: 44px; padding: 8px 4px; font-size: 12px; white-space: normal; }
-  .bbs-summary-tools .bbs-btn-label { display: inline; }
-  .bbs-summary-page :deep(.bbs-summary-card) { padding: 14px 12px; border-radius: 12px; }
-  .bbs-summary-page :deep(.bbs-summary-act) { width: 40px; height: 40px; }
-  .bbs-summary-page :deep(.bbs-summary-text) { font-size: 13px; line-height: 1.9; }
-  .bbs-summary-page :deep(.bbs-summary-dateline), .bbs-summary-page :deep(.bbs-summary-time) { flex-basis: 100%; order: 9; }
-  .bbs-select-info, .bbs-select-warn { flex-basis: 100%; }
-  .bbs-select-bar { gap: 8px; padding: 12px 10px max(12px, env(safe-area-inset-bottom)); }
-  .bbs-select-bar .bbs-btn { flex: 1 1 auto; justify-content: center; padding: 8px; font-size: 12px; }
-  .bbs-time-pair { flex-direction: column; }
-  .bbs-time-col { min-width: 0; width: 100%; }
-}
-
-.bbs-compatibility-ready summary { cursor:pointer; font-size:13px; font-weight:650; color:var(--bbs-ink); }
-.bbs-compatibility-ready summary span { margin-left:12px; font-size:11px; font-weight:400; color:var(--bbs-ink-muted); }
-.bbs-compatibility-ready summary:focus-visible { outline:2px solid var(--bbs-accent); outline-offset:5px; border-radius:4px; }
-@media(max-width:640px) { .bbs-compatibility-ready summary span { display:block; margin:5px 0 0 16px; } .bbs-overview { padding:16px; } }
+.bbs-summary-failure { min-width: 0; overflow-wrap: anywhere; }
+.bbs-summary-failure details { margin-block: 8px; }
+.bbs-summary-failure summary { cursor: pointer; font-size: 13px; }
 </style>

@@ -7,7 +7,7 @@ import * as notices from '@/st/toast';
 import { batchBackfill, checkResummary, currentSummaryPromise, handleGenerationIntercept, openingPendingFloor, cancelBatchBackfill, engineState, summarizeFloor, summarizeSelected } from './engine';
 import { buildResummaryPrompt, buildSummaryThinking, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, RULE_SUMMARY_COMPOSITION, SUMMARY_OUTPUT_PROTOCOL } from './prompts';
 import { renderSourceHints, SOURCE_HINTS_HEADER } from './sourceHints';
-import { memory } from './store';
+import { memory, memoryWriteIssue } from './store';
 import { createEmptyMemory, type LeafExtra, type SummaryDelta } from './types';
 
 const message = (isUser = false, overrides: Partial<STMessage> = {}): STMessage => ({
@@ -437,6 +437,93 @@ describe.each(['automatic', 'manual'] as const)('compression audit output (%s)',
   async function compress(ids: string[]) {
     return mode === 'automatic' ? checkResummary() : (await summarizeSelected(ids)).made;
   }
+
+  it.each([0, 1, 2])('allows unrelated tail streaming while selected sources remain unchanged (level=%s)', async level => {
+    const ids = seedInputs(level);
+    const chat = context.getContext()!.chat;
+    chat.push(message(false, { mes: 'New response is streaming.' }));
+    vi.mocked(client.requestViaMainApi).mockImplementation(async () => {
+      chat.at(-1)!.mes += ' More text.';
+      chat.push(message(true, { mes: 'A later instruction.' }));
+      return JSON.stringify(summary);
+    });
+    expect(await compress(ids)).toBe(1);
+    expect(memory.summaries.at(-1)?.childIds).toEqual(ids);
+  });
+
+  it('allows unrelated memory changes without discarding selected summaries', async () => {
+    const ids = seedInputs(0);
+    settings.apiSettings.resummaryThreshold = 20;
+    vi.mocked(client.requestViaMainApi).mockImplementation(async () => {
+      memory.summaries.push({ id: 'unrelated', text: 'Unrelated imported history.', level: 1,
+        createdAt: 99, auto: false, childIds: [] });
+      return JSON.stringify(summary);
+    });
+    expect(await compress(ids)).toBe(1);
+    expect(memory.summaries.at(-1)?.childIds).toEqual(ids);
+  });
+
+  it.each(['text', 'raw', 'swipe', 'omit', 'delete', 'parent', 'child', 'time', 'chat', 'metadata'] as const)(
+    'still rejects changed source or session: %s', async mutation => {
+      const ids = seedInputs(1);
+      const ctx = context.getContext()!;
+      const before = memory.summaries.length;
+      vi.mocked(client.requestViaMainApi).mockImplementation(async () => {
+        if (mutation === 'text') memory.summaries[0].text = 'Edited summary.';
+        if (mutation === 'raw') ctx.chat[0].mes = 'Edited actual source.';
+        if (mutation === 'swipe') ctx.chat[0].swipe_id = 1;
+        if (mutation === 'omit') ctx.chat[0].extra!.bbs_omit = true;
+        if (mutation === 'delete') ctx.chat.splice(0, 1);
+        if (mutation === 'parent') memory.summaries.push({ id: 'other-parent', text: 'Merged elsewhere.',
+          level: 2, createdAt: 100, auto: false, childIds: ids });
+        if (mutation === 'child') ctx.chat[0].extra!.bbs_leaf!.text = 'Edited descendant.';
+        if (mutation === 'time') memory.summaries[0].timeStart = 'A different day';
+        if (mutation === 'chat') vi.mocked(context.getContext).mockReturnValue({ ...ctx, chat: [...ctx.chat], getCurrentChatId: () => 'different-chat' });
+        if (mutation === 'metadata') ctx.chatMetadata = {};
+        return JSON.stringify(summary);
+      });
+      expect(await compress(ids)).toBe(0);
+      expect(memory.summaries).toHaveLength(before + (mutation === 'parent' ? 1 : 0));
+      expect(engineState.lastError).toContain('结果未写入');
+      expect(client.requestViaMainApi).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['descendant-owner', 'duplicate-comp', 'duplicate-leaf'] as const)('rejects ambiguous descendant identity during request: %s', async mutation => {
+    const ids = seedInputs(1);
+    const ctx = context.getContext()!;
+    vi.mocked(client.requestViaMainApi).mockImplementation(async () => {
+      if (mutation === 'descendant-owner') memory.summaries.push({ id: 'foreign-parent', text: 'Other tree.', level: 1, createdAt: 20, auto: false, childIds: ['leaf-0'] });
+      if (mutation === 'duplicate-comp') memory.summaries.push({ ...memory.summaries[0] });
+      if (mutation === 'duplicate-leaf') ctx.chat.push(message(false, { extra: { bbs_leaf: { ...ctx.chat[0].extra!.bbs_leaf! } } }));
+      return JSON.stringify(summary);
+    });
+    expect(await compress(ids)).toBe(0);
+    expect(engineState.lastError).toContain('结果未写入');
+    expect(client.requestViaMainApi).toHaveBeenCalledOnce();
+  });
+
+  it('reports an ambiguous initial descendant without rejecting the public operation', async () => {
+    const ids = seedInputs(1);
+    expect(memoryWriteIssue()).toBe('');
+    const ctx = context.getContext()!;
+    ctx.chat.push(message(false, { extra: { bbs_leaf: { ...ctx.chat[0].extra!.bbs_leaf! } } }));
+    expect(await compress(ids)).toBe(0);
+    expect(engineState.lastError).toContain('结果未写入');
+    expect(engineState.running).toBe(false);
+    expect(client.requestViaMainApi).not.toHaveBeenCalled();
+  });
+
+  it('accepts default swipe metadata initialization without a real swipe change', async () => {
+    const ids = seedInputs(1);
+    const ctx = context.getContext()!;
+    delete ctx.chat[0].swipe_id;
+    vi.mocked(client.requestViaMainApi).mockImplementation(async () => {
+      ctx.chat[0].swipe_id = 0;
+      return JSON.stringify(summary);
+    });
+    expect(await compress(ids)).toBe(1);
+  });
 
   it.each([0, 1, 2])('sends a checklist and prefill, storing only final data (input level=%s)', async level => {
     const ids = seedInputs(level);

@@ -549,3 +549,44 @@ describe('v0.12 计划变更的现有手工消费者', () => {
     expect(editPlan(id,{content:'  '})).toBe(false);
   });
 });
+
+// 伤情证据与有限纠错：经正式补录/重摘入口验证落盘和保护，而非只测 helper。
+describe('伤情排版证据与失败恢复生产链', () => {
+  function fixture() {
+    const seed = msg('此前岑岚右腕受伤，不能负重。', true);
+    seed.extra!.bbs_leaf!.seed = true;
+    seed.extra!.bbs_leaf!.delta = { npcs: { add: [{ name: '岑岚', condition: '右腕受伤，不能负重' }] } };
+    const chat = [seed, msg('岑岚说：“**右腕仍需休养**\n三天。”')];
+    useChat(chat); return chat;
+  }
+  const valid = () => response('岑岚仍需休养三天。', { npcs: { update: [{ name: '岑岚', conditionPatch: { add: [{ text: '仍需休养三天', evidence: '右腕仍需休养三天' }] } }] } });
+  it('排版差异无需重试，仍保留旧伤处与限制且不持久化证据', async () => {
+    const chat = fixture(); vi.mocked(client.requestViaMainApi).mockResolvedValue(valid());
+    expect(await batchBackfill()).toMatchObject({ done: 1 });
+    expect(client.requestViaMainApi).toHaveBeenCalledTimes(1);
+    expect(deriveMemory(chat).npcs[0].condition).toBe('右腕受伤，不能负重；仍需休养三天');
+    expect(JSON.stringify(chat[1].extra!.bbs_leaf)).not.toMatch(/conditionPatch|evidence/);
+  });
+  it('缺证据有限纠错有精确路径，修正后只写一次', async () => {
+    const chat = fixture(); settings.apiSettings.summaryMaxRetries = 1;
+    const bad = { summary: '仍需养伤。', stateChanges: ['npcs'], npcs: { update: [{ name: '岑岚', conditionPatch: { add: [{ text: '仍需休养三天' }] } }] } };
+    vi.mocked(client.requestViaMainApi).mockResolvedValueOnce(JSON.stringify(bad)).mockResolvedValueOnce(valid());
+    expect(await batchBackfill()).toMatchObject({ done: 1 });
+    const second = vi.mocked(client.requestViaMainApi).mock.calls[1][0];
+    expect(second.at(-2)?.content).toContain('岑岚.conditionPatch.add[0].evidence');
+    expect(second.at(-2)?.content).toContain('缺失'); expect(second.at(-1)?.role).toBe('assistant');
+    expect(deriveMemory(chat).npcs[0].condition?.match(/三天/g)).toHaveLength(1);
+  });
+  it('无效证据耗尽后标出失败楼层，不覆盖旧摘要或继续后楼；局部重试可恢复', async () => {
+    const chat = fixture(); chat[1].extra!.bbs_leaf = { id: 'old', text: '保留的旧摘要', delta: {}, createdAt: 1, swipe: 0, v: 1 };
+    chat.push(msg('下一楼不得在前楼失败后继续处理。'));
+    const before = JSON.stringify(chat); settings.apiSettings.summaryMaxRetries = 1;
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(response('错误恢复。', { npcs: { update: [{ name: '岑岚', conditionPatch: { replace: [{ id: 'c1', text: '', evidence: '右腕已经痊愈' }] } }] } }));
+    expect(await batchBackfill({ regenerate: true })).toMatchObject({ done: 0 });
+    expect(client.requestViaMainApi).toHaveBeenCalledTimes(2); expect(JSON.stringify(chat)).toBe(before);
+    expect(engineState.lastError).toContain('楼层 #1 摘要未保存'); expect(engineState.lastError).toContain('replace[0].evidence');
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(valid());
+    expect(await regenerateFloor(1)).toBe(true); expect(engineState.lastError).toBe('');
+    expect(chat[1].extra!.bbs_leaf!.text).toBe('岑岚仍需休养三天。'); expect(chat[2].extra!.bbs_leaf).toBeUndefined();
+  });
+});

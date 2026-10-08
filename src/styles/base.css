@@ -39,7 +39,9 @@
   align-items: center;
   justify-content: center;
   background: var(--bbs-overlay);
-  backdrop-filter: blur(7px);
+  /* 遮罩只负责隔离背景，不再重采样整张宿主聊天页。 */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   padding: 28px;
 }
 
@@ -216,7 +218,8 @@
   justify-content: center;
   padding: 24px;
   background: var(--bbs-overlay);
-  backdrop-filter: blur(3px);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .bbs-modal {
@@ -619,6 +622,7 @@
 @media (prefers-reduced-motion: reduce) {
   .bbs-root * {
     animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
 }
@@ -649,5 +653,28 @@ textarea.bbs-input { min-height: 90px; resize: vertical; }
   .bbs-modal-foot { flex-wrap: wrap; }
 }
 
+/* 触屏/窄屏关闭公共控件和弹窗的装饰过渡；保留加载状态及真实手势的位移。
+   不使用全局 animation:none 或 transform:none，避免取消业务状态反馈。 */
+@media (max-width: 640px), (hover: none) and (pointer: coarse) {
+  .bbs-root :is(.bbs-btn, .bbs-add-mini, .bbs-summary-act, .bbs-expand-bar,
+    .bbs-expand-caret, .bbs-collapse-footer, .bbs-modal-enter-active,
+    .bbs-modal-leave-active, .bbs-modal-enter-active .bbs-modal,
+    .bbs-modal-leave-active .bbs-modal) {
+    transition: none;
+  }
+  .bbs-modal-enter-from,
+  .bbs-modal-leave-to,
+  .bbs-modal-enter-from .bbs-modal,
+  .bbs-modal-leave-to .bbs-modal {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 /* 初始焦点落在非交互容器时不绘制整窗轮廓；控件的 focus-visible 保留。 */
 .bbs-window:focus, .bbs-modal-mask:focus, .bbs-modal:focus { outline: none; }
+
+/* 阅读器外壳：手机把空间留给文本；仍由 body 单一滚动。 */
+.bbs-body { scrollbar-width:thin; scrollbar-color:var(--bbs-line-strong) transparent; }
+@media(max-width:640px) { .bbs-body { padding:20px 22px 28px; } .bbs-window { border-left:0; border-right:0; } }
+@media(max-width:360px) { .bbs-body { padding-left:17px; padding-right:17px; } }

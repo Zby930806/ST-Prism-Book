@@ -1,3 +1,4 @@
+import { stripAftertalk } from '@/notes/protocol';
 /**
  * 时间标签(锚点)——让主对话模型在每条正文前后输出起止时间,把「时间」从事后推断变成正文事实。
  *
@@ -282,7 +283,7 @@ function readManagedTagText(mes: string, tag: string): string | null {
 }
 
 export function clampToTimeTags(mes: string): string {
-  let s = String(mes ?? '')
+  let s = stripAftertalk(String(mes ?? ''))
     .replace(RE_THINK_BLOCK, '') // 思维链
     .replace(/<!--[\s\S]+?-->/g, '') // HTML 注释
     .replace(/<horae[\s\S]*?>[\s\S]*?<\/horae[\s\S]*?>/gi, ''); // 旧 horae 格式

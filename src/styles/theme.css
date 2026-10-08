@@ -1,85 +1,87 @@
-/* 棱镜宝书 · 设计令牌。主题 ID 与用户设置保持兼容；颜色由此处统一定义。 */
+/* 棱镜宝书 · 阅读型设计令牌。保留五个主题 ID；所有公共配色由此定义。 */
 .bbs-root {
   --bbs-font-sans: 'MiSans','HarmonyOS Sans SC','PingFang SC','Microsoft YaHei',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+  --bbs-font-reading: 'Noto Serif CJK SC','Source Han Serif SC','Songti SC','STSong','SimSun',serif;
   --bbs-font-mono: 'SF Mono','Cascadia Code',Consolas,monospace;
-  --bbs-radius-win: 22px; --bbs-radius: 14px; --bbs-radius-sm: 9px; --bbs-radius-pill: 999px;
+  --bbs-radius-win: 18px; --bbs-radius: 12px; --bbs-radius-sm: 8px; --bbs-radius-pill: 999px;
   --bbs-gap: 20px; --bbs-page-pad: clamp(18px,3vw,32px);
   --bbs-win-max-w: 1060px; --bbs-win-max-h: 88vh;
-  --bbs-ease: cubic-bezier(.22,.61,.36,1); --bbs-dur: .2s;
-  --bbs-card-shadow: 0 3px 14px -8px #17162c20;
+  --bbs-ease: cubic-bezier(.22,.61,.36,1); --bbs-dur: .16s;
+  --bbs-card-shadow: none;
+  --bbs-shadow: 0 8px 24px -12px #11182033, 0 2px 6px #11182014;
+  --bbs-orb-shadow: drop-shadow(0 2px 4px #11182026);
 }
 .bbs-root[data-theme='day'] {
   color-scheme: light;
-  --bbs-bg: #F6F5FA; --bbs-surface: #FFFFFF; --bbs-surface-2: #EEEDF5;
-  --bbs-ink: #29263F; --bbs-ink-soft: #615D77; --bbs-ink-muted: #6B677F;
-  --bbs-accent: #6550B8; --bbs-accent-soft: #6550B812; --bbs-accent-ink: #FFFFFF;
-  --bbs-line: #E2DFEC; --bbs-line-strong: #B8B2CB;
-  --bbs-danger: #BA3655; --bbs-danger-soft: #BA365512;
-  --bbs-warning: #8F5618; --bbs-warning-soft: #B8781812;
-  --bbs-overlay: #15142980; --bbs-shadow: 0 28px 90px -24px #18132666,0 2px 8px #18132614;
+  --bbs-bg: #FAF9F6; --bbs-surface: #FFFFFF; --bbs-surface-2: #F0EEE9;
+  --bbs-ink: #272923; --bbs-ink-soft: #62655E; --bbs-ink-muted: #74766F;
+  --bbs-accent: #A64E2B; --bbs-accent-soft: #F7EDE5; --bbs-accent-ink: #FFFFFF;
+  --bbs-line: #E7E5DF; --bbs-line-strong: #C6C6BB;
+  --bbs-danger: #A73529; --bbs-danger-soft: #F7EAE7;
+  --bbs-warning: #7C5816; --bbs-warning-soft: #F5EEDC;
+  --bbs-overlay: #11182080;
 }
 .bbs-root[data-theme='night'] {
   color-scheme: dark;
-  --bbs-bg: #161724; --bbs-surface: #1E2032; --bbs-surface-2: #27293E;
-  --bbs-ink: #EEEFFA; --bbs-ink-soft: #B8BCD4; --bbs-ink-muted: #A0A6C2;
-  --bbs-accent: #B5A4FA; --bbs-accent-soft: #B5A4FA16; --bbs-accent-ink: #201B37;
-  --bbs-line: #34374F; --bbs-line-strong: #5F6380;
-  --bbs-danger: #FF9AA6; --bbs-danger-soft: #FF9AA612;
-  --bbs-warning: #E8BA7A; --bbs-warning-soft: #E8BA7A14;
-  --bbs-overlay: #080913AD; --bbs-shadow: 0 28px 90px -24px #000000A0,0 2px 8px #00000040;
-  --bbs-card-shadow: 0 3px 16px -8px #00000040;
+  --bbs-bg: #151A22; --bbs-surface: #1C232D; --bbs-surface-2: #232C38;
+  --bbs-ink: #EDEEEB; --bbs-ink-soft: #C0C5CB; --bbs-ink-muted: #A0A9B6;
+  --bbs-accent: #EDB18D; --bbs-accent-soft: #382D2B; --bbs-accent-ink: #34271F;
+  --bbs-line: #323B47; --bbs-line-strong: #657080;
+  --bbs-danger: #EEA59A; --bbs-danger-soft: #432E2B;
+  --bbs-warning: #DEC18B; --bbs-warning-soft: #3D3525;
+  --bbs-overlay: #080C10AD;
+  --bbs-shadow: 0 8px 24px -12px #00000066, 0 2px 6px #00000026;
 }
+/* 历史 pastel ID 继续可读写：改用暖纸底与低饱和蓝灰，不再铺满粉色。 */
 .bbs-root[data-theme='pastel'] {
   color-scheme: light;
-  --bbs-bg: #FBF5FA; --bbs-surface: #FFFCFF; --bbs-surface-2: #F3E8F2;
-  --bbs-ink: #442942; --bbs-ink-soft: #70536D; --bbs-ink-muted: #7C607A;
-  --bbs-accent: #965179; --bbs-accent-soft: #96517912; --bbs-accent-ink: #FFFFFF;
-  --bbs-line: #E6D5E1; --bbs-line-strong: #BDA2B4;
-  --bbs-danger: #B33555; --bbs-danger-soft: #B3355512;
-  --bbs-warning: #8D571E; --bbs-warning-soft: #8D571E12;
-  --bbs-overlay: #3B233A80; --bbs-shadow: 0 28px 90px -24px #58374D66,0 2px 8px #58374D14;
+  --bbs-bg: #F7F5F1; --bbs-surface: #FFFDFA; --bbs-surface-2: #EEEBE5;
+  --bbs-ink: #302F2B; --bbs-ink-soft: #625E55; --bbs-ink-muted: #70695F;
+  --bbs-accent: #596B7B; --bbs-accent-soft: #E9EDF0; --bbs-accent-ink: #FFFFFF;
+  --bbs-line: #E1DDD5; --bbs-line-strong: #B6AFA3;
+  --bbs-danger: #A73529; --bbs-danger-soft: #F7EAE7;
+  --bbs-warning: #7C5816; --bbs-warning-soft: #F5EEDC;
+  --bbs-overlay: #211F1A80;
 }
 .bbs-root[data-theme='green'] {
   color-scheme: light;
-  --bbs-bg: #F1F7F5; --bbs-surface: #FFFFFF; --bbs-surface-2: #E6F0EB;
-  --bbs-ink: #243E38; --bbs-ink-soft: #4B675F; --bbs-ink-muted: #556D63;
-  --bbs-accent: #286A58; --bbs-accent-soft: #286A5812; --bbs-accent-ink: #FFFFFF;
-  --bbs-line: #D3E3DA; --bbs-line-strong: #9AB5A7;
-  --bbs-danger: #B13950; --bbs-danger-soft: #B1395012;
-  --bbs-warning: #805B20; --bbs-warning-soft: #805B2012;
-  --bbs-overlay: #142E2780; --bbs-shadow: 0 28px 90px -24px #183A2C66,0 2px 8px #183A2C14;
+  --bbs-bg: #F4F6F4; --bbs-surface: #FFFFFF; --bbs-surface-2: #ECEFEC;
+  --bbs-ink: #28312C; --bbs-ink-soft: #56625A; --bbs-ink-muted: #626E65;
+  --bbs-accent: #426E5B; --bbs-accent-soft: #E8F0EB; --bbs-accent-ink: #FFFFFF;
+  --bbs-line: #DCE3DD; --bbs-line-strong: #A9B7AD;
+  --bbs-danger: #A73529; --bbs-danger-soft: #F7EAE7;
+  --bbs-warning: #7C5816; --bbs-warning-soft: #F5EEDC;
+  --bbs-overlay: #14201980;
 }
-/* ========== 跟随 ST ==========
-   不定义自己的配色,而是从 SillyTavern 宿主主题的 --SmartTheme* 变量派生。
-   之所以可行:自定义属性是可继承属性,能穿透 shadow 边界;且 :host{all:initial}
-   的 `all` 简写不含自定义属性,故这些 ST 变量照常继承进来(见 base.css)。
-   ST 只给了少量基色,缺的 token 用 color-mix 从基色派生;每个 var() 都带回退值,
-   万一宿主没定义(理论上不会)也不至于塌成透明。
-   注:danger/warning ST 无语义色 → 用在明/暗底都可读的中性值;overlay 用中性深色遮罩,
-   不跟随 body 色,避免暗色主题下遮罩反而变浅。 */
+/* 跟随 ST：自定义属性可穿透 shadow 边界，:host 的 all:initial 不会重置它们。
+   宿主颜色优先，回退值与日间一致；不把宿主主题强制改成内置主题。
+   宿主可自定义透明度和任意色值，其最终对比度仍需在实际宿主中验收。 */
 .bbs-root[data-theme='st'] {
-  --bbs-bg: var(--SmartThemeBlurTintColor, #f6f5f2);
-  --bbs-surface: var(--SmartThemeChatTintColor, #ffffff);
-  /* 次级面:面色掺一点主文字色,拉开与 surface 的层次(输入框/次级块) */
-  --bbs-surface-2: color-mix(in srgb, var(--SmartThemeChatTintColor, #fff) 92%, var(--SmartThemeBodyColor, #000));
-  --bbs-ink: var(--SmartThemeBodyColor, #14213d);
-  /* 次级/弱化文字:主文字向底色退让。EmColor 常年过淡,故用 body↔bg 混合更可控 */
-  --bbs-ink-soft: color-mix(in srgb, var(--SmartThemeBodyColor, #14213d) 72%, var(--SmartThemeBlurTintColor, #f6f5f2));
-  --bbs-ink-muted: color-mix(in srgb, var(--SmartThemeBodyColor, #14213d) 68%, var(--SmartThemeBlurTintColor, #f6f5f2));
-  --bbs-accent: var(--SmartThemeQuoteColor, #718cc1);
-  --bbs-accent-soft: color-mix(in srgb, var(--SmartThemeQuoteColor, #718cc1) 14%, transparent);
-  /* 强调上的文字:借界面底色反差(适配多数 ST 配色:深强调 × 浅底) */
-  --bbs-accent-ink: var(--SmartThemeBlurTintColor, #ffffff);
-  --bbs-line: var(--SmartThemeBorderColor, #cfbcbc);
-  --bbs-line-strong: color-mix(in srgb, var(--SmartThemeBorderColor, #cfbcbc) 70%, var(--SmartThemeBodyColor, #000));
-  --bbs-danger: #d96b6b;
-  --bbs-danger-soft: #d96b6b26;
-  /* 15% opacity */
-  --bbs-warning: #d9a441;
-  --bbs-warning-soft: #d9a44126;
-  /* 15% opacity */
+  --bbs-bg: var(--SmartThemeBlurTintColor, #FAF9F6);
+  --bbs-surface: var(--SmartThemeChatTintColor, #FFFFFF);
+  --bbs-surface-2: color-mix(in srgb, var(--SmartThemeChatTintColor, #FFFFFF) 92%, var(--SmartThemeBodyColor, #272923));
+  --bbs-ink: var(--SmartThemeBodyColor, #272923);
+  --bbs-ink-soft: color-mix(in srgb, var(--SmartThemeBodyColor, #272923) 80%, var(--SmartThemeBlurTintColor, #FAF9F6));
+  --bbs-ink-muted: color-mix(in srgb, var(--SmartThemeBodyColor, #272923) 76%, var(--SmartThemeBlurTintColor, #FAF9F6));
+  --bbs-accent: var(--SmartThemeQuoteColor, #A64E2B);
+  --bbs-accent-soft: color-mix(in srgb, var(--SmartThemeQuoteColor, #A64E2B) 12%, var(--SmartThemeChatTintColor, #FFFFFF));
+  --bbs-accent-ink: var(--SmartThemeBlurTintColor, #FFFFFF);
+  --bbs-line: var(--SmartThemeBorderColor, #E7E5DF);
+  --bbs-line-strong: color-mix(in srgb, var(--SmartThemeBorderColor, #E7E5DF) 70%, var(--SmartThemeBodyColor, #272923));
+  /* 危险/警告仍保留各自语义底色，文字以宿主正文为主，兼顾明暗宿主。 */
+  --bbs-danger: color-mix(in srgb, var(--SmartThemeBodyColor, #272923) 80%, #A73529);
+  --bbs-danger-soft: color-mix(in srgb, #A73529 12%, var(--SmartThemeChatTintColor, #FFFFFF));
+  --bbs-warning: color-mix(in srgb, var(--SmartThemeBodyColor, #272923) 80%, #7C5816);
+  --bbs-warning-soft: color-mix(in srgb, #7C5816 12%, var(--SmartThemeChatTintColor, #FFFFFF));
   --bbs-overlay: #00000073;
-  /* 45% 中性遮罩,不随 body 色反转 */
-  --bbs-shadow: 0 18px 48px -20px var(--SmartThemeShadowColor, #00000038),
-    0 4px 12px -6px var(--SmartThemeShadowColor, #0000001a);
+  --bbs-shadow: 0 8px 24px -12px var(--SmartThemeShadowColor, #11182033);
+}
+/* 在各主题之后覆盖，避免深色/ST 的高特异性令牌重新开启移动端阴影。 */
+@media (max-width: 640px), (hover: none) and (pointer: coarse) {
+  .bbs-root[data-theme] {
+    --bbs-card-shadow: none;
+    --bbs-shadow: none;
+    --bbs-orb-shadow: none;
+    --bbs-dur: 0s;
+  }
 }

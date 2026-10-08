@@ -45,6 +45,8 @@ function alternateUrl(url: string): string {
 
 export interface RequestOptions {
   signal?: AbortSignal;
+  /** 仅流式请求:每次非空文本增量后传入累计原文(未 trim),而非单个片段。 */
+  onDelta?: (text: string) => void;
 }
 
 function validTimeoutSec(value: unknown): number {
@@ -213,7 +215,7 @@ async function requestCompletionAtUrl(
 
     // 流式:按 SSE 增量拼接;非流式:直接解析 JSON。
     if (stream) {
-      const content = await readSseContent(resp);
+      const content = await readSseContent(resp, signal, opts.onDelta);
       if (!content) throw new ApiError('副 API 返回空内容');
       return content;
     }
@@ -233,40 +235,78 @@ async function requestCompletionAtUrl(
  * 读取 SSE 流(text/event-stream),拼接 delta.content。
  * ST 的 generate 端点在 stream=true 时透传上游 SSE:每行 `data: {json}`,以 `data: [DONE]` 结束。
  */
-async function readSseContent(resp: Response): Promise<string> {
+async function readSseContent(
+  resp: Response,
+  signal: AbortSignal,
+  onDelta?: (text: string) => void,
+): Promise<string> {
   const reader = resp.body?.getReader();
   if (!reader) {
     // 无法流式读取(理论上不会):退回当作整体 JSON 处理
     const data = await resp.json().catch(() => null);
-    return data ? extractContent(data) : '';
+    signal.throwIfAborted();
+    const content = data ? extractContent(data) : '';
+    if (content) onDelta?.(content);
+    signal.throwIfAborted();
+    return content;
   }
   const decoder = new TextDecoder();
   let buf = '';
   let out = '';
-  for (; ;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    // 按行解析,保留最后一段不完整的行到下次
-    const lines = buf.split('\n');
-    buf = lines.pop() ?? '';
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t || !t.startsWith('data:')) continue;
-      const payload = t.slice(5).trim();
-      if (payload === '[DONE]') continue;
-      try {
-        const json = JSON.parse(payload);
-        if (json?.error) throw new ApiError(json.error.message || '副 API 返回错误');
-        const delta = json?.choices?.[0]?.delta?.content ?? json?.choices?.[0]?.message?.content ?? json?.choices?.[0]?.text;
-        if (typeof delta === 'string') out += delta;
-      } catch (e) {
-        if (e instanceof ApiError) throw e;
-        // 单行解析失败忽略(可能是注释行/心跳)
+  let reachedEof = false;
+  // 主动打断 reader.read,不只依赖 fetch 实现对 signal 的转发。
+  // 不等待底层 cancel 完成,避免上游清理阻塞取消/超时错误的返回。
+  const cancelReader = () => { void reader.cancel().catch(() => {}); };
+  signal.addEventListener('abort', cancelReader, { once: true });
+
+  const readLine = (line: string): boolean => {
+    signal.throwIfAborted();
+    const t = line.trim();
+    if (!t || !t.startsWith('data:')) return false;
+    const payload = t.slice(5).trim();
+    if (payload === '[DONE]') return true;
+    let json;
+    try {
+      json = JSON.parse(payload);
+    } catch {
+      // 单行 JSON 解析失败忽略;回调异常及上游错误不能在此吞掉。
+      return false;
+    }
+    if (json?.error) throw new ApiError(json.error.message || '副 API 返回错误');
+    const delta = json?.choices?.[0]?.delta?.content ?? json?.choices?.[0]?.message?.content ?? json?.choices?.[0]?.text;
+    if (typeof delta === 'string' && delta.length > 0) {
+      out += delta;
+      onDelta?.(out);
+      signal.throwIfAborted();
+    }
+    return false;
+  };
+
+  try {
+    signal.throwIfAborted();
+    for (; ;) {
+      const { done, value } = await reader.read();
+      signal.throwIfAborted();
+      if (done) {
+        reachedEof = true;
+        // flush 解码器并消费尾行,即使上游在 EOF 前没有发送换行。
+        buf += decoder.decode();
+        if (buf) readLine(buf);
+        return out.trim();
+      }
+      buf += decoder.decode(value, { stream: true });
+      // 按行解析,保留最后一段不完整的行到下次。
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+      for (const line of lines) {
+        if (readLine(line)) return out.trim();
       }
     }
+  } finally {
+    signal.removeEventListener('abort', cancelReader);
+    if (!reachedEof) cancelReader();
+    reader.releaseLock();
   }
-  return out.trim();
 }
 
 /** 从标准 OpenAI 响应体提取文本 */

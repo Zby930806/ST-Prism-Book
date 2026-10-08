@@ -13,6 +13,8 @@ const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v ===
 export function parseSummaryResponse(raw: string, options: {
   maxChars?: number;
   sourceContent?: string;
+  /** 未附来源编号/提示的原消息，每条独立匹配，不允许跨消息拼接。 */
+  sourceTexts?: readonly string[];
   conditionContext?: ConditionContext;
   requireStateChanges: boolean;
   finalize: (delta: SummaryDelta) => StoredDelta;
@@ -31,22 +33,33 @@ export function parseSummaryResponse(raw: string, options: {
   if ('delta' in parsed || 'updates' in parsed) {
     throw new SummaryResponseError('状态更新必须与 summary 并列放在根对象，不要包进 delta 或 updates。');
   }
-  if ('conditionPatch' in parsed) throw new SummaryResponseError('conditionPatch 必须放在对应 protagonist 或 NPC 对象内。');
   const npcOps = record(parsed.npcs) ? parsed.npcs : {};
-  const hasPatch = record(parsed.protagonist) && 'conditionPatch' in parsed.protagonist ||
-    ['add', 'update'].some(op => {
-      const entries = npcOps[op];
-      return Array.isArray(entries) && entries.some(v => record(v) && 'conditionPatch' in v);
-    });
+  const patchTargets = new Set<object>();
+  if (record(parsed.protagonist)) patchTargets.add(parsed.protagonist);
+  for (const op of ['add', 'update']) {
+    const entries = npcOps[op];
+    if (Array.isArray(entries)) for (const entry of entries) if (record(entry)) patchTargets.add(entry);
+  }
+  let hasPatch = false;
+  function validatePatchPlacement(value: unknown): void {
+    if (Array.isArray(value)) { value.forEach(validatePatchPlacement); return; }
+    if (!record(value)) return;
+    if ('conditionPatch' in value) {
+      if (!patchTargets.has(value)) throw new SummaryResponseError('conditionPatch 必须放在对应 protagonist 或 npcs.add/update 的角色对象内，不能放在物品、分组或嵌套字段中。');
+      hasPatch = true;
+    }
+    Object.values(value).forEach(validatePatchPlacement);
+  }
+  validatePatchPlacement(parsed);
   if (hasPatch && !options.conditionContext) throw new SummaryResponseError('conditionPatch 缺少本楼前状态，不能静默丢弃操作。');
   if (options.conditionContext) {
-    try { materializeConditionPatches(parsed, options.conditionContext); }
+    try { materializeConditionPatches(parsed, { ...options.conditionContext, sourceTexts: options.sourceTexts ?? options.conditionContext.sourceTexts }); }
     catch (error) {
       if (error instanceof ConditionPatchError) throw new SummaryResponseError(error.message);
       throw error;
     }
   }
-  try { validateNpcLocationEvidence(parsed, { strict: options.requireStateChanges, content: options.sourceContent }); }
+  try { validateNpcLocationEvidence(parsed, { strict: options.requireStateChanges, content: options.sourceContent, sourceTexts: options.sourceTexts }); }
   catch (error) {
     if (error instanceof NpcLocationEvidenceError) throw new SummaryResponseError(error.message);
     throw error;
