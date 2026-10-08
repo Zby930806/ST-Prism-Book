@@ -8,6 +8,7 @@ import { outlineSettings, resolveOutlineChannel } from './settings';
 import { loadOutline, outlineState, outlineWriteIssue, outlineSourceCurrent, outlineStorageCurrent, commitGeneratedOutline } from './store';
 import { captureOutlineSource, outlineInputUnchanged, sameOutlineChat } from './source';
 import { renderOutlineGuidance } from './injection';
+import { OUTLINE_LIMITS } from './limits';
 
 export const OUTLINE_INJECT_KEY = 'prism_book_outline_current';
 export const outlineRun = reactive({ busy: false, draft: '', error: '', status: '' });
@@ -54,7 +55,7 @@ export async function generateOutline(brief: string, chapterCount = 6): Promise<
     stillCurrent = current;
     phase = 'request';
     const reply = await requestCompletion(channel, input, {
-      signal: ctrl.signal, onDelta: text => { if (current()) outlineRun.draft = text.slice(0, 50000); },
+      signal: ctrl.signal, onDelta: text => { if (current()) outlineRun.draft = text.slice(0, OUTLINE_LIMITS.reply); },
     });
     if (!current()) {
       if (own === runId) outlineRun.status = '正文、聊天或大纲已变化，旧生成结果未采用。';
@@ -62,7 +63,7 @@ export async function generateOutline(brief: string, chapterCount = 6): Promise<
     }
     phase = 'parse';
     const content = parseOutlineReply(reply);
-    if (content.chapters.length !== chapterCount) throw new Error('返回的大纲阶段数不符，请重新生成；旧大纲未替换。');
+    if (content.chapters.length !== chapterCount) throw new Error(`返回的大纲阶段数不符：要求${chapterCount}个，实际${content.chapters.length}个；请重新生成，旧大纲未替换。`);
     phase = 'save';
     await commitGeneratedOutline({ id: crypto.randomUUID(), createdAt: Date.now(), sourceFloor: source.floor,
       sourceHash: source.hash, brief: brief.trim(), content }, revision);

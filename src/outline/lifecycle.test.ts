@@ -142,6 +142,47 @@ afterEach(async () => {
 });
 
 describe('真实 core：草稿、确认、独立注入与阶段控制', () => {
+  it('长大纲可生成保存并重载，确认后仍只注入当前阶段，不改API输出额度', async () => {
+    const value = content();
+    value.chapters[0].approach = '动'.repeat(2000);
+    value.chapters = [value.chapters[0], ...Array.from({ length: 9 }, () => ({
+      ...value.chapters[1], approach: '未来内容'.repeat(700),
+    }))];
+    expect(JSON.stringify(value).length).toBeGreaterThan(24000);
+    const tokenLimit = notesSettings.channel.maxTokens;
+    completion.mockResolvedValueOnce(JSON.stringify(value));
+    await generateOutline('详细但不强迫人物配合', 10);
+    expect(outlineRun.error).toBe('');
+    expect(outlineState.active).toBeNull();
+    expect(completion.mock.calls[0][0].maxTokens).toBe(tokenLimit);
+    const snapshot = copy(saved());
+    loadOutline();
+    expect(saved()).toEqual(snapshot);
+    expect(outlineState.draft!.content).toEqual(value);
+    await activateOutlineDraft(outlineState.draft!.id);
+    expect(buildOutlineInjection()).toContain(value.chapters[0].approach);
+    expect(buildOutlineInjection()).not.toContain('未来内容');
+    expect(completion).toHaveBeenCalledTimes(1);
+  });
+  it('单阶段超过注入限额可存草稿但不能替换已确认规划，不截断', async () => {
+    await active(); const old = copy(outlineState.active);
+    const value = content();
+    value.premise = '前'.repeat(4000);
+    value.constraints = Array(12).fill('约'.repeat(1200));
+    await saveOutlineDraft(value, '详细规划', outlineState.revision);
+    const before = copy(saved());
+    await expect(activateOutlineDraft(outlineState.draft!.id)).rejects.toThrow('16000');
+    expect(saved()).toEqual(before); expect(outlineState.active).toEqual(old);
+  });
+  it('字段错误诊断到达界面状态，保留已有数据且只请求一次', async () => {
+    await active(); const before = copy(saved());
+    const value = content(); value.chapters[1].approach = '密'.repeat(3201);
+    completion.mockResolvedValueOnce(JSON.stringify(value));
+    await generateOutline('生成', 2);
+    expect(outlineRun.error).toContain('chapters[1].approach 超过3200');
+    expect(outlineRun.error).not.toContain('密');
+    expect(saved()).toEqual(before); expect(completion).toHaveBeenCalledTimes(1);
+  });
   it('API 草稿不会激活，只有确认保存成功才向宿主注入非空指引', async () => {
     bindOutlineLifecycle();
     const chat = copy(ctx.chat), metadata = copy(ctx.chatMetadata);

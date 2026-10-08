@@ -11,6 +11,9 @@ import { outlineSettings, outlineSettingsIssue, hydrateOutlineSettings, saveOutl
 import { parseOutlineReply, validateOutlineContent } from './protocol';
 import { buildOutlineContext } from './context';
 import { OUTLINE_PROMPT } from './prompt';
+import { OUTLINE_LIMITS as L } from './limits';
+import { renderOutlineGuidance } from './injection';
+import type { OutlineActive } from './types';
 
 // 仅 mock 外部边界；四个大纲模块、札记设置和正文清洗均使用真实实现。
 const boundary = vi.hoisted(() => ({
@@ -199,8 +202,8 @@ describe('严格大纲内容与回复协议', () => {
     expect(() => validateOutlineContent(nested)).toThrow();
   });
   it.each([
-    ['title', 120], ['premise', 2000], ['constraints.0', 600],
-    ['chapters.0.title', 120], ['chapters.0.goal', 1200], ['chapters.0.approach', 1600], ['chapters.0.beats.0', 800], ['chapters.0.exitCriteria', 1000],
+    ['title', L.title], ['premise', L.premise], ['constraints.0', L.constraint],
+    ['chapters.0.title', L.title], ['chapters.0.goal', L.goal], ['chapters.0.approach', L.approach], ['chapters.0.beats.0', L.beat], ['chapters.0.exitCriteria', L.exitCriteria],
   ] as const)('%s 的下界、上界与错误类型', (path, limit) => {
     function sample(value: unknown) {
       const root = content(); const parts = path.split('.');
@@ -228,17 +231,18 @@ describe('严格大纲内容与回复协议', () => {
     expect(() => validateOutlineContent(Object.create(content()))).toThrow();
     expect(() => validateOutlineContent(null)).toThrow();
   });
-  it('总 JSON 严守 24000，包括未规范化空白；raw reply 严守 50000', () => {
-    const value = content(); value.chapters = Array.from({ length: 4 }, () => ({ ...content().chapters[0], beats: Array(8).fill('字'.repeat(800)) }));
+  it('总 JSON 严守48000，包括未规范化空白；raw reply 严守100000', () => {
+    const value = content(); value.chapters = Array.from({ length: 4 }, () => ({ ...content().chapters[0], beats: Array(8).fill('字'.repeat(L.beat)) }));
     expect(() => validateOutlineContent(value)).toThrow();
     const json = JSON.stringify(content());
-    expect(() => parseOutlineReply(json + ' '.repeat(50000 - json.length))).not.toThrow();
-    expect(() => parseOutlineReply(json + ' '.repeat(50001 - json.length))).toThrow('50000');
+    expect(() => parseOutlineReply(json + ' '.repeat(L.reply - json.length))).not.toThrow();
+    expect(() => parseOutlineReply(json + ' '.repeat(L.reply + 1 - json.length))).toThrow(String(L.reply));
     const base = content(); const size = JSON.stringify(base).length;
-    base.title += ' '.repeat(24000 - size);
+    base.title += ' '.repeat(L.json - size);
     expect(() => validateOutlineContent(base)).not.toThrow();
     base.title += ' '; expect(() => validateOutlineContent(base)).toThrow();
-    const padded = '{' + ' '.repeat(24000) + json.slice(1); expect(() => parseOutlineReply(padded)).toThrow();
+    expect(() => parseOutlineReply(JSON.stringify(base))).toThrow(String(L.json));
+    const padded = '{' + ' '.repeat(L.json) + json.slice(1); expect(() => parseOutlineReply(padded)).toThrow();
   });
   it('错误不回显原文、字段名或底层异常', () => {
     for (const value of ['TOP_SECRET_RAW', '{"TOP_SECRET_KEY":1}', JSON.stringify({ ...content(), title: 'TOP_SECRET_RAW'.repeat(100) })]) {
@@ -248,6 +252,78 @@ describe('严格大纲内容与回复协议', () => {
     }
     const circular: any = content(); circular.chapters = [circular];
     expect(() => validateOutlineContent(circular)).toThrow('大纲格式无效');
+  });
+});
+
+describe('放宽篇幅、角色连续性与安全诊断', () => {
+  function active(value = content()): OutlineActive {
+    return { id: 'fixture', createdAt: 1, sourceFloor: 0, sourceHash: 'fixture',
+      brief: '通用创作要求', content: value, enabled: true, currentChapter: 0 };
+  }
+  it('内容上限翻倍，正文注入单独受限，不改变阶段数量', () => {
+    expect(L).toMatchObject({ json: 48000, reply: 100000, injection: 16000, chapters: 12, beats: 8 });
+    const value = content();
+    value.premise = '前'.repeat(3000);
+    value.constraints = ['约'.repeat(1000)];
+    value.chapters = Array.from({ length: 10 }, () => ({
+      ...content().chapters[0], approach: '动'.repeat(2000), beats: ['要'.repeat(1000)],
+    }));
+    expect(JSON.stringify(value).length).toBeGreaterThan(24000);
+    expect(parseOutlineReply(JSON.stringify(value))).toEqual(value);
+    expect(renderOutlineGuidance(active(value)).length).toBeLessThan(L.injection);
+  });
+  it('闭合的无标签代码围栏仅作包装兼容，不修补残缺JSON', () => {
+    const json = JSON.stringify(content());
+    expect(parseOutlineReply('\x60\x60\x60\n' + json + '\n\x60\x60\x60')).toEqual(content());
+    expect(() => parseOutlineReply(json.slice(0, -1))).toThrow('JSON 语法无效或不完整');
+    expect(() => parseOutlineReply('<think>仅思考</think>')).toThrow('没有大纲 JSON');
+  });
+  it('提示具体已知字段路径，不回显错误文本和未知键', () => {
+    const missing = content();
+    delete (missing.chapters[0] as Partial<typeof missing.chapters[0]>).approach;
+    expect(() => validateOutlineContent(missing)).toThrow('chapters[0].approach 缺失');
+    const overflow = content(); overflow.chapters[0].approach = '密'.repeat(L.approach + 1);
+    expect(() => validateOutlineContent(overflow)).toThrow('chapters[0].approach 超过3200');
+    expect(() => validateOutlineContent(overflow)).toThrow('第1阶段·发展方式');
+    const wrong = content(); wrong.chapters[0].beats = [];
+    expect(() => validateOutlineContent(wrong)).toThrow('chapters[0].beats 应为1～8项的数组');
+    expect(() => validateOutlineContent({ ...content(), TOP_SECRET: 'private' })).toThrow('存在不支持的字段');
+    const accessor = content();
+    Object.defineProperty(accessor, 'title', { get() { throw new Error('TOP_SECRET'); } });
+    expect(() => validateOutlineContent(accessor)).toThrow('内容无法读取');
+  });
+  it('生成提示词提供有效结构示例，规则涵盖人物动机、有限知情与关系惯性', () => {
+    const example = OUTLINE_PROMPT.slice(OUTLINE_PROMPT.lastIndexOf('\n') + 1);
+    expect(() => parseOutlineReply(example)).not.toThrow();
+    for (const phrase of ['欲望、顾虑、边界', '自己实际知道的信息', '情绪与关系有惯性', '不预先写死人物台词',
+      '允许延后、变形或放弃节点', '不要为“活人感”强加', '不把所有人物反应压成标签']) {
+      expect(OUTLINE_PROMPT).toContain(phrase);
+    }
+    expect(OUTLINE_PROMPT).toContain('总 JSON 不超过 48000');
+  });
+  it('正文规则不强制完成节点，不把人物说明变台词，不注入未来阶段', () => {
+    const value = content();
+    value.chapters.push({ ...value.chapters[0], title: '未来阶段专属标题', approach: '未来阶段专属发展' });
+    const text = renderOutlineGuidance(active(value));
+    for (const phrase of ['不要求每轮完成节点', '实际知情范围', '情绪与关系有惯性', '允许延后、调整或不兑现',
+      '不要照抄规划中的动机说明当台词', '不得替用户角色', '保留原正文文风', '不凭空添加秘密或创伤']) {
+      expect(text).toContain(phrase);
+    }
+    expect(text).not.toContain('未来阶段专属');
+    expect(renderOutlineGuidance({ ...active(value), enabled: false })).toBe('');
+  });
+  it('注入精确计入固定指引，达到16000可用，多1字符拒绝而非截断', () => {
+    const value = content(); value.premise = '前'.repeat(L.premise);
+    value.constraints = Array(8).fill('约'.repeat(L.constraint));
+    const record = active(value);
+    const remaining = L.injection - renderOutlineGuidance(record).length;
+    expect(remaining).toBeGreaterThan(0);
+    value.chapters[0].goal += '目'.repeat(remaining);
+    expect(() => validateOutlineContent(value)).not.toThrow();
+    expect(renderOutlineGuidance(record)).toHaveLength(L.injection);
+    value.chapters[0].goal += '目';
+    expect(() => validateOutlineContent(value)).not.toThrow();
+    expect(() => renderOutlineGuidance(record)).toThrow('16000');
   });
 });
 
@@ -315,7 +391,7 @@ describe('只读上下文与通用未来提示词', () => {
     expect(() => buildOutlineContext(ctx, '  ', 1)).toThrow('需求');
     expect(OUTLINE_PROMPT).toContain('尊重事实'); expect(OUTLINE_PROMPT).toContain('主角自主性');
     expect(OUTLINE_PROMPT).toContain('最新用户约束'); expect(OUTLINE_PROMPT).toContain('推进条件');
-    expect(OUTLINE_PROMPT).toContain('approach（发展方式，1..1600 字）');
+    expect(OUTLINE_PROMPT).toContain(`approach（发展方式，1..${L.approach} 字）`);
     expect(OUTLINE_PROMPT).toContain('必须严格输出本次指定数量的规划阶段');
     expect(OUTLINE_PROMPT).toContain('用户本次 input 优先'); expect(OUTLINE_PROMPT).toContain('人物动机及可选发展');
     expect(OUTLINE_PROMPT).toContain('不写入 memory.plans 或正文 leaf');

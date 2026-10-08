@@ -5,6 +5,8 @@ import { getContext } from '@/st/context';
 import type { ApiChannel } from '@/api/settings';
 import { engineActiveHere } from '@/api/settings';
 import type { OutlineContent, OutlineDraft } from '@/outline/types';
+import { OUTLINE_LIMITS as L } from '@/outline/limits';
+import { validateOutlineContent } from '@/outline/protocol';
 import { outlineSettings, outlineSettingsIssue, resolveOutlineChannel, saveOutlineSettings } from '@/outline/settings';
 import { outlineRun, generateOutline, cancelOutline } from '@/outline/service';
 import {
@@ -118,15 +120,13 @@ function contentForSave(): OutlineContent {
     title: value.title.trim(), premise: value.premise.trim(), constraints: lines(value.constraints),
     chapters: value.chapters.map(stage => ({ title: stage.title.trim(), goal: stage.goal.trim(), approach: stage.approach.trim(), beats: lines(stage.beats), exitCriteria: stage.exitCriteria.trim() })),
   };
-  if (!content.title || !content.premise) throw new Error('请填写规划标题和整体发展方向。');
-  if (content.constraints.length > 12 || content.constraints.some(line => line.length > 600)) throw new Error('约束最多12行，每行不超过600字。');
-  const invalid = content.chapters.findIndex(stage => !stage.title || !stage.goal || !stage.approach || stage.approach.length > 1600 || !stage.exitCriteria || !stage.beats.length
-    || stage.beats.length > 8 || stage.beats.some(beat => beat.length > 800));
-  if (invalid >= 0) {
-    selectedChapter.value = invalid;
-    throw new Error(`请补全第${invalid + 1}阶段的标题、目标、发展方式（1–1600字）和推进条件；剧情要点须为1–8行，每行不超过800字。`);
+  try { return validateOutlineContent(content); }
+  catch (cause) {
+    // 与模型回复、持久化校验共用同一协议，自动定位有问题的编辑阶段。
+    const match = errorText(cause).match(/chapters\[(\d+)\]/);
+    if (match) selectedChapter.value = Number(match[1]);
+    throw cause;
   }
-  return content;
 }
 function saveDraft() {
   return runAction(async () => {
@@ -311,6 +311,7 @@ async function startGeneration(confirmed = false) {
       <summary>{{ active ? '编辑 / 重新生成创作规划' : '大纲规划 · 生成草稿并确认加入计划' }}<span v-if="dirty">（未保存）</span></summary>
       <PageHeader title="大纲规划" description="结合当前剧情与你的创作要求，规划剧情要点和发展方式。" icon="plans" />
       <p class="hint">生成规划草稿 → 编辑剧情要点与发展方式 → 确认加入计划。只有确认后的内容才进入上方「创作规划」。</p>
+      <p class="hint">角色的动机、知情范围与关系连续性优先，不强迫人物配合节点。大纲总上限 {{ L.json }} 字符；正文只注入全局约束与当前阶段，合计最多 {{ L.injection }} 字符，不提前注入后续阶段。API 输出 token 上限需在所用渠道中单独设置。</p>
       <section class="planner-card" aria-label="生成规划草稿">
         <fieldset :disabled="locked">
           <label>创作要求 / 你的 input<textarea v-model="brief" class="bbs-input" rows="4" maxlength="8000" placeholder="想往哪里发展？可写人物关系、希望出现的转折、节奏与禁区；系统会结合当前聊天剧情。" /></label>
@@ -331,18 +332,18 @@ async function startGeneration(confirmed = false) {
         <h3>规划草稿 <span class="hint">{{ dirty ? '有未保存修改' : '已保存，待确认加入计划' }}</span></h3>
         <p v-if="!draftCurrent" class="warning">参考剧情已变化；请核对编辑内容，并重新保存后加入计划。</p>
         <fieldset :disabled="locked">
-          <label>规划标题<input v-model="editor.title" class="bbs-input" maxlength="120" /></label>
-          <label>整体发展方向<textarea v-model="editor.premise" class="bbs-input" rows="3" maxlength="2000" /></label>
-          <label>创作约束（每行一条，最多12条）<textarea v-model="editor.constraints" class="bbs-input" rows="3" /></label>
+          <label>规划标题<input v-model="editor.title" class="bbs-input" :maxlength="L.title" /></label>
+          <label>整体发展方向<textarea v-model="editor.premise" class="bbs-input" rows="3" :maxlength="L.premise" /></label>
+          <label>创作约束（每行一条，最多{{ L.constraints }}条，每条{{ L.constraint }}字）<textarea v-model="editor.constraints" class="bbs-input" rows="3" /></label>
           <label>草稿对应的创作要求<textarea v-model="editBrief" class="bbs-input" rows="3" maxlength="8000" /></label>
           <label>编辑阶段（一次只展开一个）<select v-model.number="selectedChapter" class="bbs-input"><option v-for="(stage, index) in editor.chapters" :key="index" :value="index">{{ index + 1 }} · {{ stage.title || '未命名阶段' }}</option></select></label>
           <div class="actions"><button type="button" class="bbs-btn" :disabled="editor.chapters.length >= 12" @click="addStage">新增阶段</button><button type="button" class="bbs-btn" :disabled="editor.chapters.length <= 1" @click="removeStage">删除当前编辑阶段</button></div>
           <div v-if="currentEdit" class="stage-editor">
-            <label>阶段标题<input v-model="currentEdit.title" class="bbs-input" maxlength="120" /></label>
-            <label>阶段目标<textarea v-model="currentEdit.goal" class="bbs-input" rows="3" maxlength="1200" /></label>
-            <label>剧情要点（每行一条，1–8条）<textarea v-model="currentEdit.beats" class="bbs-input" rows="5" /></label>
-            <label>发展方式（1–1600字）<textarea v-model="currentEdit.approach" class="bbs-input" rows="4" maxlength="1600" /></label>
-            <label>推进条件<textarea v-model="currentEdit.exitCriteria" class="bbs-input" rows="3" maxlength="1000" /></label>
+            <label>阶段标题<input v-model="currentEdit.title" class="bbs-input" :maxlength="L.title" /></label>
+            <label>阶段目标<textarea v-model="currentEdit.goal" class="bbs-input" rows="3" :maxlength="L.goal" /></label>
+            <label>剧情要点（每行一条，1–{{ L.beats }}条，每条{{ L.beat }}字）<textarea v-model="currentEdit.beats" class="bbs-input" rows="5" /></label>
+            <label>发展方式（1–{{ L.approach }}字）<textarea v-model="currentEdit.approach" class="bbs-input" rows="4" :maxlength="L.approach" /></label>
+            <label>推进条件<textarea v-model="currentEdit.exitCriteria" class="bbs-input" rows="3" :maxlength="L.exitCriteria" /></label>
           </div>
           <div class="actions"><button type="button" class="bbs-btn" @click="saveDraft">保存草稿编辑</button><button type="button" class="bbs-btn bbs-btn-primary" @click="requestConfirmation('activate')">确认加入计划</button></div>
         </fieldset>
