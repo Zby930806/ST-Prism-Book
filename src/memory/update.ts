@@ -3,7 +3,7 @@
 import { reactive } from 'vue';
 import { PLUGIN_VERSION } from '@/version';
 
-export const INTERNAL_UPDATE_NOTICE = '内部版采用手动更新，请向维护者获取完整安装包；不会检查或安装原版更新。';
+export const INTERNAL_UPDATE_NOTICE = '内部版采用手动更新：在酒馆的「管理扩展」里更新本扩展即可。插件自己不检查更新，也不会装上原版柏宝书的更新。';
 export const updateState = reactive({
   current: PLUGIN_VERSION, latest: '', available: false, checking: false, updating: false,
 });

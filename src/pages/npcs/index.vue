@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { npcLocationLabel } from '@/memory/npcLocation';
 import { apiSettings } from '@/api/settings';
 import Icon from '@/components/Icon.vue';
 import PageHeader from '@/components/PageHeader.vue';
@@ -32,6 +31,14 @@ const protagonistHasDetails = computed(() => [
   memory.protagonist.condition,
 ].some(value => !!value?.trim()));
 
+/** 名册里的位置。发给模型的写法见 npcLocationLabel，这里换成好读的说法，规则相同：旧位置不当成现在的位置。 */
+function npcPlaceText(n: MemNpc): string {
+  if (n.follow) return '跟主角在一起';
+  if (n.location && !n.locationStale) return n.location;
+  const last = n.lastKnownLocation;
+  const place = last?.place || n.location;
+  return place ? `现在不确定；最后一次在${place}${last?.time ? `（${last.time}）` : ''}` : '现在不确定';
+}
 // 年龄显示:按锚点+当前故事时间推算(与注入端同一函数,界面显示 = AI 收到的)
 function shownAge(age?: string, ageTime?: string): string {
   return ageDisplay(age, ageTime, memory.state.time);
@@ -120,7 +127,7 @@ function toggleDetailPin(d: MemLifeDetail) {
     return;
   }
   if (lifeGroups.value.pinned.length >= LIFE_PIN_CAP) {
-    toast(`置顶最多 ${LIFE_PIN_CAP} 条,先取消一条再置顶`, 'warning');
+    toast(`置顶最多 ${LIFE_PIN_CAP} 条，先取消一条再置顶。`, 'warning');
     return;
   }
   updateLifeDetail(d.id, { tier: 'pinned' });
@@ -356,7 +363,7 @@ function confirmRemove() {
 
 <template>
   <section class="bbs-page">
-    <PageHeader icon="npcs" title="角色" eyebrow="人物档案" description="从主角到擦肩而过的人，整理关系、近况与生活细节。">
+    <PageHeader icon="npcs" title="角色" description="主角和出场过的角色：身份、关系、近况和生活档案。">
       <template #actions>
         <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!hasLeaf"
           :title="hasLeaf ? '手动添加角色' : '需先有摘要才能手动添加'" @click="openComposer"><Icon name="plus" />添加角色</button>
@@ -367,7 +374,7 @@ function confirmRemove() {
       <span><strong>{{ memory.npcs.length }}</strong>位 NPC</span>
       <span><strong>{{ mains.length }}</strong>主要角色</span>
       <span><strong>{{ memory.lifeDetails.length }}</strong>条生活细节</span>
-      <span v-if="!hasLeaf" class="bbs-ledger-note">先生成摘要，再手动补录</span>
+      <span v-if="!hasLeaf" class="bbs-ledger-note">有了摘要才能手动补录</span>
     </div>
 
     <!-- ===== 生活小档案:主角与主要角色的偏好/习惯/近期状态(三投放层)。置于主角卡之上且可折叠,不打断下方角色卡流 ===== -->
@@ -383,10 +390,10 @@ function confirmRemove() {
           @click="toggleLifeFold"
         >
           <Icon v-if="lifeFoldable" name="chevron" class="bbs-fold-caret" :class="{ 'is-collapsed': !lifeShown }" />
-          <h2 class="bbs-life-title" title="置顶条常驻发送;时效/长期条按相关性浮现;沉降条仅关键词触发">生活小档案</h2>
+          <h2 class="bbs-life-title" title="置顶条常驻发送；时效/长期条按相关性浮现；沉降条仅关键词触发">生活小档案</h2>
           <span v-if="lifeFoldable" class="bbs-fold-count">{{ memory.lifeDetails.length }}</span>
         </button>
-        <span v-if="apiSettings.summaryOnlyMode" class="bbs-npc-grouphint is-local-only">仅供棱镜宝书记录,不发送给主对话 AI</span>
+        <span v-if="apiSettings.summaryOnlyMode" class="bbs-npc-grouphint is-local-only">仅供棱镜宝书记录，不发送给主对话 AI</span>
         <button
           class="bbs-add-mini"
           type="button"
@@ -415,7 +422,7 @@ function confirmRemove() {
                   class="bbs-item-act"
                   :class="{ active: d.tier === 'pinned' }"
                   type="button"
-                  :title="d.tier === 'pinned' ? '取消置顶' : '置顶(常驻发送,最多5条)'"
+                  :title="d.tier === 'pinned' ? '取消置顶' : '置顶（常驻发送，最多5条）'"
                   @click="toggleDetailPin(d)"
                 >
                   <Icon name="pin" />
@@ -423,7 +430,7 @@ function confirmRemove() {
                 <button
                   class="bbs-item-act"
                   type="button"
-                  :title="d.tier === 'archive' ? '恢复为时效层' : '沉降(仅相关时浮现)'"
+                  :title="d.tier === 'archive' ? '恢复为时效层' : '沉降（仅相关时浮现）'"
                   @click="toggleDetailArchive(d)"
                 >
                   <Icon :name="d.tier === 'archive' ? 'upload' : 'download'" />
@@ -433,7 +440,7 @@ function confirmRemove() {
               </span>
             </article>
           </div>
-          <p v-if="!memory.lifeDetails.length" class="bbs-npc-mainhint">尚无生活细节。摘要会记录主角及主要角色明确说过/正文揭示的偏好、习惯和近况,每条标明所属人物;也可手动添加或纠正归属。</p>
+          <p v-if="!memory.lifeDetails.length" class="bbs-npc-mainhint">还没有生活细节。摘要会记下主角和主要角色明确说过、或正文写到的偏好、习惯和近况，每条注明是谁的；也可以手动添加或改归属。</p>
         </div>
       </div>
     </div>
@@ -442,7 +449,7 @@ function confirmRemove() {
       <div class="bbs-npc-grouphead">
         <span class="bbs-npc-grouptag is-protagonist"><Icon name="characters" />主角</span>
         <span class="bbs-npc-grouphint" :class="{ 'is-local-only': apiSettings.summaryOnlyMode }">
-          {{ apiSettings.summaryOnlyMode ? '仅供棱镜宝书记录，不发送给主对话 AI' : '始终完整发送,与 NPC 名册分开记录' }}
+          {{ apiSettings.summaryOnlyMode ? '仅供棱镜宝书记录，不发送给主对话 AI' : '始终完整发送，与 NPC 名册分开记录' }}
         </span>
       </div>
       <article class="bbs-npc bbs-protagonist">
@@ -469,7 +476,7 @@ function confirmRemove() {
             <div v-if="memory.protagonist.outfit" class="bbs-npc-field f-outfit"><dt>着装</dt><dd>{{ memory.protagonist.outfit }}</dd></div>
             <div v-if="memory.protagonist.condition" class="bbs-npc-field f-cond"><dt>状态</dt><dd>{{ memory.protagonist.condition }}</dd></div>
           </dl>
-          <p v-else-if="!protagonistHasData" class="bbs-npc-mainhint">尚无主角状态记录。后续摘要会从剧情中的明确事实逐步补充。</p>
+          <p v-else-if="!protagonistHasData" class="bbs-npc-mainhint">还没有主角的状态记录，之后的摘要会根据剧情补上。</p>
         </div>
       </article>
     </div>
@@ -490,7 +497,7 @@ function confirmRemove() {
         <div class="bbs-npc-grouphead">
           <span class="bbs-npc-grouptag is-main"><Icon name="star" />主要角色</span>
           <span class="bbs-npc-grouphint" :class="{ 'is-local-only': apiSettings.summaryOnlyMode }">
-            {{ apiSettings.summaryOnlyMode ? '仍会重点维护状态，但不发送给主对话 AI' : '始终随剧情发送,重点维护当前状态' }}
+            {{ apiSettings.summaryOnlyMode ? '仍会重点维护状态，但不发送给主对话 AI' : '始终随剧情发送，重点维护当前状态' }}
           </span>
         </div>
         <div class="bbs-npc-list">
@@ -511,13 +518,13 @@ function confirmRemove() {
                 <div v-if="n.relation" class="bbs-npc-field f-rel"><dt>关系</dt><dd>{{ n.relation }}</dd></div>
                 <div v-if="fmtNpcAffinity(n)" class="bbs-npc-field"><dt title="对主角的内心好感与外在态度估计">好感</dt><dd>{{ fmtNpcAffinity(n) }}</dd></div>
                 <div v-if="n.follow || n.location" class="bbs-npc-field f-loc">
-                  <dt>定位证据</dt>
-                  <dd :class="{ 'is-follow': n.follow }">{{ npcLocationLabel(n) }}</dd>
+                  <dt>位置</dt>
+                  <dd :class="{ 'is-follow': n.follow }">{{ npcPlaceText(n) }}</dd>
                 </div>
                 <div v-if="n.outfit" class="bbs-npc-field f-outfit"><dt>着装</dt><dd>{{ n.outfit }}</dd></div>
                 <div v-if="n.condition" class="bbs-npc-field f-cond"><dt>状态</dt><dd>{{ n.condition }}</dd></div>
               </dl>
-              <p v-else class="bbs-npc-mainhint">尚无状态记录 —— 编辑可补充当前着装 / 状态 / 所在。</p>
+              <p v-else class="bbs-npc-mainhint">还没有状态记录，可以点编辑补上着装、状态和位置。</p>
             </div>
           </article>
         </div>
@@ -542,7 +549,7 @@ function confirmRemove() {
                   <button
                     class="bbs-item-act bbs-npc-star"
                     type="button"
-                    :title="apiSettings.summaryOnlyMode ? '标记为主要角色(仅调整棱镜宝书内的角色分组)' : '标记为主要角色(始终全量发送、追踪状态)'"
+                    :title="apiSettings.summaryOnlyMode ? '标记为主要角色（仅调整棱镜宝书内的角色分组）' : '标记为主要角色（始终全量发送、追踪状态）'"
                     @click="toggleImportant(n)"
                   >
                     <Icon name="star" />
@@ -551,7 +558,7 @@ function confirmRemove() {
                     class="bbs-item-act bbs-npc-pin"
                     :class="{ active: n.follow }"
                     type="button"
-                    :title="n.follow ? '随行中 · 点击取消(留在当前地点)' : '标记为随行同伴'"
+                    :title="n.follow ? '随行中 · 点击取消（留在当前地点）' : '标记为随行同伴'"
                     @click="toggleFollow(n)"
                   >
                     <Icon name="pin" />
@@ -565,8 +572,8 @@ function confirmRemove() {
                 <div v-if="n.relation" class="bbs-npc-field f-rel"><dt>关系</dt><dd>{{ n.relation }}</dd></div>
                 <div v-if="fmtNpcAffinity(n)" class="bbs-npc-field"><dt title="对主角的内心好感与外在态度估计">好感</dt><dd>{{ fmtNpcAffinity(n) }}</dd></div>
                 <div v-if="n.follow || n.location" class="bbs-npc-field f-loc">
-                  <dt>定位证据</dt>
-                  <dd :class="{ 'is-follow': n.follow }">{{ npcLocationLabel(n) }}</dd>
+                  <dt>位置</dt>
+                  <dd :class="{ 'is-follow': n.follow }">{{ npcPlaceText(n) }}</dd>
                 </div>
                 <div v-if="n.outfit" class="bbs-npc-field f-outfit"><dt>着装</dt><dd>{{ n.outfit }}</dd></div>
                 <div v-if="n.condition" class="bbs-npc-field f-cond"><dt>状态</dt><dd>{{ n.condition }}</dd></div>
@@ -584,7 +591,7 @@ function confirmRemove() {
         <div class="bbs-npc-grouphead">
           <span class="bbs-npc-grouptag is-nearby">同区域</span>
           <span class="bbs-npc-grouphint" :class="{ 'is-local-only': apiSettings.summaryOnlyMode }">
-            {{ apiSettings.summaryOnlyMode ? '仍按同区域分档记录，但不发送给主对话 AI' : '在附近,发送名字、身份与性格' }}
+            {{ apiSettings.summaryOnlyMode ? '仍按同区域分档记录，但不发送给主对话 AI' : '在附近，发送名字、身份与性格' }}
           </span>
         </div>
         <div class="bbs-npc-list">
@@ -598,7 +605,7 @@ function confirmRemove() {
                   <button
                     class="bbs-item-act bbs-npc-star"
                     type="button"
-                    :title="apiSettings.summaryOnlyMode ? '标记为主要角色(仅调整棱镜宝书内的角色分组)' : '标记为主要角色(始终全量发送、追踪状态)'"
+                    :title="apiSettings.summaryOnlyMode ? '标记为主要角色（仅调整棱镜宝书内的角色分组）' : '标记为主要角色（始终全量发送、追踪状态）'"
                     @click="toggleImportant(n)"
                   >
                     <Icon name="star" />
@@ -606,7 +613,7 @@ function confirmRemove() {
                   <button
                     class="bbs-item-act bbs-npc-pin"
                     type="button"
-                    title="标记为随行同伴(将随主角在场)"
+                    title="标记为随行同伴（将随主角在场）"
                     @click="toggleFollow(n)"
                   >
                     <Icon name="pin" />
@@ -619,7 +626,7 @@ function confirmRemove() {
                 <div v-if="n.title" class="bbs-npc-field f-title"><dt>身份</dt><dd>{{ n.title }}</dd></div>
                 <div v-if="n.relation" class="bbs-npc-field f-rel"><dt>关系</dt><dd>{{ n.relation }}</dd></div>
                 <div v-if="fmtNpcAffinity(n)" class="bbs-npc-field"><dt title="对主角的内心好感与外在态度估计">好感</dt><dd>{{ fmtNpcAffinity(n) }}</dd></div>
-                <div v-if="n.location || n.lastKnownLocation" class="bbs-npc-field f-loc"><dt>定位证据</dt><dd>{{ npcLocationLabel(n) }}</dd></div>
+                <div v-if="n.location || n.lastKnownLocation" class="bbs-npc-field f-loc"><dt>位置</dt><dd>{{ npcPlaceText(n) }}</dd></div>
                 <div v-if="n.personality" class="bbs-npc-field f-trait"><dt>性格</dt><dd>{{ n.personality }}</dd></div>
               </dl>
             </div>
@@ -632,7 +639,7 @@ function confirmRemove() {
         <div class="bbs-npc-grouphead">
           <span class="bbs-npc-grouptag">不在场 / 位置未确认</span>
           <span class="bbs-npc-grouphint" :class="{ 'is-local-only': apiSettings.summaryOnlyMode }">
-            {{ apiSettings.summaryOnlyMode ? '仍保留名册分档，但不发送给主对话 AI' : '仅发送简要名册与已有好感档位,省 token' }}
+            {{ apiSettings.summaryOnlyMode ? '仍保留名册分档，但不发送给主对话 AI' : '仅发送简要名册与已有好感档位，省 token' }}
           </span>
         </div>
         <div class="bbs-npc-list">
@@ -646,7 +653,7 @@ function confirmRemove() {
                   <button
                     class="bbs-item-act bbs-npc-star"
                     type="button"
-                    :title="apiSettings.summaryOnlyMode ? '标记为主要角色(仅调整棱镜宝书内的角色分组)' : '标记为主要角色(始终全量发送、追踪状态)'"
+                    :title="apiSettings.summaryOnlyMode ? '标记为主要角色（仅调整棱镜宝书内的角色分组）' : '标记为主要角色（始终全量发送、追踪状态）'"
                     @click="toggleImportant(n)"
                   >
                     <Icon name="star" />
@@ -654,7 +661,7 @@ function confirmRemove() {
                   <button
                     class="bbs-item-act bbs-npc-pin"
                     type="button"
-                    title="标记为随行同伴(将随主角在场)"
+                    title="标记为随行同伴（将随主角在场）"
                     @click="toggleFollow(n)"
                   >
                     <Icon name="pin" />
@@ -668,8 +675,8 @@ function confirmRemove() {
                 <div v-if="n.relation" class="bbs-npc-field f-rel"><dt>关系</dt><dd>{{ n.relation }}</dd></div>
                 <div v-if="fmtNpcAffinity(n)" class="bbs-npc-field"><dt title="对主角的内心好感与外在态度估计">好感</dt><dd>{{ fmtNpcAffinity(n) }}</dd></div>
                 <div class="bbs-npc-field f-loc">
-                  <dt>定位证据</dt>
-                  <dd :class="{ 'is-nowhere': !n.location || n.locationStale }">{{ npcLocationLabel(n) }}</dd>
+                  <dt>位置</dt>
+                  <dd :class="{ 'is-nowhere': !n.location || n.locationStale }">{{ npcPlaceText(n) }}</dd>
                 </div>
               </dl>
             </div>
@@ -685,7 +692,7 @@ function confirmRemove() {
     </div>
     <div v-else class="bbs-empty">
       <span class="bbs-empty-icon"><Icon name="npcs" /></span>
-      <h3>等待下一次相遇</h3><p>摘要会记下与主角有交集的人物。{{ hasLeaf ? '也可以手动建立第一份角色档案。' : '生成第一条有效摘要后，即可手动添加。' }}</p>
+      <h3>还没有角色</h3><p>摘要会记下和主角有交集的人。{{ hasLeaf ? '也可以手动添加。' : '有了第一条摘要后就能手动添加。' }}</p>
       <button v-if="hasLeaf" class="bbs-btn" type="button" @click="openComposer"><Icon name="plus" />添加第一位角色</button>
     </div>
 
@@ -697,11 +704,11 @@ function confirmRemove() {
         </header>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">性别</span>
-          <input v-model="protagonistEditing.gender" class="bbs-input" type="text" placeholder="如:男、女" />
+          <input v-model="protagonistEditing.gender" class="bbs-input" type="text" placeholder="如：男、女" />
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">年龄(记录当时的值,随剧情时间自动推算)</span>
-          <input v-model="protagonistEditing.age" class="bbs-input" type="text" placeholder="如:25、二十出头" />
+          <span class="bbs-modal-label">年龄（记录当时的值，随剧情时间自动推算）</span>
+          <input v-model="protagonistEditing.age" class="bbs-input" type="text" placeholder="如：25、二十出头" />
         </label>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">当前身份 / 职业 / 种族 / 公开地位</span>
@@ -709,7 +716,7 @@ function confirmRemove() {
         </label>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">稳定外貌 / 身体特征</span>
-          <textarea v-model="protagonistEditing.appearance" class="bbs-input bbs-modal-textarea" rows="2" placeholder="如:黑色短发、左眉有疤"></textarea>
+          <textarea v-model="protagonistEditing.appearance" class="bbs-input bbs-modal-textarea" rows="2" placeholder="如：黑色短发、左眉有疤"></textarea>
         </label>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">当前着装</span>
@@ -738,20 +745,20 @@ function confirmRemove() {
           <BbsSelect v-model="detailEditing.subject" :options="detailSubjectOptions" aria-label="生活细节所属人物" />
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">细节内容(此人明说过/正文揭示的偏好、习惯或近期状态)</span>
-          <textarea v-model="detailEditing.text" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:认为煎饼果子不加脆饼就没有灵魂(姓名由所属人物自动显示)"></textarea>
+          <span class="bbs-modal-label">细节内容（此人明说过/正文揭示的偏好、习惯或近期状态）</span>
+          <textarea v-model="detailEditing.text" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：认为煎饼果子不加脆饼就没有灵魂（姓名由所属人物自动显示）"></textarea>
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">主题标签(可选,1-3 个,斜杠分隔)</span>
+          <span class="bbs-modal-label">主题标签（可选，1-3 个，斜杠分隔）</span>
           <input v-model="detailEditing.topics" class="bbs-input" type="text" placeholder="如 饮食/作息/工作" />
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">关键词(可选,触发匹配用,斜杠分隔)</span>
+          <span class="bbs-modal-label">关键词（可选，触发匹配用，斜杠分隔）</span>
           <input v-model="detailEditing.anchors" class="bbs-input" type="text" placeholder="如 香菜/项目/死线" />
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">时效(可选,故事内到期时间;长期偏好留空)</span>
-          <input v-model="detailEditing.until" class="bbs-input" type="text" placeholder="如 1988/10/1;留空=长期稳定" />
+          <span class="bbs-modal-label">时效（可选，故事内到期时间；长期偏好留空）</span>
+          <input v-model="detailEditing.until" class="bbs-input" type="text" placeholder="如 1988/10/1；留空=长期稳定" />
         </label>
         <footer class="bbs-modal-foot">
           <button class="bbs-btn" type="button" @click="cancelDetailEdit">取消</button>
@@ -773,61 +780,61 @@ function confirmRemove() {
         </label>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">性别</span>
-          <input v-model="draft.gender" class="bbs-input" type="text" placeholder="如:男、女" @keydown.enter="addNpc" />
+          <input v-model="draft.gender" class="bbs-input" type="text" placeholder="如：男、女" @keydown.enter="addNpc" />
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">年龄(记录当时的值,随剧情时间自动推算)</span>
-          <input v-model="draft.age" class="bbs-input" type="text" placeholder="如:25、二十出头" @keydown.enter="addNpc" />
+          <span class="bbs-modal-label">年龄（记录当时的值，随剧情时间自动推算）</span>
+          <input v-model="draft.age" class="bbs-input" type="text" placeholder="如：25、二十出头" @keydown.enter="addNpc" />
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">身份(职业 / 与主角的关系)</span>
-          <textarea v-model="draft.title" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:归雁客栈掌柜、青梅竹马"></textarea>
+          <span class="bbs-modal-label">身份（职业 / 与主角的关系）</span>
+          <textarea v-model="draft.title" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：归雁客栈掌柜、青梅竹马"></textarea>
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">与主角的关系(称谓在前 + 一句态度)</span>
-          <textarea v-model="draft.relation" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:主角的师姐,明面冷淡暗中维护"></textarea>
+          <span class="bbs-modal-label">与主角的关系（称谓在前 + 一句态度）</span>
+          <textarea v-model="draft.relation" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：主角的师姐，明面冷淡暗中维护"></textarea>
         </label>
         <div v-for="f in NPC_AFFINITY_FIELDS" :key="f.key" class="bbs-modal-field">
-          <span class="bbs-modal-label">{{ f.label }}(对 {{ protagonistName }})</span>
+          <span class="bbs-modal-label">{{ f.label }}（对 {{ protagonistName }}）</span>
           <BbsSelect v-model="draft[f.key]" :options="f.options" :aria-label="f.label" />
         </div>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">好感说明(定性估计,不是本轮心情;未知不等于中性)</span>
-          <textarea v-model="draft.affinityNote" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:内心在意,但习惯以冷淡掩饰;没有新依据时保持不变"></textarea>
+          <span class="bbs-modal-label">好感说明（定性估计，不是本轮心情；未知不等于中性）</span>
+          <textarea v-model="draft.affinityNote" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：内心在意，但习惯以冷淡掩饰；没有新依据时保持不变"></textarea>
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">与其他角色的关系(仅血缘 / 婚姻 / 宿敌等长期关系)</span>
-          <textarea v-model="draft.ties" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:阿黛尔之父;与镇长有旧怨"></textarea>
+          <span class="bbs-modal-label">与其他角色的关系（仅血缘 / 婚姻 / 宿敌等长期关系）</span>
+          <textarea v-model="draft.ties" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：阿黛尔之父；与镇长有旧怨"></textarea>
         </label>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">性格</span>
-          <textarea v-model="draft.personality" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:沉默寡言、护短"></textarea>
+          <textarea v-model="draft.personality" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：沉默寡言、护短"></textarea>
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">外貌描述(固定特征:发色 / 身材 / 疤痕,勿写穿着)</span>
+          <span class="bbs-modal-label">外貌描述（固定特征：发色 / 身材 / 疤痕，勿写穿着）</span>
           <textarea v-model="draft.desc" class="bbs-input bbs-modal-textarea" rows="2" placeholder="可选"></textarea>
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">当前着装(会随剧情变化)</span>
-          <textarea v-model="draft.outfit" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:红斗篷、佩长剑"></textarea>
+          <span class="bbs-modal-label">当前着装（会随剧情变化）</span>
+          <textarea v-model="draft.outfit" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：红斗篷、佩长剑"></textarea>
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">当前状态(受伤 / 疲惫等,无则留空)</span>
+          <span class="bbs-modal-label">当前状态（受伤 / 疲惫等，无则留空）</span>
           <textarea v-model="draft.condition" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="可选"></textarea>
         </label>
         <label class="bbs-modal-field bbs-modal-check">
           <input v-model="draft.important" type="checkbox" class="bbs-checkbox" />
           <span class="bbs-modal-label">
-            {{ apiSettings.summaryOnlyMode ? '主要角色(核心主演,仅在棱镜宝书内重点追踪状态)' : '主要角色(核心主演,始终全量发送、重点追踪状态)' }}
+            {{ apiSettings.summaryOnlyMode ? '主要角色（核心主演，仅在棱镜宝书内重点追踪状态）' : '主要角色（核心主演，始终全量发送、重点追踪状态）' }}
           </span>
         </label>
         <label class="bbs-modal-field bbs-modal-check">
           <input v-model="draft.follow" type="checkbox" class="bbs-checkbox" />
-          <span class="bbs-modal-label">随行同伴(跟随主角移动,永远在场)</span>
+          <span class="bbs-modal-label">随行同伴（跟随主角移动，永远在场）</span>
         </label>
         <label v-if="!draft.follow" class="bbs-modal-field">
-          <span class="bbs-modal-label">所在地点(留空=所在不明,不再视为在场)</span>
-          <textarea v-model="draft.location" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:归雁客栈、王宫;留空=所在不明"></textarea>
+          <span class="bbs-modal-label">所在地点（留空=所在不明，不再视为在场）</span>
+          <textarea v-model="draft.location" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：归雁客栈、王宫；留空=所在不明"></textarea>
         </label>
         <footer class="bbs-modal-foot">
           <button class="bbs-btn" type="button" @click="closeComposer">取消</button>
@@ -849,61 +856,61 @@ function confirmRemove() {
         </label>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">性别</span>
-          <input v-model="editing.gender" class="bbs-input" type="text" placeholder="如:男、女" />
+          <input v-model="editing.gender" class="bbs-input" type="text" placeholder="如：男、女" />
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">年龄(记录当时的值,随剧情时间自动推算;不改则保留原锚点)</span>
-          <input v-model="editing.age" class="bbs-input" type="text" placeholder="如:25、二十出头" />
+          <span class="bbs-modal-label">年龄（记录当时的值，随剧情时间自动推算；不改则保留原锚点）</span>
+          <input v-model="editing.age" class="bbs-input" type="text" placeholder="如：25、二十出头" />
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">身份(职业 / 与主角的关系)</span>
-          <textarea v-model="editing.title" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:归雁客栈掌柜、青梅竹马"></textarea>
+          <span class="bbs-modal-label">身份（职业 / 与主角的关系）</span>
+          <textarea v-model="editing.title" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：归雁客栈掌柜、青梅竹马"></textarea>
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">与主角的关系(称谓在前 + 一句态度)</span>
-          <textarea v-model="editing.relation" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:主角的师姐,明面冷淡暗中维护"></textarea>
+          <span class="bbs-modal-label">与主角的关系（称谓在前 + 一句态度）</span>
+          <textarea v-model="editing.relation" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：主角的师姐，明面冷淡暗中维护"></textarea>
         </label>
         <div v-for="f in NPC_AFFINITY_FIELDS" :key="f.key" class="bbs-modal-field">
-          <span class="bbs-modal-label">{{ f.label }}(对 {{ protagonistName }})</span>
+          <span class="bbs-modal-label">{{ f.label }}（对 {{ protagonistName }}）</span>
           <BbsSelect v-model="editing[f.key]" :options="f.options" :aria-label="f.label" />
         </div>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">好感说明(定性估计,不是本轮心情;未知不等于中性)</span>
-          <textarea v-model="editing.affinityNote" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:内心在意,但习惯以冷淡掩饰;没有新依据时保持不变"></textarea>
+          <span class="bbs-modal-label">好感说明（定性估计，不是本轮心情；未知不等于中性）</span>
+          <textarea v-model="editing.affinityNote" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：内心在意，但习惯以冷淡掩饰；没有新依据时保持不变"></textarea>
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">与其他角色的关系(仅血缘 / 婚姻 / 宿敌等长期关系)</span>
-          <textarea v-model="editing.ties" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:阿黛尔之父;与镇长有旧怨"></textarea>
+          <span class="bbs-modal-label">与其他角色的关系（仅血缘 / 婚姻 / 宿敌等长期关系）</span>
+          <textarea v-model="editing.ties" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：阿黛尔之父；与镇长有旧怨"></textarea>
         </label>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">性格</span>
-          <textarea v-model="editing.personality" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:沉默寡言、护短"></textarea>
+          <textarea v-model="editing.personality" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：沉默寡言、护短"></textarea>
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">外貌描述(固定特征:发色 / 身材 / 疤痕,勿写穿着)</span>
+          <span class="bbs-modal-label">外貌描述（固定特征：发色 / 身材 / 疤痕，勿写穿着）</span>
           <textarea v-model="editing.desc" class="bbs-input bbs-modal-textarea" rows="2" placeholder="可选"></textarea>
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">当前着装(会随剧情变化)</span>
-          <textarea v-model="editing.outfit" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:红斗篷、佩长剑"></textarea>
+          <span class="bbs-modal-label">当前着装（会随剧情变化）</span>
+          <textarea v-model="editing.outfit" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：红斗篷、佩长剑"></textarea>
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">当前状态(受伤 / 疲惫等,无则留空)</span>
+          <span class="bbs-modal-label">当前状态（受伤 / 疲惫等，无则留空）</span>
           <textarea v-model="editing.condition" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="可选"></textarea>
         </label>
         <label class="bbs-modal-field bbs-modal-check">
           <input v-model="editing.important" type="checkbox" class="bbs-checkbox" />
           <span class="bbs-modal-label">
-            {{ apiSettings.summaryOnlyMode ? '主要角色(核心主演,仅在棱镜宝书内重点追踪状态)' : '主要角色(核心主演,始终全量发送、重点追踪状态)' }}
+            {{ apiSettings.summaryOnlyMode ? '主要角色（核心主演，仅在棱镜宝书内重点追踪状态）' : '主要角色（核心主演，始终全量发送、重点追踪状态）' }}
           </span>
         </label>
         <label class="bbs-modal-field bbs-modal-check">
           <input v-model="editing.follow" type="checkbox" class="bbs-checkbox" />
-          <span class="bbs-modal-label">随行同伴(跟随主角移动,永远在场)</span>
+          <span class="bbs-modal-label">随行同伴（跟随主角移动，永远在场）</span>
         </label>
         <label v-if="!editing.follow" class="bbs-modal-field">
-          <span class="bbs-modal-label">所在地点(留空=所在不明,不再视为在场)</span>
-          <textarea v-model="editing.location" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如:归雁客栈、王宫;留空=所在不明"></textarea>
+          <span class="bbs-modal-label">所在地点（留空=所在不明，不再视为在场）</span>
+          <textarea v-model="editing.location" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：归雁客栈、王宫；留空=所在不明"></textarea>
         </label>
         <footer class="bbs-modal-foot">
           <button class="bbs-btn" type="button" @click="cancelEdit">取消</button>
@@ -922,7 +929,7 @@ function confirmRemove() {
       @confirm="confirmRemove"
       @cancel="removing = null"
     >
-      删除「{{ removing?.name }}」。此操作写入最新摘要,删除楼层可回退。
+      删除「{{ removing?.name }}」？删除会记在最新一条摘要上，删掉那一楼就能恢复。
     </ConfirmDialog>
   </section>
 </template>
@@ -944,7 +951,7 @@ function confirmRemove() {
 .bbs-search > .bbs-input { flex: 1; width: 100%; }
 .bbs-filterbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 18px; }
 .bbs-filter-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
-.bbs-filter-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
+.bbs-filter-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface-2); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
 .bbs-filter-tab[aria-pressed='true'] { background: var(--bbs-accent-soft); border-color: var(--bbs-accent); color: var(--bbs-accent); }
 .bbs-filter-tab span { font-variant-numeric: tabular-nums; font-size: 11px; }
 .bbs-item-act { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--bbs-ink-soft); cursor: pointer; font-size: 15px; }

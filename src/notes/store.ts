@@ -30,7 +30,7 @@ export function loadNotes(): void {
   const ctx=getContext(); loadedChat=ctx?.chat; loadedId=ctx?.getCurrentChatId(); protectedData=false;
   notesState.records=[]; notesState.decisions=[]; notesState.issue=''; notesState.revision++;
   const raw=ctx?.chatMetadata?.[NOTES_DATA_KEY]; if (raw==null) return;
-  if (!validData(raw)) { protectedData=true; notesState.issue='当前聊天的札记数据版本或格式无法识别，已只读保护，不会覆盖。'; return; }
+  if (!validData(raw)) { protectedData=true; notesState.issue='这个聊天的札记数据格式认不出来，已经只读保护，不会覆盖原数据。'; return; }
   notesState.records=clone(raw.records); notesState.decisions=clone(raw.decisions);
 }
 function context(): STContext {
@@ -42,12 +42,12 @@ function context(): STContext {
 }
 /** 只读格式问题才持续阻断，网络保存错误允许用户直接重试。 */
 export function notesWriteIssue(): string {
-  try { context(); return ''; } catch (error) { return error instanceof Error ? error.message : '札记存储不可用。'; }
+  try { context(); return ''; } catch (error) { return error instanceof Error ? error.message : '札记暂时没法保存。'; }
 }
 /** 仅替换自己的 metadata key；保存失败恢复原值，切聊后绝不更新新聊天状态。 */
 async function persist(next: NotesData, ctx: STContext): Promise<void> {
-  if (saving) throw new Error('札记正在保存，请稍后重试。');
-  if (!sameChat(ctx)) throw new Error('聊天已切换，未保存旧结果。');
+  if (saving) throw new Error('札记正在保存，请稍等再试。');
+  if (!sameChat(ctx)) throw new Error('聊天已经切换，这次的结果没有保存。');
   const id=ctx.getCurrentChatId(), previous=ctx.chatMetadata[NOTES_DATA_KEY];
   saving=true; ctx.chatMetadata[NOTES_DATA_KEY]=clone(next); const written=ctx.chatMetadata[NOTES_DATA_KEY];
   try {
@@ -56,7 +56,7 @@ async function persist(next: NotesData, ctx: STContext): Promise<void> {
     notesState.records=clone(next.records); notesState.decisions=clone(next.decisions); notesState.issue=''; notesState.revision++;
   } catch {
     if (ctx.chatMetadata[NOTES_DATA_KEY]===written) { if (previous===undefined) delete ctx.chatMetadata[NOTES_DATA_KEY]; else ctx.chatMetadata[NOTES_DATA_KEY]=previous; }
-    if (sameChat(ctx)) notesState.issue='札记保存失败，本次操作未完成；已有札记未替换。';
+    if (sameChat(ctx)) notesState.issue='札记保存失败，这次操作没有完成，原有札记没有变动。';
     throw new Error('札记保存失败，请重试。');
   } finally { saving=false; }
 }
@@ -75,13 +75,13 @@ export function activeDecisions(): NoteDecision[] {
   return notesState.decisions.filter(d => ['pending','in_progress'].includes(d.status) && notesState.records.some(r=>r.id===d.noteId && recordSourceIsCurrent(r)));
 }
 export async function addNote(record: NoteRecord): Promise<void> {
-  const ctx=context(); if (!recordSourceIsCurrent(record)) throw new Error('正文已经变化，已丢弃旧札记。');
+  const ctx=context(); if (!recordSourceIsCurrent(record)) throw new Error('正文已经变化，这份札记没有保存。');
   const next=snapshot(); next.records.push(record); await persist(next,ctx);
 }
 async function decide(noteId: string, questionId: string, text: string, reject: boolean): Promise<void> {
   const ctx=context(), note=notesState.records.find(r=>r.id===noteId);
-  if (!note || !recordIsCurrent(note) || !note.questions.some(q=>q.id===questionId)) throw new Error('这份札记已失效或问题不存在，请为当前正文重新生成。');
-  const content=text.trim(); if (!reject && (!content || content.length>4000)) throw new Error('请填写1～4000字的明确安排。');
+  if (!note || !recordIsCurrent(note) || !note.questions.some(q=>q.id===questionId)) throw new Error('这份札记已经失效，或者问题不在了；请为当前正文重新生成札记。');
+  const content=text.trim(); if (!reject && (!content || content.length>4000)) throw new Error('安排要写 1–4000 字。');
   const next=snapshot(), old=next.decisions.find(d=>d.noteId===noteId && d.questionId===questionId);
   const decision: NoteDecision={ id:old?.id??crypto.randomUUID(), noteId, questionId, text:reject ? (note.questions.find(q=>q.id===questionId)?.proposal || note.questions.find(q=>q.id===questionId)?.prompt || '') : content, status:reject?'rejected':'pending', createdAt:old?.createdAt??Date.now() };
   if (old) Object.assign(old,decision); else next.decisions.push(decision);
@@ -92,8 +92,8 @@ export const confirmQuestion = (noteId: string, questionId: string, text: string
 export const rejectQuestion = (noteId: string, questionId: string) => decide(noteId,questionId,'',true);
 export async function setDecisionStatus(id: string, status: 'pending'|'in_progress'|'completed'|'cancelled'): Promise<void> {
   const ctx=context(), next=snapshot(), d=next.decisions.find(x=>x.id===id);
-  if (!d || !['pending','in_progress','completed','cancelled'].includes(status)) throw new Error('安排不存在或状态无效。');
-  if (['pending','in_progress'].includes(status) && !next.records.some(r=>r.id===d.noteId && recordSourceIsCurrent(r))) throw new Error('关联正文已变化，不能启用陈旧安排。');
+  if (!d || !['pending','in_progress','completed','cancelled'].includes(status)) throw new Error('找不到这条安排，或者状态不对。');
+  if (['pending','in_progress'].includes(status) && !next.records.some(r=>r.id===d.noteId && recordSourceIsCurrent(r))) throw new Error('这条安排对应的正文已变化，不能再启用。');
   d.status=status; await persist(next,ctx);
 }
 /** 显式导入只读原文，既不删 aftertalk，也不把其中的“已确认”自动当成用户授权。 */

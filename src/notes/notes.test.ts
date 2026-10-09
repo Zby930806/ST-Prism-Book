@@ -6,6 +6,7 @@ import type { NoteRecord } from './types';
 import * as host from '@/st/context';
 import * as api from '@/api/settings';
 import { requestCompletion } from '@/api/client';
+import { classifyHttpFailure, truncatedReply } from '@/api/errors';
 import { clampToTimeTags, cleanBody } from '@/memory/timeTag';
 import { ORIGINAL_NOTES_PROMPT, ORIGINAL_NOTES_PROMPT_SHA256, EXECUTABLE_NOTES_PROMPT } from './prompt';
 import { stripAftertalk, extractAftertalk, parseQuestions, noteText, fingerprint } from './protocol';
@@ -118,6 +119,8 @@ describe('原提示词和 aftertalk 协议', () => {
     expect(extractAftertalk('<aftertalk> </aftertalk><aftertalk>一</aftertalk><aftertalk>未闭合')).toEqual(['一']);
     expect(noteText('<think>秘密</think><thinking>秘密二</thinking><aftertalk>一</aftertalk><aftertalk>二</aftertalk>')).toBe('一\n\n二');
     expect(noteText('本轮无需新增札记')).toBe('本轮无需新增札记');
+    expect(noteText('<aftertalk status="out_of_story">\n凝嘤嘤探头: 写到一半')).toBe('凝嘤嘤探头: 写到一半');
+    expect(noteText('<aftertalk>')).toBe('');
     expect(() => noteText('x'.repeat(80001))).toThrow('过长');
   });
   it('解析问题、暂定写法、去重编号，且不把收尾当提案', () => {
@@ -157,6 +160,22 @@ describe('独立设置隔离', () => {
     const before = copy(raw); hydrateNotesSettings();
     expect(notesSettings).toMatchObject({ recentFloors: 40, memoryChars: 1000, channel: { id: 'prism-notes-independent', url: 'https://notes.example.invalid/v1', model: 'model', temperature: 2, maxTokens: 256, timeoutSec: 600 } });
     notesSettings.channel.model = 'changed'; expect(raw).toEqual(before);
+  });
+  it('默认最大输出 8000；旧版没改过的 3000 跟着新默认，改过的保留，上限 65535', () => {
+    expect(notesSettings.channel.maxTokens).toBe(8000);
+    const legacy = { version: 1, channel: { url: 'https://notes.example.invalid/v1', model: 'm', maxTokens: 3000 } };
+    ctx.extensionSettings![NOTES_SETTINGS_KEY] = legacy; hydrateNotesSettings();
+    expect(notesSettings.channel.maxTokens).toBe(8000);
+    expect(legacy.channel.maxTokens).toBe(3000);
+    ctx.extensionSettings![NOTES_SETTINGS_KEY] = { version: 1, channel: { maxTokens: 5000 } }; hydrateNotesSettings();
+    expect(notesSettings.channel.maxTokens).toBe(5000);
+    ctx.extensionSettings![NOTES_SETTINGS_KEY] = { version: 1, defaultMaxTokens: 8000, channel: { maxTokens: 3000 } }; hydrateNotesSettings();
+    expect(notesSettings.channel.maxTokens).toBe(3000);
+    notesSettings.channel.maxTokens = 40000; saveNotesSettings();
+    expect(ctx.extensionSettings![NOTES_SETTINGS_KEY]).toMatchObject({ version: 1, defaultMaxTokens: 8000, channel: { maxTokens: 40000 } });
+    hydrateNotesSettings(); expect(notesSettings.channel.maxTokens).toBe(40000);
+    notesSettings.channel.maxTokens = 99999; saveNotesSettings();
+    expect(notesSettings.channel.maxTokens).toBe(65535);
   });
   it.each([{ version: 9, channel: {} }, [], 'corrupt', { version: 1, channel: null }])('未知或损坏设置只读保护：%j', raw => {
     ctx.extensionSettings![NOTES_SETTINGS_KEY] = raw; hydrateNotesSettings();
@@ -534,5 +553,42 @@ describe('最新后端修复回归', () => {
     ctx.eventSource.emit!('MESSAGE_UPDATED', 1);
     expect(sourceHash(ctx, 1)).toBe(hash); expect(completion.mock.calls[0][2]!.signal?.aborted).toBe(false);
     wait.resolve(reply); await pending; expect(notesState.records).toHaveLength(1);
+  });
+});
+
+describe('截断与失败说明', () => {
+  beforeEach(enable);
+  it('札记写到一半被截断时保存已写出的部分并标注，提示调大哪里的最大输出', async () => {
+    completion.mockRejectedValueOnce(truncatedReply({ finishReason: 'length', maxTokens: 3000 }, 'Q1. 要不要去山里？凝嘤嘤暂定: 先去山脚'));
+    await generateNotes();
+    expect(notesState.records).toHaveLength(1);
+    expect(notesState.records[0].text).toContain('先去山脚');
+    expect(notesState.records[0].text).toContain('被截断');
+    expect(notesRun.status).toContain('内容不完整');
+    expect(notesRun.status).toContain('札记 → 独立 API 设置');
+    expect(notesRun.status).toContain('3000 tokens');
+    expect(notesRun.error).toBe('');
+  });
+  it('截断的札记只有开头标签时，保存的内容不带标签', async () => {
+    completion.mockRejectedValueOnce(truncatedReply({ finishReason: 'length', maxTokens: 3000 }, '<aftertalk status="out_of_story">\nQ1. 要不要去山里？凝嘤嘤暂定: 先去山脚'));
+    await generateNotes();
+    expect(notesState.records[0].text.startsWith('Q1.')).toBe(true);
+    expect(notesState.records[0].text).not.toContain('<aftertalk');
+    expect(notesState.records[0].questions.map(q => q.id)).toEqual(['Q1']);
+  });
+  it('只写了思考就被截断时不保存空札记，说明是思考用完了额度', async () => {
+    completion.mockRejectedValueOnce(truncatedReply({ finishReason: 'length', maxTokens: 3000 }, '<think>还在想要不要去山里'));
+    await generateNotes();
+    expect(notesState.records).toHaveLength(0);
+    expect(notesRun.error).toContain('思考阶段');
+    expect(notesRun.error).toContain('已有札记没有被替换');
+  });
+  it('分类后的 API 错误给出原因，细节里的密钥被隐藏', async () => {
+    completion.mockRejectedValueOnce(classifyHttpFailure({ status: 401, body: '{"error":{"message":"Incorrect API key provided: sk-abcdefgh12345678"}}' }));
+    await generateNotes();
+    expect(notesRun.error).toContain('API 密钥无效或没有权限（HTTP 401）');
+    expect(notesRun.errorDetail).toContain('sk-***');
+    expect(notesRun.errorDetail).not.toContain('abcdefgh12345678');
+    expect(notesState.records).toHaveLength(0);
   });
 });

@@ -106,7 +106,7 @@ describe('新聊天开场时间的正式保存与消费', () => {
   });
   it('保存失败恢复内存；切换期间完成保存不刷新其他聊天', async () => {
     vi.mocked(ctx.saveMetadata).mockRejectedValueOnce(new Error('磁盘失败'));
-    await expect(saveInitialStoryTime('初秋')).rejects.toThrow('保存未确认');
+    await expect(saveInitialStoryTime('初秋')).rejects.toThrow('没能确认保存成功');
     expect(initialStoryTime()).toBe('');
     let finish!: () => void;
     vi.mocked(ctx.saveMetadata).mockImplementationOnce(() => new Promise<void>(r => { finish = r; }));
@@ -127,7 +127,7 @@ describe('新聊天开场时间的正式保存与消费', () => {
     reject(new Error('secret-token-test-value'));
     const error = await pending.catch(e => e as Error);
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain('保存未确认');
+    expect((error as Error).message).toContain('没能确认保存成功');
     expect((error as Error).message).not.toContain('secret-token');
     expect(ctx.chatMetadata[INITIAL_TIME_KEY]).toBe('外部明确设置');
   });
@@ -141,20 +141,20 @@ describe('新聊天开场时间的正式保存与消费', () => {
   });
   it('自动开场摘要无时间时仍给出定位到该楼的手动补填入口说明', async () => {
     await summarizeFloor(0);
-    expect(initialTimeEditIssue()).toContain('#0 逐楼摘要');
-    expect(initialTimeEditIssue()).toContain('点击编辑补填起止时间');
+    expect(initialTimeEditIssue()).toContain('编辑 #0 楼');
+    expect(initialTimeEditIssue()).toContain('起止时间');
   });
   it('旧聊天、旧 L1/L2 与已有叶子不自动回写或重新摘要', async () => {
     memory.summaries.push({ id: 'old-l2', text: '旧总结', level: 2, childIds: [], auto: false, createdAt: 1 });
     const before = JSON.stringify(memory.summaries);
-    expect(initialTimeEditIssue()).toContain('已有聊天不回填');
-    await expect(saveInitialStoryTime('初秋')).rejects.toThrow('已有聊天不回填');
+    expect(initialTimeEditIssue()).toContain('开场时间不能再改');
+    await expect(saveInitialStoryTime('初秋')).rejects.toThrow('开场时间不能再改');
     expect(JSON.stringify(memory.summaries)).toBe(before);
     expect(client.requestViaMainApi).not.toHaveBeenCalled();
     expect(ctx.saveMetadata).not.toHaveBeenCalled();
     memory.summaries = [];
     ctx.chat.push(message());
-    await expect(saveInitialStoryTime('初秋')).rejects.toThrow('已有聊天不回填');
+    await expect(saveInitialStoryTime('初秋')).rejects.toThrow('开场时间不能再改');
   });
 });
 

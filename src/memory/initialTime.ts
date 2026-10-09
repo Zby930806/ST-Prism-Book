@@ -29,7 +29,7 @@ export async function ensureOpeningStoryTime(): Promise<void> {
   if (!ctx?.getCurrentChatId?.() || !ctx.chatMetadata) return;
   const pending = initializing.get(ctx.chatMetadata);
   if (pending) return pending;
-  if (savingMetadata.has(ctx.chatMetadata)) throw new Error('开场时间正在保存，请保存完成后再开始。');
+  if (savingMetadata.has(ctx.chatMetadata)) throw new Error('开场时间还在保存，请稍等再开始。');
   if (initialStoryTime() || latestStoryTime(ctx.chat) || memoryWriteIssue()) return;
   // 空 v3 森林/变量模板可属于新开场，只有实际历史或未知格式才拒绝初始化。
   if (hasStoredHistory(ctx.chatMetadata[MEMORY_KEY]) || memory.summaries.length || ctx.chat.some(m => m.extra?.bbs_leaf) ||
@@ -47,12 +47,12 @@ export function initialTimeEditIssue(): string {
   if (!ctx?.getCurrentChatId?.()) return '请先打开聊天。';
   const issue = memoryWriteIssue();
   if (issue) return issue;
-  if (ctx.chatMetadata && savingMetadata.has(ctx.chatMetadata)) return '开场时间正在保存，请勿重复提交。';
-  if (engineState.running) return '摘要任务进行中，请稍后设置。';
+  if (ctx.chatMetadata && savingMetadata.has(ctx.chatMetadata)) return '开场时间正在保存，请稍等。';
+  if (engineState.running) return '摘要正在进行，请稍后再设置。';
   if (memory.summaries.length || ctx.chat.some(m => m.extra?.bbs_leaf) ||
       ctx.chat.filter(isAiFloor).length > 1) {
     const first = ctx.chat.findIndex(m => m.extra?.bbs_leaf);
-    return `已有聊天不回填开场日期。${first >= 0 ? `开场已自动摘要时，请展开下方 #${first} 逐楼摘要，点击编辑补填起止时间。` : '请在对应逐楼摘要中编辑起止时间。'}无需重建旧 L1/L2。`;
+    return `这个聊天已经开始了，开场时间不能再改。${first >= 0 ? `要修正时间的话，请在摘要列表里编辑 #${first} 楼的起止时间。` : '要修正时间的话，请编辑对应楼层摘要的起止时间。'}不需要重建。`;
   }
   return '';
 }
@@ -62,13 +62,13 @@ export async function saveInitialStoryTime(value: string): Promise<void> {
   const issue = initialTimeEditIssue();
   if (issue) throw new Error(issue);
   const time = storyTimeValue(value);
-  if (!time || time.length > 80 || /[<>\r\n]/.test(time)) throw new Error('请填写你确认的开场时间（可虚构、不必补全年份），不要填未知、标签或多行文本。');
+  if (!time || time.length > 80 || /[<>\r\n]/.test(time)) throw new Error('请填一个具体的开场时间（可以是虚构的，不用写年份），不要填“未知”、标签或多行文字。');
   await persistInitialStoryTime(time, 'user');
 }
 
 async function persistInitialStoryTime(time: string, origin: 'user' | 'fictional'): Promise<void> {
   const ctx = getContext()!;
-  if (!ctx.chatMetadata || typeof ctx.saveMetadata !== 'function') throw new Error('宿主缺少可靠元数据保存接口，未修改。');
+  if (!ctx.chatMetadata || typeof ctx.saveMetadata !== 'function') throw new Error('当前酒馆版本没有可靠的保存接口，没有修改。');
   const meta = ctx.chatMetadata;
   const old = meta[INITIAL_TIME_KEY];
   const oldOrigin = meta[INITIAL_TIME_ORIGIN_KEY];
@@ -84,7 +84,7 @@ async function persistInitialStoryTime(time: string, origin: 'user' | 'fictional
       if (old === undefined) delete meta[INITIAL_TIME_KEY]; else meta[INITIAL_TIME_KEY] = old;
       if (oldOrigin === undefined) delete meta[INITIAL_TIME_ORIGIN_KEY]; else meta[INITIAL_TIME_ORIGIN_KEY] = oldOrigin;
     }
-    throw new Error('开场时间保存未确认成功，请重新打开本聊天核对；未修改任何聊天正文或摘要。');
+    throw new Error('开场时间没能确认保存成功，请重新打开这个聊天看一下；聊天正文和摘要都没有改动。');
   } finally {
     savingMetadata.delete(meta);
   }

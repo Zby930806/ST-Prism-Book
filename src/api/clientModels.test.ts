@@ -89,9 +89,9 @@ describe('fetchModels：ST status 代理契约', () => {
 
   it('缺少上下文或地址时拒绝请求，不访问网络', async () => {
     vi.mocked(getContext).mockReturnValue(null);
-    await expect(fetchModels(channel)).rejects.toMatchObject({ name: 'ApiError', message: 'SillyTavern 上下文不可用' });
+    await expect(fetchModels(channel)).rejects.toMatchObject({ name: 'ApiError', kind: 'config', title: '酒馆上下文还没准备好' });
     vi.mocked(getContext).mockReturnValue({ getRequestHeaders } as unknown as STContext);
-    await expect(fetchModels({ url: '', key: '' })).rejects.toMatchObject({ name: 'ApiError', message: '请先填写 API 地址' });
+    await expect(fetchModels({ url: '', key: '' })).rejects.toMatchObject({ name: 'ApiError', kind: 'config', message: '请先填写 API 地址。' });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -118,13 +118,19 @@ describe('fetchModels：ST status 代理契约', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('JSON 解析失败或网络异常保留异常，并清理超时定时器', async () => {
+  it('JSON 解析失败与网络异常转成可读说明，并清理超时定时器', async () => {
     fetchMock.mockResolvedValueOnce(new Response('<html>not JSON</html>'));
-    await expect(fetchModels(channel)).rejects.toBeInstanceOf(SyntaxError);
-    const networkError = new TypeError('mock network failure');
-    fetchMock.mockRejectedValueOnce(networkError);
-    await expect(fetchModels(channel)).rejects.toBe(networkError);
+    await expect(fetchModels(channel)).rejects.toMatchObject({ name: 'ApiError', kind: 'format', title: 'API 返回的不是有效数据' });
+    fetchMock.mockRejectedValueOnce(new TypeError('mock network failure'));
+    await expect(fetchModels(channel)).rejects.toMatchObject({ name: 'ApiError', kind: 'network', title: '连不上酒馆服务器' });
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('酒馆模型列表代理只回 { error: true } 时说明可能原因，并允许手填', async () => {
+    fetchMock.mockResolvedValue(Response.json({ error: true, data: { data: [] } }));
+    const error = await fetchModels(channel).catch(cause => cause);
+    expect(error).toMatchObject({ name: 'ApiError', kind: 'upstream', title: '服务商没有返回模型列表' });
+    expect(error.message).toContain('手动填写模型名');
   });
 });
 
@@ -139,7 +145,7 @@ describe('fetchModels：超时和外部取消', () => {
       return response;
     });
     const pending = fetchModels(channel);
-    const rejected = expect(pending).rejects.toMatchObject({ name: 'ApiError', message: '拉取模型超时(>2秒)' });
+    const rejected = expect(pending).rejects.toMatchObject({ name: 'ApiError', kind: 'timeout', title: '拉取模型超时（超过 2 秒）' });
     await vi.advanceTimersByTimeAsync(1999);
     expect(signal.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
@@ -151,7 +157,7 @@ describe('fetchModels：超时和外部取消', () => {
   it.each([undefined, 0, -1, NaN, Infinity])('无效 timeoutSec=%s 使用 180 秒默认值', async timeoutSec => {
     fetchMock.mockImplementation((_url, init) => rejectOnAbort<Response>(init!.signal!));
     const pending = fetchModels({ ...channel, timeoutSec });
-    const rejected = expect(pending).rejects.toMatchObject({ name: 'ApiError', message: '拉取模型超时(>180秒)' });
+    const rejected = expect(pending).rejects.toMatchObject({ name: 'ApiError', kind: 'timeout', title: '拉取模型超时（超过 180 秒）' });
     const signal = fetchMock.mock.calls[0][1]!.signal!;
     await vi.advanceTimersByTimeAsync(179999);
     expect(signal.aborted).toBe(false);

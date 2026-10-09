@@ -9,8 +9,8 @@ defineProps<{ subject: string }>();
   <aside v-if="apiSettings.summaryOnlyMode" class="bbs-summary-only-notice" role="status">
     <span class="bbs-summary-only-icon"><Icon name="eye-off" /></span>
     <div class="bbs-summary-only-copy">
-      <strong>仅记录，不发送给主对话 AI</strong>
-      <p>副 API 仍会分析并更新{{ subject }}，用于生成摘要和维护棱镜宝书记忆数据；这些数据不会作为当前状态注入。</p>
+      <strong>只记录，不交给正文模型</strong>
+      <p>设置里打开了「仅注入剧情摘要」：{{ subject }}照常分析和保存，但不会交给正文模型。</p>
     </div>
   </aside>
 </template>

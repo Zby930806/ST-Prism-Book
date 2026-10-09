@@ -63,4 +63,7 @@ function onNavClick(id: string) {
 .bbs-nav.is-narrow .bbs-nav-icon-wrap { width:100%; max-width:42px; height:26px; border-radius:20px; }
 .bbs-nav.is-narrow .is-active .bbs-nav-icon-wrap { background:var(--bbs-accent-soft); }
 .bbs-nav.is-narrow .bbs-nav-icon { font-size:19px; }
+/* 顶部导航：当前页在底边亮一条强调色，比单纯变色更容易看清位置。 */
+.bbs-nav.is-top:not(.is-narrow) .bbs-nav-item.is-active::after { content:''; position:absolute; left:28%; right:28%; bottom:-10px; height:2px; border-radius:2px; background:var(--bbs-accent); }
+.bbs-nav.is-narrow .bbs-nav-item { font-size:11px; }
 </style>

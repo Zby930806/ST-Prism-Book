@@ -684,7 +684,7 @@ const groups = computed(() => [
           class="bbs-fp-omitbtn"
           :class="{ 'is-active': omit }"
           type="button"
-          :title="omit ? '取消番外(恢复参与记忆)' : '标为番外(此楼不参与摘要/总结/注入)'"
+          :title="omit ? '取消番外（恢复参与记忆）' : '标为番外（此楼不参与摘要/总结/注入）'"
           :disabled="busy || engineState.running"
           @click.stop="toggleOmit"
         >
@@ -707,7 +707,7 @@ const groups = computed(() => [
       <div class="bbs-fp-drawer" :class="{ 'is-open': expanded }">
         <div class="bbs-fp-drawer-inner">
           <div class="bbs-fp-drawer-body">
-            <p v-if="omit" class="bbs-fp-note">此楼已标为番外,以下数据不参与记忆;取消番外即恢复。</p>
+            <p v-if="omit" class="bbs-fp-note">此楼已标为番外，以下数据不参与记忆；取消番外即恢复。</p>
 
             <template v-if="leaf">
               <!-- 时间 / 地点 chips(可点编辑) -->
@@ -766,7 +766,7 @@ const groups = computed(() => [
                 :title="omit ? '' : '点击编辑摘要正文'"
                 @click="!omit && editText()"
               >
-                {{ leaf.text || '(无摘要正文,点此补写)' }}
+                {{ leaf.text || '（无摘要正文，点此补写）' }}
               </p>
 
               <!-- 变动分组:每类目一张小卡(图标标题 + 标签流);点标签就地编辑(可编辑类)或展开删除 -->
@@ -826,11 +826,11 @@ const groups = computed(() => [
                           </label>
                           <label v-if="editingVarOp?.op === 'add'" class="bbs-fp-nrow">
                             <span class="bbs-fp-nlabel">增量</span>
-                            <input v-model="edit.varDelta" class="bbs-input bbs-fp-nfield bbs-fp-nfield-num" type="number" placeholder="可负,如 -10" />
+                            <input v-model="edit.varDelta" class="bbs-input bbs-fp-nfield bbs-fp-nfield-num" type="number" placeholder="可负，如 -10" />
                           </label>
                           <label v-if="editingVarOp?.op === 'set' || editingVarOp?.op === 'assign'" class="bbs-fp-nrow">
                             <span class="bbs-fp-nlabel">值</span>
-                            <textarea v-model="edit.varValue" rows="1" class="bbs-input bbs-fp-nfield" placeholder="文本直接写;数字/true/JSON 按原样" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
+                            <textarea v-model="edit.varValue" rows="1" class="bbs-input bbs-fp-nfield" placeholder="文本直接写；数字/true/JSON 按原样" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
                           </label>
                         </template>
                         <template v-else-if="tag.editable && tag.bucket === 'remove'">
@@ -876,7 +876,7 @@ const groups = computed(() => [
             <!-- 页脚:删除整楼摘要(行内两步确认,防误触) -->
             <div v-if="leaf && !omit" class="bbs-fp-footer">
               <template v-if="confirmingDelete">
-                <span class="bbs-fp-confirm-text">删除此楼摘要?</span>
+                <span class="bbs-fp-confirm-text">删除此楼摘要？</span>
                 <button class="bbs-fp-confirm-cancel" type="button" :disabled="busy" @click="cancelDelete">取消</button>
                 <button class="bbs-fp-confirm-ok" type="button" :disabled="busy" @click="removeLeaf">
                   <Icon name="trash" />删除
@@ -900,8 +900,8 @@ const groups = computed(() => [
       busyText="生成中…"
       @confirm="confirmRegenerate"
     >
-      当前摘要将被新结果替换,该楼带来的时间、物品、角色、计划等记忆会重新计算。
-      如果该楼已被上层总结收纳,包含它的上层总结将失效并被移除。继续?
+      当前摘要将被新结果替换，该楼带来的时间、物品、角色、计划等记忆会重新计算。
+      如果该楼已被上层总结收纳，包含它的上层总结将失效并被移除。继续？
     </ConfirmDialog>
   </div>
 </template>

@@ -1,6 +1,7 @@
 import { taskContextPrompt } from '@/memory/taskContext';
 import type { ChatMsg } from '@/api/client';
 import { mainApiAvailable, requestCompletion, requestViaMainApi } from '@/api/client';
+import { ApiError, apiFailure, containsCompleteJson, describeFailure, isRetryable, looksLikeUnfinishedJson, partialReply, withContext } from '@/api/errors';
 import { apiSettings, engineActiveHere, getChannelForTask } from '@/api/settings';
 import type { TaskType } from '@/api/settings';
 import type { STMessage, WorldInfoEntry } from '@/st/context';
@@ -41,8 +42,22 @@ function llmOptionalScalar(v: unknown): string | undefined {
 export const engineState = reactive({
   running: false,
   lastError: '' as string,
+  /** 与 lastError 对应的分行说明;只在 message 与 lastError 一致时展示,避免显示过期细节。 */
+  lastFailure: null as null | { message: string; title: string; hint: string; detail: string },
   lastRunAt: 0,
 });
+
+/** 记录失败:lastError 保留完整一句话(供提示气泡等),lastFailure 供摘要页分行展示。 */
+function recordFailure(error: unknown): void {
+  if (error instanceof ApiError && error.title) {
+    const view = describeFailure(error);
+    engineState.lastError = view.message;
+    engineState.lastFailure = { message: view.message, title: view.title, hint: view.hint, detail: view.detail };
+    return;
+  }
+  engineState.lastError = error instanceof Error ? error.message : String(error);
+  engineState.lastFailure = null;
+}
 
 /**
  * 单楼摘要状态(自动摘要/补摘/重摘共用;模块级单例,供 UI 跨「关窗重开」恢复对应楼层的转圈)。
@@ -581,7 +596,7 @@ export async function handleGenerationIntercept(
     const metadata = ctx.chatMetadata;
     const chatId = ctx.getCurrentChatId();
     try { await ensureOpeningStoryTime(); }
-    catch { engineState.lastError = '开场时间尚未保存，请在摘要页核对开场时间后重试。'; abort(true); return true; }
+    catch { engineState.lastError = '开场时间还没保存好，请到摘要页底部的「开场时间」核对后重试。'; abort(true); return true; }
     if (getContext()?.chat !== chat || getContext()?.chatMetadata !== metadata || getContext()?.getCurrentChatId?.() !== chatId) {
       abort(true); return true;
     }
@@ -594,10 +609,10 @@ export async function handleGenerationIntercept(
   if (opening >= 0) {
     const inflight = currentSummaryPromise();
     if (inflight) {
-      toast('正在整理开场白；仅提取有依据的时间，请稍候…', 'info');
+      toast('正在整理开场白，请稍等…', 'info');
       await inflight; // promise 永不 reject,不会卡死生成
     } else if (!busy) {
-      toast('正在整理开场白；仅提取有依据的时间，请稍候…', 'info');
+      toast('正在整理开场白，请稍等…', 'info');
       await runSummary(opening);
     }
     // 摘要落盘后 refreshInjection 已把「当前时间」刷成开场白时间;继续走洞判定(通常放行)。
@@ -615,10 +630,10 @@ export async function handleGenerationIntercept(
   if (holes.length === 1) {
     const inflight = currentSummaryPromise();
     if (inflight) {
-      toast('正在补摘前一楼层,请稍候…', 'info');
+      toast('正在补摘上一层楼，请稍等…', 'info');
       await inflight;
     } else if (!busy) {
-      toast('正在补摘前一楼层,请稍候…', 'info');
+      toast('正在补摘上一层楼，请稍等…', 'info');
       await runSummary(holes[0]);
     }
     holes = holesExceptLast(chat);
@@ -643,10 +658,10 @@ export async function handleGenerationIntercept(
     // 多行靠 {{newline}} 宏(sendMessageAs 走 substituteParams 会还原成换行)
     const text = [
       `【棱镜宝书】${BACKLOG_NOTICE_SENTINEL}`,
-      `发生了什么: 因为前面有楼层没有摘要，为了保证剧情的连续性，所以你需要先去给它补全摘要才能继续发送消息`,
-      `应该怎么做: 点开左下角魔法棒，打开棱镜宝书界面，在第一页的“未摘要楼层”中逐楼补摘，或使用“批量补摘”一次处理`,
-      `补全失败: 多半是API问题，多尝试不同的API`,
-      `补全成功: 在补全成功后，只需要把这一层提示楼层删掉，就可以继续正常生成了`
+      `发生了什么：前面有楼层还没有摘要。为了让剧情连贯，要先把它们补上才能继续发消息。`,
+      `怎么做：点左下角魔法棒打开棱镜宝书，在「摘要」页的「未摘要楼层」里逐层补摘，或点「批量补摘」一次处理。`,
+      `补摘失败：摘要页会写明原因（比如回复被截断、密钥不对），照提示调整，或换个 API 再试。`,
+      `补摘成功后：删掉这条提示，就能继续正常生成了。`
     ].join('{{newline}}');
     try {
       await exec(`/sendas name="棱镜宝书" ${text}`);
@@ -654,7 +669,7 @@ export async function handleGenerationIntercept(
       // 否则它会被下一轮当成真实 AI 楼再次要求补摘。
       normalizeBacklogNotices(chat);
     } catch (e) {
-      engineState.lastError = `积压提示楼插入失败: ${e instanceof Error ? e.message : String(e)}`;
+      engineState.lastError = `提示消息插入失败：${e instanceof Error ? e.message : String(e)}`;
     }
   }
   return true;
@@ -836,7 +851,7 @@ export async function maybeSummarizePrevAi(
         await afterSummaryHideAndInject(chat);
       })
       .catch(e => {
-        engineState.lastError = e instanceof Error ? e.message : String(e);
+        recordFailure(e);
       });
     // 早退/失败时 run 会先完成,不会因为启动屏障未触发而卡住正文生成。
     await Promise.race([
@@ -938,7 +953,7 @@ async function syncWindowHiddenState(chat: STMessage[]): Promise<void> {
             m.extra = extra;
           }
         }
-        engineState.lastError = `/unhide ${arg} 失败: ${e instanceof Error ? e.message : String(e)}`;
+        engineState.lastError = `取消隐藏楼层 ${arg} 失败：${e instanceof Error ? e.message : String(e)}`;
       }
     }
 
@@ -951,7 +966,7 @@ async function syncWindowHiddenState(chat: STMessage[]): Promise<void> {
       } catch (e) {
         // /hide 失败则回退到直接写 is_system,保证隐藏一定落地
         for (let i = start; i <= end; i++) if (chat[i]) chat[i].is_system = true;
-        engineState.lastError = `/hide ${arg} 失败: ${e instanceof Error ? e.message : String(e)}`;
+        engineState.lastError = `隐藏楼层 ${arg} 失败：${e instanceof Error ? e.message : String(e)}`;
       }
     }
   } else {
@@ -991,22 +1006,52 @@ async function syncWindowHiddenState(chat: STMessage[]): Promise<void> {
  *  - 未指派(空)→ 跟随主 API(requestViaMainApi → generateRaw,用主界面当前在用的 API,不带聊天历史)。
  * 主 API 也不可用(ST 无 generateRaw)时返回 error,调用方据此早退并写 lastError。
  */
-function resolveSender(
-  task: TaskType,
-): { send: (messages: ChatMsg[]) => Promise<string>; label: string } | { error: string } {
+interface Sender {
+  send: (messages: ChatMsg[]) => Promise<string>;
+  label: string;
+  /** 出错时告诉用户去哪里改设置。 */
+  settings: string;
+  mainApi: boolean;
+}
+
+function resolveSender(task: TaskType): Sender | { error: string } {
   const channel = getChannelForTask(task);
   if (channel) {
-    return { send: messages => requestCompletion(channel, messages), label: `渠道「${channel.name}」(${channel.model})` };
+    return {
+      send: messages => requestCompletion(channel, messages),
+      label: `渠道「${channel.name}」(${channel.model})`,
+      settings: `设置 → 副 API → ${channel.name || '未命名渠道'}`,
+      mainApi: false,
+    };
   }
   if (!mainApiAvailable()) {
-    return { error: '未指派副 API 渠道,且当前主 API 不可用(请填好主 API 后重试,或为本任务单独指派渠道)' };
+    return { error: '还没有可用的 API：这个任务没有指派副 API 渠道，酒馆的主 API 也连不上。请到「设置 → 副 API」添加并指派渠道，或者先连好酒馆的主 API。' };
   }
-  return { send: messages => requestViaMainApi(messages), label: '主 API(主界面当前在用)' };
+  return { send: messages => requestViaMainApi(messages), label: '主 API(主界面当前在用)', settings: '酒馆的主 API 设置', mainApi: true };
+}
+
+/**
+ * 给 API 失败补上「哪一楼/哪一步」和设置入口。主 API 拿不到结束原因,
+ * 截断只能从半截 JSON 推断,建议改用可以单独设置输出上限的副 API 渠道。
+ */
+function failureFor(error: unknown, prefix: string, sender: Sender): unknown {
+  if (sender.mainApi && error instanceof ApiError && error.kind === 'truncated') {
+    return apiFailure('truncated', `${prefix}：${error.title}`, '主 API 的服务商可能限制了单次输出长度；可以在设置 → 副 API 里给这个任务指派一个输出上限更高的渠道。', { detail: error.detail, partial: error.partial });
+  }
+  return withContext(error, prefix, sender.settings);
+}
+
+/** 主 API 不报结束原因;JSON 写到一半就结束,几乎可以确定是输出被截断。 */
+function unfinishedReply(raw: string): ApiError | null {
+  if (!looksLikeUnfinishedJson(raw)) return null;
+  return apiFailure('truncated', '回复不完整（JSON 写到一半就结束了），多半是输出达到了长度上限',
+    '请调大该 API 的「最大输出」；思考型模型的思考过程也算在输出里，降低思考强度也有帮助。');
 }
 
 /**
  * 发请求并解析,失败自动重试。失败 = 请求抛错 或 解析函数抛错(JSON 无效/缺字段)。
  * 最多重试 apiSettings.summaryMaxRetries 次(默认 1),即「首试 + N 次重试」共 N+1 次尝试。
+ * 密钥、地址、额度、输出上限这类重试也不会成功的失败直接停下,不白白重复请求。
  * 全部失败则抛出最后一次的错误,由调用方写 lastError。
  */
 async function sendAndParse<T>(
@@ -1021,16 +1066,23 @@ async function sendAndParse<T>(
     try {
       return parse(await send(request));
     } catch (e) {
-      lastErr = e;
-      if (e instanceof SummarySourceChangedError) throw e;
-      if (e instanceof SummaryResponseError) {
-        const correction: ChatMsg = { role: 'system', content: '上一次摘要结果未通过校验：' + e.message + '\n请重新输出完整结果；只依据原材料，不添加事实。' };
+      let error = e;
+      // 截断发生在完整 JSON 之后时(例如模型在结果后继续写说明),结果本身仍可使用。
+      const partial = partialReply(error);
+      if (partial && containsCompleteJson(partial)) {
+        try { return parse(partial); } catch (inner) { error = inner; }
+      }
+      lastErr = error;
+      if (error instanceof SummarySourceChangedError) throw error;
+      if (error instanceof SummaryResponseError) {
+        const correction: ChatMsg = { role: 'system', content: '上一次摘要结果未通过校验：' + error.message + '\n请重新输出完整结果；只依据原材料，不添加事实。' };
         // 保持 assistant 预填位于末尾；仅携带稳定校验错误，不回灌原始响应或累积纠错消息。
         const hasPrefill = messages.at(-1)?.role === 'assistant';
         request = hasPrefill ? [...messages.slice(0, -1), correction, messages.at(-1)!] : [...messages, correction];
       }
+      if (!isRetryable(error)) break;
       if (attempt < maxRetries) {
-        console.log(`[棱镜宝书] 第 ${attempt + 1} 次尝试失败,重试:`, e instanceof Error ? e.message : String(e));
+        console.log(`[棱镜宝书] 第 ${attempt + 1} 次尝试失败,重试:`, error instanceof Error ? error.message : String(error));
       }
     }
   }
@@ -1114,10 +1166,10 @@ function applyLeafForFloor(
   replaceLeaf?: LeafExtra,
 ): void {
   if (!chat[aiFloor]) {
-    throw new Error(`摘要落叶失败:楼层 #${aiFloor} 已不存在(可能在请求期间被删除)`);
+    throw new Error(`摘要没有保存：楼层 #${aiFloor} 已经不在了（可能在请求期间被删除）。`);
   }
   if (replaceLeaf && getLeaf(chat[aiFloor]) !== replaceLeaf) {
-    throw new Error(`重新摘要失败:楼层 #${aiFloor} 的原摘要已在请求期间发生变化`);
+    throw new Error(`重新摘要没有保存：楼层 #${aiFloor} 的原摘要在请求期间被改动了。`);
   }
   // 时间锚点:从该楼正文标签读起止(先裁剪到正文段,跳过思维链/状态栏里混入的同名标签)
   const tag = parseTimeRange(clampToTimeTags(chat[aiFloor].mes));
@@ -1170,26 +1222,26 @@ function applyLeafForFloor(
 async function summarizeFloorWork(
   chat: STMessage[],
   aiFloor: number,
-  sender: { send: (messages: ChatMsg[]) => Promise<string>; label: string },
+  sender: Sender,
   options: Pick<RunSummaryOptions, 'replaceLeaf' | 'onRequestStart' | 'initializeOpening'> = {},
 ): Promise<void> {
   const ctx = getContext();
-  if (!ctx) throw new Error('无 ST 上下文');
+  if (!ctx) throw new Error('酒馆上下文还没准备好。');
   if (!chat[aiFloor]) {
-    throw new Error(`摘要失败:楼层 #${aiFloor} 已不存在(可能在请求期间被删除)`);
+    throw new Error(`楼层 #${aiFloor} 已经不在了（可能在请求期间被删除）。`);
   }
 
   const covered = options.replaceLeaf ? coveredBeforeFloor(chat, aiFloor) : coveredSet(chat);
   const targets = floorTargets(chat, aiFloor, covered);
   if (!hasStoryBody(chat[aiFloor].mes)) {
-    throw new Error(`楼层 #${aiFloor} 没有可提取的故事正文（仅时间标签、思考或旁注）；未请求模型，也未保存摘要。请先核对该楼正文。`);
+    throw new Error(`楼层 #${aiFloor} 没有可提取的故事正文（只有时间标签、思考或旁注），这次没有请求 AI。请先检查这层楼的内容。`);
   }
   if (options.initializeOpening) {
     const metadata = ctx.chatMetadata;
     const chatId = ctx.getCurrentChatId?.();
     await ensureOpeningStoryTime();
     if (getContext()?.chat !== chat || getContext()?.chatMetadata !== metadata || getContext()?.getCurrentChatId?.() !== chatId) {
-      throw new Error('开场初始化期间聊天发生变化，未请求摘要。');
+      throw new Error('设定开场时间时聊天切换了，这次没有请求摘要。');
     }
   }
   const content = renderMessages(chat, targets, ctx.name1, ctx.name2);
@@ -1202,7 +1254,7 @@ async function summarizeFloorWork(
     if (issue) throw new Error(issue);
     if (getContext()?.chat !== chat || getContext()?.chatMetadata !== requestMetadata || getContext()?.getCurrentChatId?.() !== requestChatId || initialStoryTime() !== requestInitialTime ||
         sources.some(s => chat[s.i] !== s.message || s.message.mes !== s.text || s.message.swipe_id !== s.swipe)) {
-      throw new Error('摘要期间聊天或目标正文发生变化，本次结果未写入；请重新摘要。');
+      throw new Error('摘要期间聊天或这层正文发生变化，结果没有写入，请重新摘要。');
     }
   };
 
@@ -1271,6 +1323,10 @@ async function summarizeFloorWork(
   assertUnchanged();
   options.onRequestStart?.();
   const delta = await sendAndParse(request => { assertUnchanged(); return sender.send(request); }, messages, raw => {
+    if (extractJsonObject(raw) === null) {
+      const unfinished = unfinishedReply(raw);
+      if (unfinished) throw unfinished;
+    }
     const d = parseSummaryResponse(raw, {
       maxChars,
       requireStateChanges: builtin,
@@ -1299,7 +1355,7 @@ async function summarizeFloorWork(
       // 只标记解析失败：尚未进入 applyLeafForFloor，不把提交后的其他故障说成未保存。
       throw new SummaryResponseError('楼层 #' + aiFloor + ' 摘要未保存（该楼已有记录保持不变）。' + error.message);
     }
-    throw error;
+    throw failureFor(error, `楼层 #${aiFloor} 摘要未完成`, sender);
   });
   assertUnchanged();
 
@@ -1327,7 +1383,7 @@ async function runSummaryInner(aiFloor: number, options: RunSummaryOptions = {})
   const chat = ctx.chat ?? [];
   if (!isAiFloor(chat[aiFloor])) { console.log('[棱镜宝书] runSummary 早退:非 AI 楼', aiFloor); return; }
   if (options.replaceLeaf && getLeaf(chat[aiFloor]) !== options.replaceLeaf) {
-    engineState.lastError = `重新摘要失败:楼层 #${aiFloor} 的原摘要已发生变化`;
+    engineState.lastError = `重新摘要没有进行：楼层 #${aiFloor} 的原摘要已经变了。`;
     return;
   }
   console.log('[棱镜宝书] runSummary 即将发请求,', sender.label);
@@ -1340,7 +1396,7 @@ async function runSummaryInner(aiFloor: number, options: RunSummaryOptions = {})
     // 摘要积累到阈值则触发总结
     if (options.checkResummary !== false) await checkResummary();
   } catch (e) {
-    engineState.lastError = e instanceof Error ? e.message : String(e);
+    recordFailure(e);
   } finally {
     busy = false;
     engineState.running = false;
@@ -1421,11 +1477,11 @@ async function batchBackfillWork(opts: BatchBackfillOpts): Promise<BatchBackfill
     for (const f of floors) {
       if (batchState.cancelRequested) { cancelled = true; break; }
       if (getContext()?.chat !== chat || getContext()?.getCurrentChatId?.() !== chatId) {
-        throw new Error('已切换聊天，批量记忆处理停止；请返回原聊天后继续。');
+        throw new Error('聊天切换了，批量补摘已停止，请回到原来的聊天继续。');
       }
       const source = queued.get(f)!;
       if (!isAiFloor(chat[f]) || chat[f] !== source.message || chat[f].mes !== source.text || chat[f].swipe_id !== source.swipe) {
-        throw new Error('楼层发生变化，批量记忆处理停止。');
+        throw new Error('有楼层被改动，批量补摘已停止。');
       }
       const replaceLeaf = opts.regenerate ? getLeaf(chat[f]) ?? undefined : undefined;
       await summarizeFloorWork(chat, f, sender, { replaceLeaf });
@@ -1435,7 +1491,7 @@ async function batchBackfillWork(opts: BatchBackfillOpts): Promise<BatchBackfill
     // 连锁触发总结(可能跨多层),失败写 lastError 不影响已落叶子
     if (!cancelled) await checkResummary();
   } catch (e) {
-    engineState.lastError = e instanceof Error ? e.message : String(e);
+    recordFailure(e);
   } finally {
     busy = false;
     engineState.running = false;
@@ -1550,7 +1606,7 @@ function summaryRequestGuard(chat: STMessage[], sourceIds: string[]): () => void
   const id = ctx?.getCurrentChatId?.();
   const meta = ctx?.chatMetadata;
   const roots = new Set(sourceIds);
-  const changed = () => new SummarySourceChangedError('本次总结的来源摘要已被修改、删除或重新收纳，结果未写入；原摘要仍保留，请重新选择后总结。');
+  const changed = () => new SummarySourceChangedError('要合并的摘要在这期间被修改、删除或合并了，结果未写入；原摘要都还在，请重新选择后再合并。');
   function snapshot(): string {
     const comps = new Map(memory.summaries.map(s => [s.id, s]));
     const duplicateIds = new Set<string>();
@@ -1613,7 +1669,7 @@ function summaryRequestGuard(chat: STMessage[], sourceIds: string[]): () => void
     const issue = memoryWriteIssue();
     if (issue) throw new SummarySourceChangedError(issue);
     if (current?.chat !== chat || current?.chatMetadata !== meta || current?.getCurrentChatId?.() !== id) {
-      throw new SummarySourceChangedError('总结期间已切换聊天，结果未写入；请回到原聊天后重试。');
+      throw new SummarySourceChangedError('总结期间切换了聊天，结果未写入，请回到原来的聊天再试。');
     }
     if (snapshot() !== sources) throw changed();
   };
@@ -1646,6 +1702,7 @@ export async function checkResummary(): Promise<number> {
     const sender = resolveSender('resummary');
     if ('error' in sender) {
       engineState.lastError = sender.error;
+      engineState.lastFailure = null;
       return made;
     }
 
@@ -1653,6 +1710,8 @@ export async function checkResummary(): Promise<number> {
     const { content, hints } = joinNodesForResummary(batch);
     // 传**输出层级**(level+1):L1(普通总结,300-500字)/ L2+(二次总结,字数随输入动态)
     const prompt = buildResummaryPrompt({ user: ctx.name1, char: ctx.name2, content, level: level + 1 });
+    // 输出层级 level+1:为 1 是普通总结,≥2 是二次总结
+    const what = level + 1 === 1 ? '总结' : '二次总结';
 
     try {
       const assertSourcesUnchanged = summaryRequestGuard(chat, batch.map(n => n.id));
@@ -1668,14 +1727,7 @@ export async function checkResummary(): Promise<number> {
       // 发请求 + 解析,失败按设置重试(请求报错或 JSON 无效/缺 summary 都算失败)
       const delta = await sendAndParse(request => { assertSourcesUnchanged(); return sender.send(request); }, messages, raw => {
         console.log('[棱镜宝书] 总结原始返回(未清洗):\n', raw);
-        const d = extractJsonObject<{ summary?: string }>(raw);
-        const summary = llmString(d?.summary);
-        if (!summary) {
-          // 输出层级 level+1:为 1 是普通总结,≥2 是二次总结;有文本=掉格式,空白=空回
-          const what = level + 1 === 1 ? '总结' : '二次总结';
-          throw new Error(raw.trim() ? `${what}失败:AI道歉或掉格式` : `${what}失败:AI空回`);
-        }
-        return { summary };
+        return parseResummaryReply(raw, what);
       });
 
       assertSourcesUnchanged();
@@ -1697,11 +1749,24 @@ export async function checkResummary(): Promise<number> {
       refreshInjection();
       // 不 break:继续外层 for,上一层可能也攒够了 → 连锁压更高层
     } catch (e) {
-      engineState.lastError = e instanceof Error ? e.message : String(e);
+      recordFailure(failureFor(e, `${what}未完成`, sender));
       return made; // 本层失败则停止连锁,下次再试
     }
   }
   return made;
+}
+
+/** 解析总结回复;拿不到 summary 时说清是截断、空回还是没按格式输出。 */
+function parseResummaryReply(raw: string, what: string): { summary: string } {
+  const d = extractJsonObject<{ summary?: string }>(raw);
+  const summary = llmString(d?.summary);
+  if (summary) return { summary };
+  if (d === null) {
+    const unfinished = unfinishedReply(raw);
+    if (unfinished) throw unfinished;
+  }
+  if (!raw.trim()) throw new Error(`${what}失败：模型返回了空内容，可以重试或换个渠道。`);
+  throw new Error(`${what}失败：模型没有按要求输出 JSON（可能是拒答，或只写了说明文字），可以重试或换个模型。`);
 }
 
 /* ============ 手动强制总结(多选合并,无视阈值) ============ */
@@ -1769,19 +1834,19 @@ function collectSelectableNodes(chat: STMessage[]): Map<string, SelectableNode> 
 export async function summarizeSelected(nodeIds: string[]): Promise<{ made: number; error?: string }> {
   const issue = memoryWriteIssue();
   if (issue) { engineState.lastError = issue; return { made: 0, error: issue }; }
-  if (!engineActiveHere()) return { made: 0, error: '插件未在当前聊天生效' };
-  if (busy) return { made: 0, error: '正忙,请稍后再试' };
+  if (!engineActiveHere()) return { made: 0, error: '当前聊天没有启用棱镜宝书。' };
+  if (busy) return { made: 0, error: '有任务正在进行，请稍后再试。' };
   if (nodeIds.length < 2) return { made: 0, error: '至少选择两条才能合并' };
 
   const ctx = getContext();
-  if (!ctx) return { made: 0, error: '无 ST 上下文' };
+  if (!ctx) return { made: 0, error: '酒馆上下文还没准备好。' };
   const chat = ctx.chat ?? [];
 
   const all = collectSelectableNodes(chat);
   const picked: SelectableNode[] = [];
   for (const id of nodeIds) {
     const n = all.get(id);
-    if (!n) return { made: 0, error: '有选中项已失效,请刷新后重试' };
+    if (!n) return { made: 0, error: '选中的内容有变化，请重新选择。' };
     picked.push(n);
   }
   // 按覆盖楼层升序(与摘要森林时序一致);无楼层的排最后
@@ -1800,13 +1865,13 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
   const positions: number[] = [];
   for (const n of picked) {
     const p = posOf.get(n.id);
-    if (p === undefined) return { made: 0, error: '选中项里有已被收纳的摘要,请只选顶层摘要' };
+    if (p === undefined) return { made: 0, error: '选中的条目里有已经合并过的摘要，请只选最上层的条目。' };
     positions.push(p);
   }
   positions.sort((a, b) => a - b);
   for (let i = 1; i < positions.length; i++) {
     if (positions[i] !== positions[i - 1] + 1) {
-      return { made: 0, error: '只能合并连续的摘要(中间不能跳过其它摘要)' };
+      return { made: 0, error: '只能合并相邻的条目（中间不能隔着别的）。' };
     }
   }
 
@@ -1816,6 +1881,7 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
   const level = Math.max(...picked.map(n => n.level)) + 1;
   const { content, hints } = joinNodesForResummary(picked);
   const prompt = buildResummaryPrompt({ user: ctx.name1, char: ctx.name2, content, level });
+  const what = level === 1 ? '总结' : '二次总结';
 
   busy = true;
   engineState.running = true;
@@ -1833,13 +1899,7 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
     );
     const delta = await sendAndParse(request => { assertSourcesUnchanged(); return sender.send(request); }, messages, raw => {
       console.log('[棱镜宝书] 强制总结原始返回(未清洗):\n', raw);
-      const d = extractJsonObject<{ summary?: string }>(raw);
-      const summary = llmString(d?.summary);
-      if (!summary) {
-        const what = level === 1 ? '总结' : '二次总结';
-        throw new Error(raw.trim() ? `${what}失败:AI道歉或掉格式` : `${what}失败:AI空回`);
-      }
-      return { summary };
+      return parseResummaryReply(raw, what);
     });
 
     assertSourcesUnchanged();
@@ -1857,9 +1917,8 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
     engineState.lastRunAt = Date.now();
     recomputeDerived();
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    engineState.lastError = msg;
-    return { made: 0, error: msg };
+    recordFailure(failureFor(e, `合并${what}未完成`, sender));
+    return { made: 0, error: engineState.lastError };
   } finally {
     busy = false;
     engineState.running = false;

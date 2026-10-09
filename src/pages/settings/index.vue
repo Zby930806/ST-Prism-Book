@@ -5,9 +5,11 @@ import Collapsible from '@/components/Collapsible.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import BbsSelect from '@/components/BbsSelect.vue';
 import Icon from '@/components/Icon.vue';
+import BrandMark from '@/components/BrandMark.vue';
 import PageHeader from '@/components/PageHeader.vue';
 import ModalMask from '@/components/ModalMask.vue';
-import { fetchModels, testChannel } from '@/api/client';
+import { ApiError, fetchModels, testChannel } from '@/api/client';
+import { describeFailure } from '@/api/errors';
 import { apiSettings, newChannel, resolveVectorModel, sanitizeTagName, type ApiChannel, type Verbosity } from '@/api/settings';
 import { getContext } from '@/st/context';
 import {
@@ -188,11 +190,19 @@ function removeChannel(id: string) {
   }
 }
 
-const testing = ref<Record<string, string>>({});
+/** 测试、拉取模型等操作的结果；tone 决定提示条的颜色。 */
+type Notice = { tone: 'busy' | 'ok' | 'warn' | 'error'; text: string; detail?: string };
+const TONE_CLASS: Record<Notice['tone'], string> = { busy: '', ok: 'is-success', warn: 'is-warning', error: 'is-danger' };
+/** 向量、迁移等模块抛出的是写好的中文说明，原样显示；网络异常等没分类的错误换成可读的说明。 */
+function readableError(e: unknown, fallback: string): string {
+  return e instanceof ApiError || e instanceof TypeError || !(e instanceof Error) ? describeFailure(e, fallback).message : e.message;
+}
+
+const testing = ref<Record<string, Notice>>({});
 async function doTest(ch: ApiChannel) {
-  testing.value[ch.id] = '测试中…';
+  testing.value[ch.id] = { tone: 'busy', text: '正在测试…' };
   const r = await testChannel(ch);
-  testing.value[ch.id] = r.message;
+  testing.value[ch.id] = { tone: !r.ok ? 'error' : r.warning ? 'warn' : 'ok', text: r.message, detail: r.detail };
 }
 
 // 各渠道拉取到的模型列表 + 拉取状态
@@ -200,14 +210,17 @@ const models = ref<Record<string, string[]>>({});
 const loadingModels = ref<Record<string, boolean>>({});
 async function pullModels(ch: ApiChannel) {
   loadingModels.value[ch.id] = true;
-  testing.value[ch.id] = '';
+  delete testing.value[ch.id];
   try {
     const list = await fetchModels(ch);
     models.value[ch.id] = list;
     if (list.length && !ch.model) ch.model = list[0];
-    if (!list.length) testing.value[ch.id] = '未返回任何模型';
+    testing.value[ch.id] = list.length
+      ? { tone: 'ok', text: `拉到 ${list.length} 个模型，点「模型」输入框就能选。` }
+      : { tone: 'warn', text: '接口没有返回任何模型，可以直接填写模型名。' };
   } catch (e) {
-    testing.value[ch.id] = e instanceof Error ? e.message : String(e);
+    const view = describeFailure(e, '请检查地址、网络或超时设置后再试');
+    testing.value[ch.id] = { tone: 'error', text: `拉取模型列表失败：${view.message}`, detail: view.detail };
   } finally {
     loadingModels.value[ch.id] = false;
   }
@@ -258,35 +271,35 @@ const PROMPT_METAS: PromptMeta[] = [
   {
     key: 'summary',
     label: '摘要提示词',
-    hint: '把单楼对话整理成结构化记忆(摘要正文 + 时间/地点/物品/计划)。',
+    hint: '把一楼的对话整理成记忆：摘要正文，加上时间、地点、物品、计划等变化。',
     builtin: SUMMARY_PROMPT,
     macros: SUMMARY_MACROS,
   },
   {
     key: 'resummary',
     label: '总结提示词',
-    hint: '把多条楼层摘要压成一条 L1 总结(普通总结,固定 300-500 字)。',
+    hint: '把多条楼层摘要合并成一条 L1 总结，字数跟着「字数档位」走。',
     builtin: RESUMMARY_PROMPT,
     macros: RESUMMARY_MACROS,
   },
   {
     key: 'resummary2',
     label: '二次总结提示词',
-    hint: '把多条总结再压一层(L1+ → 更上层)。动态字数区间:详细为输入的 40%–50%,精简为 30%–40%。',
+    hint: '把多条总结再往上合并一层（L1 及以上 → 更高一层）。字数按输入长度算：详细约 40%–50%，精简约 30%–40%。',
     builtin: RESUMMARY2_PROMPT,
     macros: RESUMMARY2_MACROS,
   },
   {
     key: 'jailbreak',
-    label: '任务说明(旧破限)' ,
-    hint: '作为置顶 system 指明整理任务与资料边界。模式可选默认、自定义、禁用;自定义留空即不发送。',
+    label: '任务说明（旧称破限）' ,
+    hint: '放在最前面的 system 消息，说明这是整理资料的任务、资料的边界在哪。可选默认、自定义、禁用；自定义留空就不发送。',
     builtin: JAILBREAK_PROMPT,
     macros: [],
   },
   {
     key: 'timeTag',
-    label: '固定提示词(时间标签)',
-    hint: '注入主对话,要求 AI 每条正文前后输出时间标签,作为剧情时间锚点(摘要与新剧情据此对齐,不再错乱)。需开启下方「正文时间标签」开关。留空用内置默认。',
+    label: '时间标签提示词',
+    hint: '发给正文模型，要求每条回复前后写上时间标签，作为剧情时间的锚点，摘要和后续剧情据此对齐。打开「启用自动摘要」后生效；留空用内置默认。',
     builtin: TIME_TAG_PROMPT,
     macros: [],
   },
@@ -333,9 +346,9 @@ interface VectorRoleMeta {
   label: string;
 }
 const VECTOR_ROLES: VectorRoleMeta[] = [
-  { key: 'embedding', label: 'Embedding(向量化,必填)' },
-  { key: 'rerank', label: 'Rerank(重排)' },
-  { key: 'queryRewrite', label: 'Query 重写' },
+  { key: 'embedding', label: 'Embedding（向量化，必填）' },
+  { key: 'rerank', label: 'Rerank（重排，可不填）' },
+  { key: 'queryRewrite', label: 'Query 重写（必填）' },
 ];
 
 /* —— 向量端点:每角色直接填 地址/密钥/模型;模型可一键拉取(combobox)。 —— */
@@ -344,7 +357,7 @@ const vecShowKey = ref<Record<VectorRole, boolean>>({ embedding: false, rerank: 
 const vecEpOpen = ref<Record<VectorRole, boolean>>({ embedding: false, rerank: false, queryRewrite: false });
 const vecModels = ref<Record<VectorRole, string[]>>({ embedding: [], rerank: [], queryRewrite: [] });
 const vecLoadingModels = ref<Record<VectorRole, boolean>>({ embedding: false, rerank: false, queryRewrite: false });
-const vecModelMsg = ref<Record<VectorRole, string>>({ embedding: '', rerank: '', queryRewrite: '' });
+const vecModelMsg = ref<Record<VectorRole, Notice | null>>({ embedding: null, rerank: null, queryRewrite: null });
 // combobox:当前展开的角色(null=都收起)+ 过滤词
 const vecModelMenuOpen = ref<VectorRole | null>(null);
 const vecModelQuery = ref('');
@@ -353,18 +366,20 @@ async function pullVecModels(role: VectorRole) {
   // 解析回落后的地址/密钥:rerank/query 留空时自动用 Embedding 的去拉(模型仍写回本角色)
   const ep = resolveVectorModel(role);
   if (!ep.url.trim()) {
-    vecModelMsg.value[role] = role === 'embedding' ? '请先填 Embedding 地址' : '请先填本角色或 Embedding 的地址';
+    vecModelMsg.value[role] = { tone: 'warn', text: role === 'embedding' ? '先填 Embedding 的 API 地址。' : '先填这一项或 Embedding 的 API 地址。' };
     return;
   }
   vecLoadingModels.value[role] = true;
-  vecModelMsg.value[role] = '';
+  vecModelMsg.value[role] = null;
   try {
     const list = await fetchModels({ url: ep.url, key: ep.key, timeoutSec: ep.timeoutSec });
     vecModels.value[role] = list;
     if (list.length && !apiSettings.vector[role].model) apiSettings.vector[role].model = list[0];
-    if (!list.length) vecModelMsg.value[role] = '未返回任何模型';
+    vecModelMsg.value[role] = list.length
+      ? { tone: 'ok', text: `拉到 ${list.length} 个模型，点模型输入框就能选。` }
+      : { tone: 'warn', text: '接口没有返回任何模型，可以直接填写模型名。' };
   } catch (e) {
-    vecModelMsg.value[role] = e instanceof Error ? e.message : String(e);
+    vecModelMsg.value[role] = { tone: 'error', text: `拉取模型列表失败：${describeFailure(e, '请检查地址、网络或超时设置后再试').message}` };
   } finally {
     vecLoadingModels.value[role] = false;
   }
@@ -414,19 +429,21 @@ async function confirmUpdate() {
   try {
     await performUpdate();
     // performUpdate 成功后会自动刷新页面;走到这里通常是已触发刷新倒计时
-    toastr?.success?.('更新成功,正在刷新页面…', '棱镜宝书');
+    toastr?.success?.('更新成功，正在刷新页面…', '棱镜宝书');
   } catch (e) {
-    toastr?.error?.(`更新失败:${e instanceof Error ? e.message : String(e)}`, '棱镜宝书');
+    toastr?.error?.(`更新失败：${e instanceof Error ? e.message : String(e)}`, '棱镜宝书');
   }
 }
 
 /* —— 索引维护:手动重建当前聊天向量索引 —— */
 const vecIndexing = ref(false);
 const vecIndexMsg = ref('');
+const vecIndexError = ref(false);
 async function doRebuildIndex() {
   if (vecIndexing.value) return;
   vecIndexing.value = true;
   vecIndexMsg.value = '';
+  vecIndexError.value = false;
   resetVectorStoreProbe(); // 重测后端,确保索引落到当前真实可用的 store
   try {
     const result = await syncVectorIndex();
@@ -434,9 +451,10 @@ async function doRebuildIndex() {
       result.embedded > 0 ? `重新生成 ${result.embedded} 条向量` : '',
       result.payloadUpdated > 0 ? `更新 ${result.payloadUpdated} 条全文/时间` : '',
     ].filter(Boolean);
-    vecIndexMsg.value = parts.length ? `已${parts.join('，')}。` : '没有需要更新的索引(已是最新)。';
+    vecIndexMsg.value = parts.length ? `已${parts.join('，')}。` : '索引已经是最新的。';
   } catch (e) {
-    vecIndexMsg.value = `索引失败:${e instanceof Error ? e.message : String(e)}`;
+    vecIndexError.value = true;
+    vecIndexMsg.value = `重建索引失败：${readableError(e, '请检查向量记忆的设置后再试')}`;
   } finally {
     vecIndexing.value = false;
     void refreshVecBackend();
@@ -455,11 +473,13 @@ async function doClearIndex() {
   vecClearConfirm.value = false;
   vecClearing.value = true;
   vecIndexMsg.value = '';
+  vecIndexError.value = false;
   try {
     const n = await clearVectorIndex();
-    vecIndexMsg.value = `已清空当前聊天向量索引(删除 ${n} 条)。可点「重建」从头索引。`;
+    vecIndexMsg.value = `已清空这个聊天的向量索引（${n} 条）。需要时点「重建」重新索引。`;
   } catch (e) {
-    vecIndexMsg.value = `清空失败:${e instanceof Error ? e.message : String(e)}`;
+    vecIndexError.value = true;
+    vecIndexMsg.value = `清空索引失败：${readableError(e, '请稍后再试')}`;
   } finally {
     vecClearing.value = false;
     void refreshVecBackend();
@@ -478,9 +498,9 @@ async function runCarryover() {
   carryMsg.value = '';
   try {
     const ok = await createNewChatWithCarryover();
-    carryMsg.value = ok ? '已创建新对话。' : '创建未完成(详见提示)。';
+    carryMsg.value = ok ? '已创建新对话。' : '没有创建成功，原因见弹出的提示。';
   } catch (e) {
-    carryMsg.value = `创建失败:${e instanceof Error ? e.message : String(e)}`;
+    carryMsg.value = `创建失败：${readableError(e, '请稍后再试')}`;
   } finally {
     carrying.value = false;
   }
@@ -495,8 +515,8 @@ const migratePlan = computed<MigrationPlan>(() => computeMigrationPlan());
 // 确认文案随「是否覆盖」变化
 const migrateConfirmText = computed(() =>
   migratePlan.value.willOverwrite
-    ? '当前聊天已有棱镜宝书数据,迁移会覆盖现有摘要并在各楼写入数据。继续吗?'
-    : '将把当前聊天里的 Horae 旧数据迁移成棱镜宝书记忆。继续吗?',
+    ? '这个聊天已经有棱镜宝书的数据，迁移会覆盖现有摘要，并在各楼写入数据。继续吗？'
+    : '会把这个聊天里 Horae 的旧数据转成棱镜宝书的记忆。继续吗？',
 );
 async function runMigrate() {
   migrateConfirmOpen.value = false;
@@ -504,9 +524,9 @@ async function runMigrate() {
   migrateMsg.value = '';
   try {
     const ok = await runHoraeMigration();
-    migrateMsg.value = ok ? '迁移完成。' : '迁移未完成(详见提示)。';
+    migrateMsg.value = ok ? '迁移完成。' : '迁移没有完成，原因见弹出的提示。';
   } catch (e) {
-    migrateMsg.value = `迁移失败:${e instanceof Error ? e.message : String(e)}`;
+    migrateMsg.value = `迁移失败：${readableError(e, '请稍后再试')}`;
   } finally {
     migrating.value = false;
   }
@@ -687,22 +707,22 @@ const DATA_MACROS = [
   {
     token: '{{bbsInjectedHistory}}',
     title: '正常注入历史',
-    desc: '与棱镜宝书正常注入一致,自动跳过滑动窗口内仍发送全文的摘要。',
+    desc: '和棱镜宝书平时注入的一样，会跳过还在发全文的楼层的摘要。',
   },
   {
     token: '{{bbsHistory}}',
     title: '全部压缩历史',
-    desc: '返回当前聊天全部有效摘要与总结,包括滑动窗口内已有摘要的楼层。',
+    desc: '当前聊天全部有效的摘要和总结，包括还在发全文的楼层。',
   },
   {
     token: '{{bbsVars}}',
     title: '全部变量',
-    desc: '返回当前自定义变量树的紧凑 JSON。',
+    desc: '当前的自定义变量树，紧凑的 JSON 格式。',
   },
   {
     token: '{{bbsVar::路径}}',
     title: '单个变量',
-    desc: '按路径读取变量,例如 {{bbsVar::关系.爱丽丝.好感度}}。需要新版宏引擎。',
+    desc: '按路径读取变量，例如 {{bbsVar::关系.爱丽丝.好感度}}。需要酒馆的新版宏引擎。',
   },
 ] as const;
 
@@ -711,7 +731,7 @@ async function copyDataMacro(token: string) {
     await navigator.clipboard.writeText(token);
     toast(`已复制 ${token}`, 'success');
   } catch {
-    toast('复制失败,请手动选择宏文本', 'error');
+    toast('复制失败，请手动选中宏文本复制。', 'error');
   }
 }
 
@@ -723,7 +743,7 @@ function exportPublicApiDocument() {
   toast('公共接口文档已导出', 'success');
 }
 
-/* 页面导航与概览只读取现有状态，不写入配置，也不发起连接测试。 */
+/* 设置目录：只在页内跳转，不改配置。 */
 const settingsRoot = ref<HTMLElement | null>(null);
 const SETTINGS_GROUPS = [
   { id: 'common', label: '常用设置', icon: 'settings', hint: 'API · 摘要 · 外观' },
@@ -739,13 +759,6 @@ function goToSettingsGroup(id: string) {
   heading.scrollIntoView({ block: 'start', behavior: 'auto' });
   heading.focus({ preventScroll: true });
 }
-function assignedChannelName(id: string): string {
-  if (!id) return '跟随主 API';
-  return apiSettings.channels.find(channel => channel.id === id)?.name ||
-    (apiSettings.channels.some(channel => channel.id === id) ? '未命名渠道' : '渠道不存在，请重新指派');
-}
-const currentThemeLabel = computed(() => THEMES.find(theme => theme.value === ui.theme)?.label || ui.theme);
-const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(meta.key)).length);
 
 </script>
 
@@ -754,8 +767,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
     <PageHeader
       icon="settings"
       title="设置"
-      eyebrow="棱镜宝书 · 配置中心"
-      description="让记忆按你的方式运转。管理模型、摘要与召回，再按需调整高级选项。"
+      description="摘要用哪个 API、记多少、给正文模型看什么，都在这里调。"
     >
       <template #actions>
         <div class="bbs-ver-row">
@@ -772,16 +784,13 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
       </template>
     </PageHeader>
 
-    <div class="prism-overview" aria-label="当前配置概览">
+    <div class="prism-overview">
       <div class="bbs-master" :class="{ 'is-off': !apiSettings.enabled }">
-        <span class="prism-engine-icon" aria-hidden="true"><Icon name="sparkles" /></span>
         <div class="bbs-master-text">
-          <span class="prism-eyebrow">记忆引擎</span>
-          <h3 class="bbs-master-title">{{ apiSettings.enabled ? '已启用，让故事继续被记住' : '已停用，已有记忆仍然保留' }}</h3>
-          <p class="prism-master-description">{{ apiSettings.enabled ? '按下方配置执行注入、摘要、总结与旧楼隐藏。' : '暂停注入、摘要、总结与旧楼隐藏；可继续编辑配置。' }}</p>
+          <h3 class="bbs-master-title">{{ apiSettings.enabled ? '棱镜宝书已启用' : '棱镜宝书已停用' }}</h3>
+          <p class="prism-master-description">{{ apiSettings.enabled ? '摘要、总结、隐藏旧楼和记忆注入，都按下面的设置进行。' : '不摘要、不注入，也不隐藏旧楼。已有的记忆都还在，设置照常可以改。' }}</p>
         </div>
         <div class="prism-master-control">
-          <span class="prism-state" :class="{ 'is-muted': !apiSettings.enabled }">{{ apiSettings.enabled ? '已启用' : '已停用' }}</span>
           <button
             type="button"
             role="switch"
@@ -794,33 +803,10 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
           ><span class="bbs-toggle-knob"></span></button>
         </div>
       </div>
-      <details class="prism-config-details">
-        <summary>配置概览 <span>查看渠道、自动摘要与召回状态</span></summary>
-      <dl class="prism-status-grid">
-        <div class="prism-status-item">
-          <dt><Icon name="plug" /> 任务渠道</dt>
-          <dd><strong>{{ apiSettings.channels.length }} 个副 API 渠道</strong><span>摘要：{{ assignedChannelName(apiSettings.assignments.summary) }}<br />总结：{{ assignedChannelName(apiSettings.assignments.resummary) }}</span></dd>
-        </div>
-        <div class="prism-status-item">
-          <dt><Icon name="summary" /> 自动摘要</dt>
-          <dd><strong>{{ !apiSettings.enabled ? '随引擎暂停' : apiSettings.autoSummaryEnabled ? '已开启' : '未开启' }}</strong><span>配置{{ apiSettings.autoSummaryEnabled ? '开启' : '关闭' }} · 保留最近 {{ apiSettings.keepRecent }} 条 AI 全文</span></dd>
-        </div>
-        <div class="prism-status-item">
-          <dt><Icon name="vars" /> 向量记忆</dt>
-          <dd><strong>{{ !apiSettings.enabled ? '随引擎暂停' : apiSettings.vector.enabled ? '已开启' : '未开启' }}</strong><span>配置{{ apiSettings.vector.enabled ? '开启' : '关闭' }} · {{ apiSettings.vector.embedding.model || '尚未填写向量模型' }}</span></dd>
-        </div>
-        <div class="prism-status-item">
-          <dt><Icon name="sun" /> 界面与模板</dt>
-          <dd><strong>{{ currentThemeLabel }}主题</strong><span>{{ customPromptCount }} 项自定义提示词 · {{ apiSettings.summaryOnlyMode ? '仅注入剧情摘要' : '按配置注入状态' }}</span></dd>
-        </div>
-      </dl>
-      <p class="prism-overview-note">以上为当前配置，不代表 API 连接测试结果。普通设置直接修改；渠道与提示词在编辑窗口点「完成」后写回。</p>
-      </details>
     </div>
 
     <div class="prism-settings-layout">
       <nav class="prism-settings-nav" aria-label="设置分组目录">
-        <span class="prism-nav-label">设置目录</span>
         <button v-for="group in SETTINGS_GROUPS" :key="group.id" type="button" :aria-controls="'prism-settings-' + group.id" @click="goToSettingsGroup(group.id)">
           <Icon :name="group.icon" />
           <span><strong>{{ group.label }}</strong><small>{{ group.hint }}</small></span>
@@ -830,13 +816,12 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
       <div class="bbs-sections">
         <section class="prism-settings-group prism-group-common" aria-labelledby="prism-settings-common">
           <header class="prism-group-head">
-            <span class="prism-group-number" aria-hidden="true">01</span>
-            <div><h2 id="prism-settings-common" tabindex="-1">常用设置</h2><p>先选择摘要与总结使用的渠道，再调整记忆节奏和界面偏好。</p></div>
-            <span class="prism-group-tag">日常配置</span>
+            <h2 id="prism-settings-common" tabindex="-1">常用设置</h2>
+            <p>摘要用的 API、摘要和总结的节奏，以及界面外观。</p>
           </header>
           <div class="prism-group-cards">
       <Collapsible class="prism-settings-card" title="副 API" :open="true">
-        <p class="prism-card-intro">为摘要、总结分别指派渠道；选择「跟随主 API」时沿用酒馆主 API。添加后可随时点击渠道编辑或测试。</p>
+        <p class="prism-card-intro">摘要和总结可以分别指定渠道；选「跟随主 API」就用酒馆当前连接的 API。点渠道可以修改或测试。</p>
         <!-- 任务指派 -->
         <div class="bbs-field bbs-assign">
           <div class="bbs-assign-row">
@@ -848,7 +833,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
             <BbsSelect v-model="apiSettings.assignments.resummary" :options="channelOptions" class="bbs-assign-select" aria-label="总结使用的渠道" />
           </div>
         </div>
-        <p class="bbs-field-hint">推荐使用DeepSeek或豆包，不推荐Gemini，甲太厚</p>
+        <p class="bbs-field-hint">推荐 DeepSeek 或豆包；不推荐 Gemini（甲太厚）。</p>
 
         <hr class="bbs-rule" />
 
@@ -869,11 +854,10 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
             </button>
           </li>
         </ul>
-        <p v-else class="bbs-field-hint">还没有渠道。点「添加渠道」配置摘要/总结要用的 API。</p>
+        <p v-else class="bbs-field-hint">还没有渠道。点「添加渠道」填一个摘要和总结用的 API。</p>
       </Collapsible>
 
       <Collapsible class="prism-settings-card" title="基本设置" :open="true">
-        <p class="prism-card-intro">主题、导航与入口偏好。全部沿用现有设置，按自己的阅读习惯调整。</p>
         <div class="bbs-field">
           <div class="bbs-field-head">
             <span class="bbs-field-label">主题</span>
@@ -914,36 +898,36 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
         </div>
 
         <label class="bbs-switch-row">
-          <span class="bbs-field-label">移动端点当前页导航关窗</span>
-          <input v-model="ui.navTapClose" type="checkbox" class="bbs-checkbox" />
+          <span class="bbs-field-label">点当前页导航关闭窗口（手机）</span>
+          <input v-model="ui.navTapClose" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
-        <p class="bbs-field-hint">移动端再点一下当前所在页的导航按钮即可关闭整个窗口,省得去够右上角的 ×。怕误触可关。</p>
+        <p class="bbs-field-hint">手机上再点一次当前页的导航按钮就能关掉窗口，不用去够右上角的 ×。怕误触可以关掉。</p>
 
         <label class="bbs-switch-row">
-          <span class="bbs-field-label">在 ST 顶栏显示按钮</span>
-          <input v-model="ui.showTopBar" type="checkbox" class="bbs-checkbox" />
+          <span class="bbs-field-label">在酒馆顶栏显示按钮</span>
+          <input v-model="ui.showTopBar" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
-        <p class="bbs-field-hint">在酒馆顶部导航栏(用户设定管理左侧)加一个快速打开棱镜宝书的按钮,免去每次点左下角魔杖。左下角魔杖入口照旧保留。</p>
+        <p class="bbs-field-hint">在酒馆顶栏（用户设定按钮左边）加一个打开棱镜宝书的按钮，不用每次去点左下角的魔杖。魔杖里的入口仍然保留。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">在聊天框上方显示按钮</span>
-          <input v-model="ui.showQuickReply" type="checkbox" class="bbs-checkbox" />
+          <input v-model="ui.showQuickReply" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
-        <p class="bbs-field-hint">在输入框上方(与快速回复同位)加一个「棱镜宝书」按钮,跟随酒馆主题美化。</p>
+        <p class="bbs-field-hint">在输入框上方（快速回复那一栏）加一个「棱镜宝书」按钮，样式跟随酒馆主题。</p>
 
         <label class="bbs-switch-row">
-          <span class="bbs-field-label">启用楼层界面</span>
-          <input v-model="ui.showFloorPanel" type="checkbox" class="bbs-checkbox" />
+          <span class="bbs-field-label">启用楼层面板</span>
+          <input v-model="ui.showFloorPanel" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
-        <p class="bbs-field-hint">在每条 AI 楼层下方加一个界面:查看该楼摘要与数据变动,并可一键标记「番外」。标为番外的楼层被记忆系统彻底忽略(不摘要、不总结、不注入),适合小剧场/番外篇;取消番外即恢复。</p>
+        <p class="bbs-field-hint">在每条 AI 回复下面加一个小面板，可以查看这一楼的摘要和数据变动，也能标记成「番外」。番外楼层不摘要、不总结、不注入，适合小剧场；取消标记就恢复。</p>
 
         <!-- 屏幕悬浮球:配置项多,收进可收缩小分组 -->
         <Collapsible title="屏幕悬浮球" :open="false">
           <label class="bbs-switch-row">
             <span class="bbs-field-label">显示屏幕悬浮球</span>
-            <input v-model="ui.showOrb" type="checkbox" class="bbs-checkbox" />
+            <input v-model="ui.showOrb" type="checkbox" class="bbs-checkbox bbs-switch" />
           </label>
-          <p class="bbs-field-hint">在屏幕边缘挂一枚可拖动的悬浮球,点击即开棱镜宝书。拖到中间可常驻悬浮,拖近左右边缘则吸附贴边。</p>
+          <p class="bbs-field-hint">屏幕上放一个可拖动的悬浮球，点一下打开棱镜宝书。拖到中间会停在那里，拖近左右边缘会贴边。</p>
 
           <!-- 形状:仅开启时可配 -->
           <div v-if="ui.showOrb" class="bbs-field">
@@ -972,7 +956,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
               <span class="bbs-field-value">{{ ui.orbOpacity }}%</span>
             </div>
             <input v-model.number="ui.orbOpacity" type="range" min="20" max="100" step="1" class="bbs-range" />
-            <p class="bbs-field-hint">悬浮球静止时的不透明度;鼠标悬停 / 拖动时一律全显。</p>
+            <p class="bbs-field-hint">悬浮球静止时的不透明度；鼠标移上去或拖动时完全显示。</p>
           </div>
 
           <!-- 大小:仅开启时可配 -->
@@ -988,7 +972,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
           <div v-if="ui.showOrb" class="bbs-orb-config">
             <div class="bbs-orb-preview" :class="[`shape-${ui.orbShape}`, { 'has-image': !!ui.orbImage }]">
               <img v-if="ui.orbImage" :src="ui.orbImage" alt="悬浮球图标预览" />
-              <Icon v-else name="bookmark" />
+              <BrandMark v-else :size="ui.orbShape === 'bookmark' ? 30 : 32" class="bbs-orb-preview-mark" />
             </div>
             <div class="bbs-orb-config-actions">
               <button type="button" class="bbs-btn bbs-btn-sm bbs-btn-primary" :disabled="orbUploading" @click="pickOrbImage">
@@ -998,132 +982,131 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
             </div>
             <input ref="orbFileInput" type="file" accept="image/*" hidden @change="onOrbFileChange" />
           </div>
-          <p v-if="ui.showOrb" class="bbs-field-hint">支持静态图与 GIF 动图(GIF 保留动画,≤2MB)。图标上传到酒馆服务器、跨设备同步;留空则用默认书签图标。</p>
+          <p v-if="ui.showOrb" class="bbs-field-hint">支持普通图片和 GIF 动图（GIF 保留动画，不超过 2MB）。图标会传到酒馆服务器，换设备也能用；不传就用默认的小狐狸图标。</p>
         </Collapsible>
       </Collapsible>
 
       <Collapsible class="prism-settings-card prism-card-wide" title="摘要设置" :open="true">
-        <p class="prism-card-intro">控制全文保留、分层压缩与失败重试。下方参数沿用现有含义，不因界面改版改变。</p>
+        <p class="prism-card-intro">保留多少全文、多久合并一次总结、失败后重试几次。</p>
         <label class="bbs-switch-row">
           <span class="bbs-field-label">启用自动摘要</span>
-          <input v-model="apiSettings.autoSummaryEnabled" type="checkbox" class="bbs-checkbox" />
+          <input v-model="apiSettings.autoSummaryEnabled" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
-        <p class="bbs-field-hint">开启后自动摘要并隐藏旧楼,同时启用正文时间标签(剧情时间锚点)与积压拦截(漏摘时拦截发送、提示补摘)。</p>
+        <p class="bbs-field-hint">打开后会自动摘要并隐藏旧楼，同时启用正文时间标签（剧情时间的锚点）和积压拦截（有楼层漏摘时先拦下发送，提示你补摘）。</p>
         <div class="bbs-num-row">
           <span class="bbs-field-label">字数档位</span>
           <BbsSelect v-model="apiSettings.verbosity" :options="VERBOSITY_OPTIONS" class="bbs-select-narrow" aria-label="字数档位" />
         </div>
-        <p class="bbs-field-hint">一键调节摘要/总结/二次总结的目标字数。详细=信息全(摘要150-300、总结300-500字)；精简=省token(摘要80-150、总结150-300字)。仅影响内置提示词,自定义模板不受影响。</p>
+        <p class="bbs-field-hint">调整摘要、总结和二次总结的目标字数。详细：信息全（摘要 150–300 字，总结 300–500 字）；精简：省 token（摘要 80–150 字，总结 150–300 字）。只影响内置提示词，自定义的不受影响。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">保留最近 AI 消息数</span>
           <input v-model.number="apiSettings.keepRecent" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">保留多少条 AI 消息发送全文,超出部分自动隐藏并发送摘要。</p>
+        <p class="bbs-field-hint">最近多少条 AI 回复保留全文发送；更早的自动隐藏，改发摘要。</p>
         <label class="bbs-num-row">
-          <span class="bbs-field-label">每次总结 AI 消息数</span>
+          <span class="bbs-field-label">每次总结几条摘要</span>
           <input v-model.number="apiSettings.leafBatchThreshold" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">每次总结多少条摘要,不计算 user 楼层,0 为关闭自动总结。</p>
+        <p class="bbs-field-hint">攒够多少条摘要合并成一条总结（不算用户楼层）。填 0 关闭自动总结。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">总结时保留摘要数</span>
           <input v-model.number="apiSettings.leafKeepRecent" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">总结时在末尾保留这么多条摘要不压缩,让隐藏区始终留一截细节、避免总结后信息断崖。例:每次总结 12、这里填 3,则攒够 15 条才总结,压最旧 12 条,留最新 3 条摘要。0 为攒够即全压(旧行为),默认 3。</p>
+        <p class="bbs-field-hint">总结时最新的这几条摘要先不合并，总结后仍留一截细节，不会一下子断档。例如每次总结 12 条、这里填 3：攒够 15 条才总结，合并最旧的 12 条，留下最新 3 条。填 0 就是攒够后全部合并（旧版做法）。默认 3。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">二次总结</span>
           <input v-model.number="apiSettings.resummaryThreshold" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">L1 总结达到多少条后压成一条 L2,0 为关闭。默认 7。</p>
+        <p class="bbs-field-hint">L1 总结攒够多少条，再合并成一条 L2。填 0 关闭，默认 7。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">高层总结</span>
           <input v-model.number="apiSettings.higherResummaryThreshold" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">L2 及以上总结达到多少条后再压一层。高层正文更长,建议使用较小阈值；0 为关闭,默认 3。</p>
+        <p class="bbs-field-hint">L2 及更高层的总结攒够多少条，再往上合并一层。层级越高内容越长，建议填小一点。填 0 关闭，默认 3。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">附带近期已完成计划</span>
           <input v-model.number="apiSettings.recentResolvedPlansCount" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">在状态快照里附带「已完成的计划/悬念」,提醒 AI 别把刚了结的事又当未完成去推进或重复记录;主模型注入与摘要副API同时附带。计划、悬念各取最近这么多条(如填 5 = 最多计划 5 + 悬念 5)。0 为不附带,默认 5。</p>
+        <p class="bbs-field-hint">在状态里附上最近已完成的计划和悬念，提醒模型别把刚了结的事当成没做完，再推进或重复记录。正文和摘要都会带上。计划、悬念各取最近这么多条（填 5 就是各最多 5 条）。填 0 不附带，默认 5。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">失败重试次数</span>
           <input v-model.number="apiSettings.summaryMaxRetries" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">摘要/总结请求失败(报错或返回内容无法解析)时最多额外重试几次,0 为不重试。默认 1。</p>
-        <p class="bbs-field-hint">批量补摘按楼序逐楼生成完整记忆，每楼保存人物、物品与计划后再处理下一楼；失败时停止，可在当前楼完成后取消。内置摘要上限：详细 300、精简 150 字符（含标点）；超长会进入上述有限重试，失败保留旧摘要。</p>
+        <p class="bbs-field-hint">摘要或总结失败（报错，或返回的内容解析不了）时最多再试几次。密钥错误、额度不足、输出被截断这类重试也没用的错误不会重试。填 0 不重试，默认 1。</p>
+        <p class="bbs-field-hint">批量补摘按楼层顺序一楼一楼来，每楼的人物、物品、计划存好才处理下一楼；遇到失败就停，取消会在当前这楼完成后生效。内置摘要的长度上限：详细 300 字，精简 150 字（含标点）；超长会按上面的次数重试，还不行就保留旧摘要。</p>
       </Collapsible>
           </div>
         </section>
 
         <section class="prism-settings-group prism-group-memory" aria-labelledby="prism-settings-memory">
           <header class="prism-group-head">
-            <span class="prism-group-number" aria-hidden="true">02</span>
-            <div><h2 id="prism-settings-memory" tabindex="-1">记忆与召回</h2><p>决定主模型能看到什么，以及如何从旧记忆中找回相关线索。</p></div>
-            <span class="prism-group-tag">按需开启</span>
+            <h2 id="prism-settings-memory" tabindex="-1">记忆与召回</h2>
+            <p>生成正文时给模型看哪些记忆，以及怎样从旧剧情里找回相关内容。</p>
           </header>
           <div class="prism-group-cards">
       <Collapsible class="prism-settings-card" title="注入设置" :open="true">
-        <p class="prism-card-intro">管理主对话的记忆预算、时间标签和状态内容；开关依赖关系保持不变。</p>
-        <p v-if="apiSettings.autoSummaryEnabled && !fitTimeTagPrompt(timeTagPrompt())" class="bbs-field-hint">⚠ 当前时间指令超过预算份额,已整块停用。请提高预算或缩短自定义时间指令。</p>
-        <label class="bbs-switch-row"><span class="bbs-field-label">记忆注入估算预算</span><input v-model.number="apiSettings.memoryBudgetTokens" class="bbs-input" type="number" min="0" max="50000" step="500" /></label>
-        <p class="bbs-field-hint">默认 6000,0 为不限;非零最少按 2000 计算。按 UTF-8 字节估算,不等于真实模型 token。历史/状态/时间指令/召回分别占 45%/35%/5%/15%,未用份额不挪用。超额只省略完整条目,不删除存档;过长时间指令整块停用。预算不含聊天正文、角色卡及其他插件。旧向量召回槽在修改预算后清空,下次生成重算。</p>
-        <p class="bbs-field-hint">选择哪些状态块注入主对话(生成正文的请求)。这些开关<strong>只影响主模型看到的内容</strong>:副 API 摘要始终能看到全量状态、照常记录,关闭某项不会导致重复记录。时间/地点、计划/悬念与自定义变量保持常驻,不在此处开关。</p>
+        <p class="prism-card-intro">生成正文时交给模型的记忆：总共占多少预算，包括哪些状态。</p>
+        <p v-if="apiSettings.autoSummaryEnabled && !fitTimeTagPrompt(timeTagPrompt())" class="bbs-callout is-warning">时间标签提示词超出了预算里分给它的份额，现在整段没有发送。调高预算，或缩短自定义的时间标签提示词。</p>
+        <label class="bbs-switch-row"><span class="bbs-field-label">记忆注入预算</span><input v-model.number="apiSettings.memoryBudgetTokens" class="bbs-input" type="number" min="0" max="50000" step="500" /></label>
+        <p class="bbs-field-hint">默认 6000；填 0 不限制，其他值最少按 2000 算。按 UTF-8 字节粗略估算，和模型实际的 token 数不完全一样。历史、状态、时间指令、召回分别占 45%、35%、5%、15%，用不完的份额不会挪给别的部分。超出时整条省略，不会删除存档；时间指令太长就整段不发。预算不包括聊天正文、角色卡和其他插件。改了预算后，上次的向量召回结果会清空，下次生成时重新计算。</p>
+        <p class="bbs-field-hint">下面选择哪些状态交给正文模型。这些开关<strong>只影响正文模型看到什么</strong>：摘要那边始终能看到全部状态、照常记录，关掉某项不会造成重复记录。时间地点、计划悬念和自定义变量总会发送，不在这里开关。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">仅注入剧情摘要</span>
-          <input v-model="apiSettings.summaryOnlyMode" type="checkbox" class="bbs-checkbox" />
+          <input v-model="apiSettings.summaryOnlyMode" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
-        <p class="bbs-field-hint">兼容角色卡自带的变量系统。开启后仍会分析、保存并在棱镜宝书内展示物品、角色、场景、计划和变量,但不再把当前状态注入主模型(下方各块开关也随之不生效),也不再向后续楼层正文写入物品/变量变动旁注。已有楼层中的旁注不会主动清理;场景页的「前往」功能不受影响。</p>
+        <p class="bbs-field-hint">给自带变量系统的角色卡用。打开后，物品、角色、场景、计划和变量照常分析、保存、在棱镜宝书里显示，但不再交给正文模型（下面各项开关随之失效），之后的楼层也不再写物品和变量的变动旁注。已有楼层里的旁注不会被清理；场景页的「前往」不受影响。</p>
 
         <hr class="bbs-rule" />
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">眼下局势</span>
-          <input v-model="apiSettings.injection.sceneFocus" type="checkbox" class="bbs-checkbox" :disabled="apiSettings.summaryOnlyMode" />
+          <input v-model="apiSettings.injection.sceneFocus" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode" />
         </label>
-        <p class="bbs-field-hint">当前互动局势卡:局面、在场人、当前焦点、互动张力与即将发生之事,衔接当下场面。</p>
+        <p class="bbs-field-hint">眼下局势卡：现在的局面、在场的人、互动张力和即将发生的事，帮模型接住当前场面。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">生活档案</span>
-          <input v-model="apiSettings.injection.lifeDetails" type="checkbox" class="bbs-checkbox" :disabled="apiSettings.summaryOnlyMode" />
+          <input v-model="apiSettings.injection.lifeDetails" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode" />
         </label>
-        <p class="bbs-field-hint">控制主角及主要角色生活档案的注入。记录始终开启(AI 照常积累档案,可在角色页管理);关闭后只是不再发给主模型,重开即可恢复注入。</p>
+        <p class="bbs-field-hint">主角和主要角色的生活档案。档案总是照常记录（可以在角色页管理），这里关掉只是不再交给正文模型，重新打开就恢复。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">主角信息</span>
-          <input v-model="apiSettings.injection.protagonist" type="checkbox" class="bbs-checkbox" :disabled="apiSettings.summaryOnlyMode" />
+          <input v-model="apiSettings.injection.protagonist" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode" />
         </label>
-        <p class="bbs-field-hint">主角当前状态:性别、年龄、身份、外貌、着装、状态。自包含,不依赖场景信息。</p>
+        <p class="bbs-field-hint">主角现在的样子：性别、年龄、身份、外貌、着装和状态。不依赖场景信息。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">场景信息</span>
-          <input v-model="apiSettings.injection.scenes" type="checkbox" class="bbs-checkbox" :disabled="apiSettings.summaryOnlyMode" />
+          <input v-model="apiSettings.injection.scenes" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode" />
         </label>
-        <p class="bbs-field-hint">当前地点与祖先链(详细)+ 其他已知地点(仅名称)。<strong>NPC 名册与物品信息的在场/可达判定都依赖场景树,关闭此项后这两项也随之不注入。</strong></p>
+        <p class="bbs-field-hint">当前地点和它的上级地点（详细），以及其他已知地点（只有名字）。<strong>NPC 名册和物品信息要靠场景判断谁在场、什么够得着，关掉这项后它们也不会发送。</strong></p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">NPC 名册</span>
-          <input v-model="apiSettings.injection.npcs" type="checkbox" class="bbs-checkbox" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.scenes" />
+          <input v-model="apiSettings.injection.npcs" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.scenes" />
         </label>
-        <p class="bbs-field-hint">在场角色全量、同区域从简、不在场仅名与身份;依赖场景信息。</p>
+        <p class="bbs-field-hint">在场的角色发完整信息，同一区域的从简，不在场的只发名字和身份。需要打开场景信息。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">角色好感估计</span>
-          <input v-model="apiSettings.injection.npcAffinity" type="checkbox" class="bbs-checkbox" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.npcs" />
+          <input v-model="apiSettings.injection.npcAffinity" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.npcs" />
         </label>
-        <p class="bbs-field-hint">NPC 名册里的五档好感估计(内心好感/外在态度/说明)。记录与角色页展示始终开启;关闭后名册照发、只是不附带好感——适合角色卡自带好感系统、不想两套并行的场合。</p>
+        <p class="bbs-field-hint">NPC 名册里的五档好感（内心好感、外在态度和说明）。好感总是照常记录、在角色页显示；关掉后名册照发，只是不带好感。适合角色卡自带好感系统、不想两套并行的情况。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">物品信息</span>
-          <input v-model="apiSettings.injection.items" type="checkbox" class="bbs-checkbox" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.scenes" />
+          <input v-model="apiSettings.injection.items" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.scenes" />
         </label>
-        <p class="bbs-field-hint">随身/可达物品发全量,他处寄存仅名与数量;依赖场景信息。</p>
+        <p class="bbs-field-hint">随身和够得着的物品发完整信息，放在别处的只发名字和数量。需要打开场景信息。</p>
       </Collapsible>
 
       <Collapsible class="prism-settings-card" title="向量记忆" :open="true">
-        <p class="prism-card-intro">启用后配置三个模型角色。端点标题下显示已填模型；连接情况以实际操作结果为准。</p>
+        <p class="prism-card-intro">从旧剧情里找回和当前相关的片段，补给正文模型。Embedding 和 Query 重写必须配好；Rerank 可以不填，不填就按相似度排序。</p>
         <label class="bbs-switch-row bbs-vec-enable">
           <span class="bbs-field-label">启用向量记忆</span>
-          <input v-model="apiSettings.vector.enabled" type="checkbox" class="bbs-checkbox" />
+          <input v-model="apiSettings.vector.enabled" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
 
         <hr class="bbs-rule bbs-vec-enable-rule" />
@@ -1144,7 +1127,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
           >
             <span class="prism-endpoint-heading">
               <span class="bbs-field-label">{{ role.label }}</span>
-              <span class="prism-endpoint-model">{{ apiSettings.vector[role.key].model || '尚未填写模型' }}</span>
+              <span class="prism-endpoint-model">{{ apiSettings.vector[role.key].model || '还没填模型' }}</span>
             </span>
             <Icon name="chevron" class="bbs-vec-chevron" />
           </button>
@@ -1152,7 +1135,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
           <div class="bbs-vec-ep-outer" :inert="!vecEpOpen[role.key]" :aria-hidden="!vecEpOpen[role.key]">
             <div class="bbs-vec-ep-inner">
           <div class="bbs-vec-ep-body">
-          <p v-if="role.key !== 'embedding'" class="bbs-field-hint">地址 / 密钥留空即复用 Embedding;模型仍需各自填写。</p>
+          <p v-if="role.key !== 'embedding'" class="bbs-field-hint">地址和密钥留空就用 Embedding 的；模型要单独填。</p>
 
           <label class="bbs-modal-field">
             <span class="bbs-modal-label">API 地址</span>
@@ -1194,7 +1177,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
                 <input
                   v-model="apiSettings.vector[role.key].model"
                   class="bbs-input"
-                  :placeholder="(vecModels[role.key]?.length) ? '搜索或输入模型名…' : '模型名,或点右侧拉取'"
+                  :placeholder="(vecModels[role.key]?.length) ? '搜索或输入模型名…' : '模型名，或点右边按钮拉取列表'"
                   :disabled="!apiSettings.vector.enabled"
                   @focus="openVecModelMenu(role.key)"
                   @input="vecModelQuery = apiSettings.vector[role.key].model; vecModelMenuOpen = role.key"
@@ -1207,7 +1190,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
                   aria-hidden="true"
                 />
                 <ul v-if="vecModelMenuOpen === role.key && vecModels[role.key]?.length" class="bbs-combo-menu">
-                  <li v-if="!filteredVecModels(role.key).length" class="bbs-combo-empty">无匹配模型</li>
+                  <li v-if="!filteredVecModels(role.key).length" class="bbs-combo-empty">没有匹配的模型</li>
                   <li
                     v-for="m in filteredVecModels(role.key)"
                     :key="m"
@@ -1230,13 +1213,13 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
               </button>
             </div>
           </label>
-          <p v-if="vecModelMsg[role.key]" class="bbs-field-hint">{{ vecModelMsg[role.key] }}</p>
+          <p v-if="vecModelMsg[role.key]" class="bbs-callout prism-inline-notice" :class="TONE_CLASS[vecModelMsg[role.key]!.tone]" role="status">{{ vecModelMsg[role.key]!.text }}</p>
 
           <!-- 超时/重试(+ Query 重写的最大 token):各角色独立(默认 embedding 10s / rerank 20s / query 90s),不随地址复用回落。
                grid auto-fit:空间够就一行排开,不够自动换行。 -->
           <div class="bbs-vec-io">
             <label class="bbs-vec-io-item">
-              <span class="bbs-modal-label">超时(秒)</span>
+              <span class="bbs-modal-label">超时（秒）</span>
               <input
                 v-model.number="apiSettings.vector[role.key].timeoutSec"
                 class="bbs-input bbs-num-sm"
@@ -1256,7 +1239,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
               />
             </label>
             <label v-if="role.key === 'queryRewrite'" class="bbs-vec-io-item">
-              <span class="bbs-modal-label">最大输出 token</span>
+              <span class="bbs-modal-label">最大输出（tokens）</span>
               <input
                 v-model.number="apiSettings.vector.queryRewriteMaxTokens"
                 class="bbs-input bbs-num-sm"
@@ -1274,12 +1257,12 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
               <input
                 v-model="apiSettings.vector.queryRewriteJailbreak"
                 type="checkbox"
-                class="bbs-checkbox"
+                class="bbs-checkbox bbs-switch"
                 :disabled="!apiSettings.vector.enabled"
               />
             </label>
             <p class="bbs-field-hint">
-              使用「提示词工作台」中的任务说明模式;禁用或自定义空白时不附加。无需为了检索重写把输出上限设成超大值。
+              沿用「提示词」里的任务说明模式；那边禁用或自定义为空时不附加。检索重写的输出很短，不需要很大的输出上限。
             </p>
           </template>
           </div>
@@ -1293,14 +1276,13 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
         <Collapsible title="召回参数" :open="false">
           <div class="bbs-vec-recall" :class="{ 'is-disabled': !apiSettings.vector.enabled }">
             <p class="bbs-field-hint">
-              先对全部向量索引算 embedding 相似度,取得分最高的若干条进入 rerank;rerank 打分后分两档:
-              得分高的发原文全文,稍低但仍过 embedding 阈值的发摘要;两档合计不超过「最终召回条数」。
+              先按 embedding 相似度从全部索引里挑出得分最高的几条，交给 rerank 打分，再分两档：得分高的发原文，稍低但过了 embedding 阈值的发摘要。两档加起来不超过「最终召回条数」。
             </p>
 
             <p class="bbs-field-hint">
-              生成前用小模型(上方「Query 重写」)把当前剧情重写成多条检索 query,多路召回更全面。
-              <strong>查询重写为召回必经步骤,须配好「Query 重写」模型;未配或重写失败则本回合不召回。</strong>
-              每回合多一次小模型请求(略增延迟)。
+              生成前先用「Query 重写」模型把当前剧情改写成几条检索语句，分头去找，召回更全面。
+              <strong>这一步必不可少：没配 Query 重写模型或重写失败，这一轮就不召回。</strong>
+              每轮会多一次小模型请求，稍微多一点延迟。
             </p>
 
           <label class="bbs-num-row">
@@ -1314,7 +1296,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
               :disabled="!apiSettings.vector.enabled"
             />
           </label>
-          <p class="bbs-field-hint">召回内容注入到聊天中的深度。0 = D0,最贴近最新用户输入;数字越大越靠前。</p>
+          <p class="bbs-field-hint">召回内容插在聊天里的位置。0 表示紧挨着最新一条用户消息，数字越大越往前。</p>
 
           <label class="bbs-num-row">
             <span class="bbs-field-label">Rerank 候选数</span>
@@ -1326,7 +1308,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
               :disabled="!apiSettings.vector.enabled"
             />
           </label>
-          <p class="bbs-field-hint">按 embedding 相似度取前 N 条进入 rerank 精排(越大越准但越慢)。</p>
+          <p class="bbs-field-hint">按 embedding 相似度取前几条交给 rerank（越多越准，也越慢）。</p>
 
           <label class="bbs-num-row">
             <span class="bbs-field-label">Embedding 阈值</span>
@@ -1340,7 +1322,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
               :disabled="!apiSettings.vector.enabled"
             />
           </label>
-          <p class="bbs-field-hint">摘要档准入门槛:embedding 相似度低于此的内容连摘要都不召回(0~1)。</p>
+          <p class="bbs-field-hint">摘要档的门槛：embedding 相似度低于这个值的，连摘要都不召回（0–1）。</p>
 
           <label class="bbs-num-row">
             <span class="bbs-field-label">Rerank 阈值</span>
@@ -1354,7 +1336,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
               :disabled="!apiSettings.vector.enabled"
             />
           </label>
-          <p class="bbs-field-hint">rerank 得分 ≥ 此值的发原文全文,低于此但过 embedding 阈值的退为发摘要(0~1)。</p>
+          <p class="bbs-field-hint">rerank 得分不低于这个值的发原文；低于它但过了 embedding 阈值的改发摘要（0–1）。</p>
 
           <label class="bbs-num-row">
             <span class="bbs-field-label">召回全文数</span>
@@ -1366,7 +1348,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
               :disabled="!apiSettings.vector.enabled"
             />
           </label>
-          <p class="bbs-field-hint">全文档最多取几条发原文(其余即便过 rerank 阈值也退为摘要)。</p>
+          <p class="bbs-field-hint">最多几条发原文；超出的即使过了 rerank 阈值也改发摘要。</p>
 
           <label class="bbs-num-row">
             <span class="bbs-field-label">最终召回条数</span>
@@ -1378,10 +1360,10 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
               :disabled="!apiSettings.vector.enabled"
             />
           </label>
-          <p class="bbs-field-hint">召回总条数上限(全文 + 摘要合计);全文不够用摘要补,补不满也无妨。</p>
+          <p class="bbs-field-hint">召回总数上限（原文和摘要合计）；原文不够就用摘要补，补不满也没关系。</p>
 
           <label class="bbs-num-row">
-            <span class="bbs-field-label">起召 AI 楼数</span>
+            <span class="bbs-field-label">开始召回的 AI 楼数</span>
             <input
               v-model.number="apiSettings.vector.recall.minAiFloors"
               class="bbs-input bbs-num"
@@ -1391,8 +1373,8 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
             />
           </label>
           <p class="bbs-field-hint">
-            当前聊天 AI 消息数少于此值时不触发召回(0=不限制)。早期剧情旧记忆少,跳过可省额度/延迟。
-            另:当所有消息都还在滑动窗口内全文发送时也会自动跳过(无窗口外旧楼可召);「带数据建新对话」的旧档不受此限,始终召回。
+            AI 回复少于这个数时不召回（0 表示不限制）：剧情刚开始时旧记忆少，跳过能省额度和时间。
+            另外，所有楼层都还在全文发送范围内时也会自动跳过；「带数据创建新对话」带来的旧档不受这个限制，总会召回。
           </p>
           </div>
         </Collapsible>
@@ -1408,15 +1390,15 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
               class="bbs-vec-backend"
               :class="vecBackend === 'backend' ? 'is-backend' : 'is-local'"
             >
-              {{ vecBackend === 'backend' ? '柏宝库' : '前端' }}
+              {{ vecBackend === 'backend' ? '柏宝库' : '本地' }}
             </span>
           </div>
           <p class="bbs-field-hint">
-            正常情况下叶子摘要会随生成自动索引;若中途才开启向量记忆,可手动把当前聊天已有的摘要补建进向量库。
-            清空只删当前聊天自己的索引,不动「带数据建新对话」继承来的旧档快照。
+            平时每条摘要生成后会自动加进索引；如果是中途才打开向量记忆，可以手动把这个聊天已有的摘要补进去。
+            清空只删这个聊天自己的索引，不动「带数据创建新对话」带来的旧档。
           </p>
           <p v-if="vecBackend === 'local'" class="bbs-field-hint">
-            本地模式:索引存浏览器,仅当前聊天召回,不跨聊天 / 不跨设备。安装柏宝库后端后可恢复完整能力。
+            本地模式：索引存在浏览器里，只能在当前聊天召回，不跨聊天、不跨设备。装上柏宝库后端就能用完整功能。
           </p>
           <div class="bbs-vec-index-actions">
             <button
@@ -1435,10 +1417,10 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
               @blur="vecClearConfirm = false"
             >
               <Icon name="trash" />
-              {{ vecClearing ? '清空中…' : vecClearConfirm ? '再点确认清空' : '清空当前聊天索引' }}
+              {{ vecClearing ? '清空中…' : vecClearConfirm ? '再点一次确认清空' : '清空当前聊天索引' }}
             </button>
           </div>
-          <p v-if="vecIndexMsg" class="bbs-field-hint">{{ vecIndexMsg }}</p>
+          <p v-if="vecIndexMsg" class="bbs-callout prism-inline-notice" :class="vecIndexError ? 'is-danger' : 'is-success'" role="status">{{ vecIndexMsg }}</p>
         </div>
 
         <hr class="bbs-rule" />
@@ -1446,7 +1428,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
         <!-- 上次召回详情:把上一次召回各阶段的中间结果可视化,便于调参/排障(reactive 自动刷新) -->
         <Collapsible title="上次召回详情" :open="false">
           <p v-if="!recallDebug.at" class="bbs-field-hint">
-            尚无召回记录。配好向量渠道后发一条消息触发召回,这里会显示重写 / 检索 / 重排 / 注入各阶段结果。
+            还没有召回记录。配好向量记忆后发一条消息，这里会显示重写、检索、重排和注入各步的结果。
           </p>
           <div v-else class="bbs-dbg">
             <!-- 状态横幅:左侧圆点按语气配色,右侧时间 -->
@@ -1498,12 +1480,12 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
                   <p class="bbs-dbg-prev">{{ h.preview }}</p>
                 </li>
               </ul>
-              <p v-else class="bbs-dbg-empty">无(rerank 未执行或无候选)</p>
+              <p v-else class="bbs-dbg-empty">无（没有执行 rerank，或没有候选）</p>
             </Collapsible>
 
             <Collapsible title="4 · 最终注入" :open="false">
               <pre v-if="recallDebug.injectedText" class="bbs-dbg-pre">{{ recallDebug.injectedText }}</pre>
-              <p v-else class="bbs-dbg-empty">本回合未注入。</p>
+              <p v-else class="bbs-dbg-empty">这一轮没有注入。</p>
             </Collapsible>
           </div>
         </Collapsible>
@@ -1513,17 +1495,16 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
 
         <section class="prism-settings-group prism-group-prompts" aria-labelledby="prism-settings-prompts">
           <header class="prism-group-head">
-            <span class="prism-group-number" aria-hidden="true">03</span>
-            <div><h2 id="prism-settings-prompts" tabindex="-1">提示词工作台</h2><p>保留内置模板，也支持逐项定制。恢复默认仅修改草稿，点「完成」后生效。</p></div>
-            <span class="prism-group-tag">高级 · 模板</span>
+            <h2 id="prism-settings-prompts" tabindex="-1">提示词</h2>
+            <p>摘要、总结和时间标签用的提示词，可以逐个修改，也能恢复默认。</p>
           </header>
           <div class="prism-group-cards">
       <Collapsible class="prism-settings-card" title="自定义提示词" :open="true">
-        <p class="prism-card-intro">点击任意模板进入编辑器，可插入宏、取消修改或恢复内置默认。</p>
+        <p class="prism-card-intro">点一项打开编辑，可以插入宏，也可以恢复默认。</p>
         <label class="bbs-switch-row"><span class="bbs-field-label">任务说明模式</span>
-          <select v-model="apiSettings.taskContextMode" class="bbs-input"><option value="default">内置中性说明</option><option value="custom">自定义(允许空白)</option><option value="disabled">禁用</option></select>
+          <select v-model="apiSettings.taskContextMode" class="bbs-input"><option value="default">内置中性说明</option><option value="custom">自定义（可以留空）</option><option value="disabled">禁用</option></select>
         </label>
-        <p class="bbs-field-hint">旧自定义文本会保留。保存自定义任务说明会切换到自定义模式;恢复默认并保存会使用新版中性说明。禁用只关闭附加说明,不关闭必要的输出格式规则。</p>
+        <p class="bbs-field-hint">以前自定义的内容会保留。保存自定义的任务说明会自动切到「自定义」；恢复默认再保存就用内置说明。「禁用」只是不发这段说明，输出格式要求照样会发。</p>
         <ul class="bbs-prompt-list">
           <li v-for="m in PROMPT_METAS" :key="m.key" class="bbs-prompt-item">
             <button class="bbs-prompt-open" type="button" @click="openPrompt(m)">
@@ -1541,13 +1522,12 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
 
         <section class="prism-settings-group prism-group-advanced" aria-labelledby="prism-settings-advanced">
           <header class="prism-group-head">
-            <span class="prism-group-number" aria-hidden="true">04</span>
-            <div><h2 id="prism-settings-advanced" tabindex="-1">高级过滤</h2><p>只在需要时调整排除范围与清洗规则；展开对应分组即可编辑。</p></div>
-            <span class="prism-group-tag">高级 · 输入范围</span>
+            <h2 id="prism-settings-advanced" tabindex="-1">高级过滤</h2>
+            <p>摘要时跳过哪些角色、世界书条目和格式标签。</p>
           </header>
           <div class="prism-group-cards">
       <Collapsible class="prism-settings-card" title="排除角色" :open="false">
-        <p class="bbs-field-hint">勾选的角色名(含同名的重名卡)所在聊天里,棱镜宝书的所有功能都不生效——不摘要、不隐藏、不注入、不拦截。适合工具性、不需要记忆的角色。</p>
+        <p class="bbs-field-hint">名单里的角色（同名的卡一起算）在聊天里不使用棱镜宝书：不摘要、不隐藏、不注入、不拦截。适合工具类、不需要记忆的角色。</p>
         <div class="bbs-channel-bar">
           <span class="bbs-field-label">
             已排除 {{ apiSettings.excludedChars.length }} 个
@@ -1564,22 +1544,21 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
             </button>
           </li>
         </ul>
-        <p v-else class="bbs-field-hint">名单为空,所有角色都启用记忆系统。</p>
+        <p v-else class="bbs-field-hint">名单是空的，所有角色都会使用棱镜宝书。</p>
       </Collapsible>
 
       <Collapsible class="prism-settings-card" title="排除世界书内容" :open="false">
         <p class="bbs-field-hint">
-          摘要 / 总结时会激活世界书当参考。这里可剔除对剧情记忆无用的条目——如全局挂载的附加知识书、
-          规则说明等,既省 token 也避免干扰。仅影响摘要副 API,不改变你主对话里的世界书。
+          摘要和总结时会激活世界书作参考。可以在这里去掉对剧情记忆没用的条目，比如全局挂载的知识书、规则说明，省 token 也少干扰。只影响摘要和总结，不改动正文用的世界书。
         </p>
 
         <!-- 渲染世界书模板:配合「提示词模板(ST-Prompt-Template)」等插件 -->
         <label class="bbs-switch-row">
           <span class="bbs-field-label">渲染世界书模板</span>
-          <input v-model="apiSettings.renderWorldInfoTemplates" type="checkbox" class="bbs-checkbox" />
+          <input v-model="apiSettings.renderWorldInfoTemplates" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
         <p class="bbs-field-hint">
-          开启后会兼容提示词模板（ejs）的世界书条目
+          摘要前先展开世界书条目里的宏，并执行提示词模板（EJS）的代码，让摘要看到渲染后的内容。条目里如果有改变量的代码，每次摘要都会多执行一次，介意的话关掉。
         </p>
 
         <hr class="bbs-rule" />
@@ -1599,7 +1578,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
             </button>
           </li>
         </ul>
-        <p v-else class="bbs-field-hint">未排除任何世界书,全部激活条目都会进摘要参考。</p>
+        <p v-else class="bbs-field-hint">没有排除任何世界书，激活的条目都会作为摘要参考。</p>
 
         <hr class="bbs-rule" />
 
@@ -1608,16 +1587,16 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
           <span class="bbs-field-label">按条目名过滤</span>
         </div>
         <p class="bbs-field-hint">
-          填条目备注名(comment)即按<strong>包含</strong>匹配(不分大小写)——如填 <code>附加</code> 可命中「附加设定」。
-          也支持正则:<code>^规则</code> 表示以「规则」开头。对上面未整本排除的世界书生效。
-          默认预置一条 <code>\[mvu[\s\S]*?\]</code>,过滤变量框架 MVU 的机制条目;不需要可直接删。
+          填条目的备注名（comment），按<strong>包含</strong>匹配，不分大小写：填 <code>附加</code> 能匹配「附加设定」。
+          也可以写正则，<code>^规则</code> 表示以「规则」开头。只对上面没有整本排除的世界书生效。
+          默认有一条 <code>\[mvu[\s\S]*?\]</code>，用来过滤 MVU 变量框架的机制条目，不需要可以删掉。
         </p>
         <div class="bbs-striptag-bar">
           <input
             v-model="wiPatternDraft"
             class="bbs-input"
             type="text"
-            placeholder="条目名或正则,如 附加 或 ^规则"
+            placeholder="条目名或正则，如：附加、^规则"
             @keydown.enter.prevent="addWiPattern"
           />
           <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="addWiPattern">
@@ -1632,21 +1611,20 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
             </button>
           </li>
         </ul>
-        <p v-else class="bbs-field-hint">暂无条目名规则。</p>
+        <p v-else class="bbs-field-hint">还没有规则。</p>
       </Collapsible>
 
       <Collapsible class="prism-settings-card" title="自定义清洗标签" :open="false">
         <p class="bbs-field-hint">
-          正文里若混入其它插件/世界书写的格式块(如状态栏 <code>&lt;snow&gt;…&lt;/snow&gt;</code>),
-          可在此填入标签名(只填 <code>snow</code>,不带尖括号),摘要、向量索引与召回时会把整块连内容一并删掉。
-          调整后对**召回**即时生效(向量库存原文、召回再清洗),无需重建索引。
+          正文里如果混进了其他插件或世界书写的格式块（比如状态栏 <code>&lt;snow&gt;…&lt;/snow&gt;</code>），在这里填标签名（只填 <code>snow</code>，不带尖括号），摘要、建索引和召回时会把整块连同内容删掉。
+          改动对召回立即生效（索引里存的是原文，召回时再清洗），不用重建索引。
         </p>
         <div class="bbs-striptag-bar">
           <input
             v-model="stripTagDraft"
             class="bbs-input"
             type="text"
-            placeholder="标签名,如 snow"
+            placeholder="标签名，如 snow"
             @keydown.enter.prevent="addStripTag"
           />
           <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="addStripTag">
@@ -1661,26 +1639,24 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
             </button>
           </li>
         </ul>
-        <p v-else class="bbs-field-hint">暂无自定义标签。仅内置清洗(思维链、注释、物品旁注等)生效。</p>
+        <p v-else class="bbs-field-hint">还没有自定义标签，只做内置清洗（思维链、注释、物品旁注等）。</p>
       </Collapsible>
           </div>
         </section>
 
         <section class="prism-settings-group prism-group-data" aria-labelledby="prism-settings-data">
           <header class="prism-group-head">
-            <span class="prism-group-number" aria-hidden="true">05</span>
-            <div><h2 id="prism-settings-data" tabindex="-1">数据与迁移</h2><p>延续已有记忆、迁入旧版数据，或将记忆接入其他工具。操作前请阅读说明。</p></div>
-            <span class="prism-group-tag">维护工具</span>
+            <h2 id="prism-settings-data" tabindex="-1">数据与迁移</h2>
+            <p>带着记忆开新对话、从 Horae 迁移，或者把记忆接给其他插件。</p>
           </header>
           <div class="prism-group-cards">
       <Collapsible class="prism-settings-card" title="带数据创建新对话" :open="false">
         <p class="bbs-field-hint">
-          把当前聊天的「最近全文窗口 + 合并历史摘要 + 当前状态(时间/地点、场景、物品、角色、计划、变量)」打包,创建一个新对话带过去。
-          新对话从一片「种子叶子」重放还原状态,旧剧情作为摘要随行;若开了向量记忆,旧聊天会被快照,
-          新对话可向量召回它的内容(逐次累加,分支也自动继承)。
+          把这个聊天最近的全文、合并后的历史摘要和当前状态（时间地点、场景、物品、角色、计划、变量）打包，新建一个对话带过去。
+          新对话从一条「种子摘要」还原状态，旧剧情以摘要的形式跟过去；如果开着向量记忆，旧聊天会存一份快照，新对话也能召回里面的内容（多次接续会累加，分支也会继承）。
         </p>
         <div v-if="carryPlan" class="bbs-field-hint">
-          将携带:AI {{ carryPlan.aiCount }} 条 / 实际消息 {{ carryPlan.carryCount }} 条;旧剧情摘要 {{ carryPlan.recapLen > 0 ? '有' : '无' }}。
+          会带过去：AI 回复 {{ carryPlan.aiCount }} 条，实际消息 {{ carryPlan.carryCount }} 条；旧剧情摘要{{ carryPlan.recapLen > 0 ? '有' : '无' }}。
         </div>
         <button
           class="bbs-btn bbs-btn-sm bbs-btn-primary"
@@ -1695,15 +1671,14 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
 
       <Collapsible class="prism-settings-card" title="从旧版 Horae 迁移" :open="false">
         <p class="bbs-field-hint">
-          把当前聊天里旧版 Horae 的摘要、物品、计划迁移过来。需要迁移的聊天各点一次,不会动 Horae 原数据。
+          把这个聊天里旧版 Horae 的摘要、物品和计划搬过来。每个要迁移的聊天各点一次，Horae 的原数据不会被改动。
         </p>
         <div v-if="migratePlan" class="bbs-field-hint">
           <template v-if="migratePlan.hasData">
-            检测到:可建摘要 {{ migratePlan.leafFloors }} 层 / 旧总结 {{ migratePlan.summaryCount }} 条 /
-            物品 {{ migratePlan.itemCount }} / 计划悬念 {{ migratePlan.planCount }}。
-            <span v-if="migratePlan.willOverwrite">⚠️ 当前聊天已有本插件数据,迁移将覆盖。</span>
+            找到：可建摘要 {{ migratePlan.leafFloors }} 层，旧总结 {{ migratePlan.summaryCount }} 条，物品 {{ migratePlan.itemCount }} 个，计划悬念 {{ migratePlan.planCount }} 条。
+            <strong v-if="migratePlan.willOverwrite">这个聊天已经有棱镜宝书的数据，迁移会覆盖它。</strong>
           </template>
-          <template v-else>未在当前聊天检测到 Horae 旧数据(请先进入含旧数据的聊天)。</template>
+          <template v-else>这个聊天里没有 Horae 的旧数据（请先打开有旧数据的聊天）。</template>
         </div>
         <button
           class="bbs-btn bbs-btn-sm bbs-btn-primary"
@@ -1718,7 +1693,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
 
       <Collapsible class="prism-settings-card" title="获取数据" :open="false">
         <p class="bbs-field-hint bbs-data-intro">
-          宏可用于提示词、变量说明和支持 ST 宏的其他位置。完整接口、命令和返回结构可导出为插件作者文档。
+          下面的宏可以用在提示词、变量说明和其他支持酒馆宏的地方。完整的接口、命令和返回结构可以导出成文档给插件作者看。
         </p>
 
         <div class="bbs-data-macros">
@@ -1745,7 +1720,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
         <div class="bbs-data-export">
           <div class="bbs-data-export-text">
             <span class="bbs-field-label">公共接口文档</span>
-            <p class="bbs-data-desc">下载 PUBLIC_API.md,包含 JavaScript API、斜杠命令、宏、返回结构与使用示例。</p>
+            <p class="bbs-data-desc">下载 PUBLIC_API.md，里面有 JavaScript API、斜杠命令、宏、返回结构和示例。</p>
           </div>
           <button class="bbs-btn bbs-btn-primary" type="button" @click="exportPublicApiDocument">
             <Icon name="download" />
@@ -1757,7 +1732,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
         </section>
       </div>
     </div>
-    <p class="prism-settings-footnote">{{ INTERNAL_UPDATE_NOTICE }} 原作：柏柏；本版为棱镜宝书内部维护版。</p>
+    <p class="prism-settings-footnote">{{ INTERNAL_UPDATE_NOTICE }} 原作：柏柏（ST-BaiBai-Book）。</p>
 
     <!-- 带数据创建新对话 / Horae 迁移 的确认弹窗 -->
     <ConfirmDialog
@@ -1766,7 +1741,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
       confirm-text="创建并切入"
       @confirm="runCarryover"
     >
-      将基于当前聊天创建一个带数据的新对话并切入。继续吗?
+      会根据这个聊天新建一个对话，带上记忆并切换过去。继续吗？
     </ConfirmDialog>
     <ConfirmDialog
       v-model:open="migrateConfirmOpen"
@@ -1821,7 +1796,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
               <input
                 v-model="editingChannel.model"
                 class="bbs-input"
-                :placeholder="modelList.length ? '搜索或输入模型名…' : '模型名,如 gpt-4o-mini'"
+                :placeholder="modelList.length ? '搜索或输入模型名…' : '模型名，如 gpt-4o-mini'"
                 @focus="openModelMenu"
                 @input="modelQuery = editingChannel.model; modelMenuOpen = true"
                 @blur="closeModelMenuSoon"
@@ -1829,7 +1804,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
               <!-- 自绘下拉三角(纯装饰,pointer-events:none → 点击穿透到输入框照常聚焦展开);仅在有可选模型时显示 -->
               <span v-if="modelList.length" class="bbs-combo-caret" :class="{ 'is-open': modelMenuOpen }" aria-hidden="true" />
               <ul v-if="modelMenuOpen && modelList.length" class="bbs-combo-menu">
-                <li v-if="!filteredModels.length" class="bbs-combo-empty">无匹配模型</li>
+                <li v-if="!filteredModels.length" class="bbs-combo-empty">没有匹配的模型</li>
                 <li
                   v-for="m in filteredModels"
                   :key="m"
@@ -1858,11 +1833,11 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
             <input v-model.number="editingChannel.temperature" class="bbs-input" type="number" step="0.1" min="0" max="2" />
           </label>
           <label class="bbs-mini-field">
-            <span>最大 token</span>
+            <span>最大输出（tokens）</span>
             <input v-model.number="editingChannel.maxTokens" class="bbs-input" type="number" step="256" min="256" />
           </label>
           <label class="bbs-mini-field">
-            <span>超时(秒)</span>
+            <span>超时（秒）</span>
             <input v-model.number="editingChannel.timeoutSec" class="bbs-input" type="number" step="10" min="1" />
           </label>
           <!-- 思考强度:自绘下拉(跟随主题;原生 select 的弹出层由系统渲染,主题管不到)。
@@ -1876,27 +1851,30 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
             />
           </div>
         </div>
-        <span class="bbs-field-hint">思考强度不知道的就选 auto，DS 系推荐 max</span>
+        <span class="bbs-field-hint">思考强度不确定就选 auto，DeepSeek 系列推荐 max。最大输出包括思考过程，摘要总被截断就调大它。</span>
         <label class="bbs-switch-row">
           <span class="bbs-modal-label">流式传输</span>
-          <input v-model="editingChannel.stream" type="checkbox" class="bbs-checkbox" />
+          <input v-model="editingChannel.stream" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
         <label class="bbs-switch-row">
           <span class="bbs-modal-label">发送预填充</span>
-          <input v-model="editingChannel.prefill" type="checkbox" class="bbs-checkbox" />
+          <input v-model="editingChannel.prefill" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
-        <span class="bbs-field-hint">默认开。若副 API 报错信息里出现 prefill 字样,关掉它即可。</span>
+        <span class="bbs-field-hint">默认打开。报错里提到 prefill 时关掉它。</span>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">排除参数</span>
           <input
             v-model="excludeParamsText"
             class="bbs-input"
             type="text"
-            placeholder="逗号分隔,如 temperature, max_tokens"
+            placeholder="用逗号分隔，如 temperature, max_tokens"
           />
-          <span class="bbs-field-hint">这些参数会在发请求前从请求体里删除,用于规避不接受该参数的兼容端点报错。逗号分隔,留空则不排除。</span>
+          <span class="bbs-field-hint">发请求前从请求里删掉这些参数，用来应付不接受某些参数的接口。留空就不删。</span>
         </label>
-        <p v-if="testing[editingChannel.id]" class="bbs-channel-test">{{ testing[editingChannel.id] }}</p>
+        <div v-if="testing[editingChannel.id]" class="bbs-callout bbs-channel-test" :class="TONE_CLASS[testing[editingChannel.id].tone]" role="status">
+          <p>{{ testing[editingChannel.id].text }}</p>
+          <details v-if="testing[editingChannel.id].detail"><summary>技术细节</summary><p>{{ testing[editingChannel.id].detail }}</p></details>
+        </div>
 
         <footer class="bbs-modal-foot">
           <!-- 删除靠左、与右侧主操作拉开,破坏性动作不与「完成」相邻,降低误触。
@@ -1923,7 +1901,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
           top-layer
           @confirm="confirmRemoveChannel"
         >
-          确定删除渠道「{{ editingChannel.name || '未命名渠道' }}」吗?此操作不可撤销,已指派该渠道的任务会被清空。
+          确定删除渠道「{{ editingChannel.name || '未命名渠道' }}」吗？删除后不能恢复，用这个渠道的任务会改回「跟随主 API」。
         </ConfirmDialog>
       </div>
     </ModalMask>
@@ -1937,11 +1915,11 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
         </header>
 
         <p class="bbs-modal-label">{{ editingPrompt.hint }}</p>
-        <p class="prism-editor-note">当前为编辑草稿。恢复默认后仍需点「完成」保存；点「取消」不会更改已保存的提示词。</p>
+        <p class="prism-editor-note">改动点「完成」才保存；「恢复默认」后也要点「完成」才生效，点「取消」就放弃修改。</p>
 
         <!-- 可用宏:点一下插入到光标处 -->
         <div class="bbs-macro-bar">
-          <span class="bbs-macro-tip">点击插入宏:</span>
+          <span class="bbs-macro-tip">点一下插入宏：</span>
           <button
             v-for="mac in editingPrompt.macros"
             :key="mac.token"
@@ -2000,7 +1978,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
             />
             <span class="bbs-exclude-row-name">{{ name }}</span>
           </label>
-          <p v-if="!charNames.length" class="bbs-field-hint">未读取到角色列表。请先在 ST 里加载角色卡。</p>
+          <p v-if="!charNames.length" class="bbs-field-hint">没读到角色列表，请先在酒馆里加载角色。</p>
           <p v-else-if="!filteredCharNames.length" class="bbs-field-hint">没有匹配「{{ excludeSearch }}」的角色。</p>
         </div>
 
@@ -2038,7 +2016,7 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
             />
             <span class="bbs-exclude-row-name">{{ name }}</span>
           </label>
-          <p v-if="!worldNames.length" class="bbs-field-hint">未读取到世界书。请先在 ST 里加载 / 挂载世界书。</p>
+          <p v-if="!worldNames.length" class="bbs-field-hint">没读到世界书，请先在酒馆里加载世界书。</p>
           <p v-else-if="!filteredWorldNames.length" class="bbs-field-hint">没有匹配「{{ excludeWorldSearch }}」的世界书。</p>
         </div>
 
@@ -2059,8 +2037,8 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
       :busy="updateState.updating"
       @confirm="confirmUpdate"
     >
-      当前版本 v{{ updateState.current || '—' }},最新版本 v{{ updateState.latest }}。<br />
-      现在更新吗?更新完成后会自动刷新页面生效。
+      当前版本 v{{ updateState.current || '—' }}，最新版本 v{{ updateState.latest }}。<br />
+      现在更新吗？更新完会自动刷新页面。
     </ConfirmDialog>
   </section>
 </template>
@@ -2379,6 +2357,9 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
   clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 78%, 0 100%);
   border-color: transparent;
 }
+.bbs-orb-preview.shape-bookmark .bbs-orb-preview-mark {
+  margin-bottom: 8px;
+}
 .bbs-orb-preview.shape-circle {
   border-radius: 999px;
 }
@@ -2520,10 +2501,9 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
   color: var(--bbs-ink-muted);
 }
 .bbs-channel-test {
-  margin: 2px 0 0;
-  font-size: 12px;
-  color: var(--bbs-ink-soft);
-  word-break: break-all;
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
 }
 
 /* 摘要设置控件 */
@@ -3285,118 +3265,39 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
   min-width: 0;
 }
 .prism-overview {
-  border: 1px solid var(--bbs-line-strong);
-  border-radius: 20px;
-  background: var(--bbs-surface);
-  box-shadow: var(--bbs-card-shadow, var(--bbs-shadow));
-  overflow: hidden;
-  margin-bottom: 28px;
+  margin-bottom: 24px;
 }
 .prism-overview .bbs-master {
   margin: 0;
-  padding: 24px;
+  padding: 16px 20px;
   gap: 16px;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-  background: linear-gradient(115deg, var(--bbs-accent-soft), var(--bbs-surface));
-}
-.prism-engine-icon {
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  width: 48px;
-  height: 48px;
-  border-radius: 16px;
-  background: var(--bbs-surface);
   border: 1px solid var(--bbs-line);
-  color: var(--bbs-accent);
-  font-size: 25px;
+  border-left: 3px solid var(--bbs-accent);
+  border-radius: 14px;
+  box-shadow: none;
+  background: var(--bbs-surface);
 }
-.prism-eyebrow {
-  color: var(--bbs-accent);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: .16em;
-}
+.prism-overview .bbs-master.is-off { border-left-color: var(--bbs-line-strong); }
 .bbs-master-title {
-  margin: 4px 0 0;
-  font-size: 18px;
+  margin: 0;
+  font-size: 16px;
   line-height: 1.5;
   font-weight: 650;
 }
 .prism-master-description {
   color: var(--bbs-ink-soft);
-  margin: 4px 0 0;
-  font-size: 12px;
+  margin: 2px 0 0;
+  font-size: 12.5px;
   line-height: 1.7;
   overflow-wrap: anywhere;
 }
 .prism-master-control {
   display: flex;
   flex: 0 0 auto;
-  flex-direction: column;
   align-items: center;
-  gap: 10px;
 }
-.prism-state {
-  color: var(--bbs-accent);
-  background: var(--bbs-surface);
-  border: 1px solid var(--bbs-line);
-  padding: 3px 9px;
-  border-radius: var(--bbs-radius-pill);
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.prism-state.is-muted { color: var(--bbs-ink-muted); }
 .bbs-master.is-off .bbs-master-text { opacity: 1; }
-.prism-status-grid {
-  margin: 0;
-  padding: 0 24px;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0 24px;
-}
-.prism-status-item {
-  min-width: 0;
-  padding: 18px 0;
-  border-top: 1px solid var(--bbs-line);
-}
-.prism-status-item dt {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--bbs-ink-muted);
-  font-size: 11px;
-}
-.prism-status-item dt :deep(svg) { color: var(--bbs-accent); }
-.prism-status-item dd { margin: 8px 0 0; }
-.prism-status-item strong {
-  display: block;
-  color: var(--bbs-ink);
-  font-size: 15px;
-  line-height: 1.5;
-  font-weight: 650;
-  overflow-wrap: anywhere;
-}
-.prism-status-item dd > span {
-  display: block;
-  color: var(--bbs-ink-soft);
-  font-size: 11px;
-  line-height: 1.7;
-  margin-top: 5px;
-  overflow-wrap: anywhere;
-}
-.prism-overview-note {
-  margin: 0;
-  padding: 12px 24px;
-  border-top: 1px solid var(--bbs-line);
-  color: var(--bbs-ink-muted);
-  background: var(--bbs-surface-2);
-  font-size: 11px;
-  line-height: 1.7;
-}
+.bbs-master.is-off .bbs-master-title { color: var(--bbs-ink-soft); }
 .prism-settings-layout { display: grid; gap: 24px; min-width: 0; }
 .prism-settings-nav {
   display: flex;
@@ -3406,22 +3307,15 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
   align-items: stretch;
   min-width: 0;
 }
-.prism-nav-label {
-  flex: 1 0 100%;
-  color: var(--bbs-ink-muted);
-  font-size: 10px;
-  letter-spacing: .12em;
-  margin-bottom: 2px;
-}
 .prism-settings-nav button {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
-  min-height: 44px;
-  padding: 10px 12px;
+  min-height: 40px;
+  padding: 8px 12px;
   border: 1px solid var(--bbs-line);
-  border-radius: 12px;
+  border-radius: var(--bbs-radius-pill);
   background: var(--bbs-surface);
   color: var(--bbs-ink-soft);
   font: inherit;
@@ -3434,58 +3328,27 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
   background: var(--bbs-accent-soft);
 }
 .prism-settings-nav button > span { min-width: 0; }
-.prism-settings-nav strong { display: block; font-size: 12px; font-weight: 600; }
-.prism-settings-nav small { display: none; font-size: 10px; margin-top: 4px; color: var(--bbs-ink-muted); }
+.prism-settings-nav strong { display: block; font-size: 12.5px; font-weight: 600; }
+.prism-settings-nav small { display: none; font-size: 11px; margin-top: 2px; color: var(--bbs-ink-muted); }
 .prism-nav-arrow { display: none; }
-.bbs-sections { min-width: 0; gap: 32px; }
+.bbs-sections { min-width: 0; gap: 36px; }
 .prism-settings-group { min-width: 0; }
 .prism-group-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
   margin-bottom: 14px;
   min-width: 0;
 }
-.prism-group-number {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  border: 1px solid var(--bbs-line);
-  border-radius: 10px;
-  background: var(--bbs-accent-soft);
-  color: var(--bbs-accent);
-  font: 600 11px/1 var(--bbs-font-mono);
-}
-.prism-group-head > div { min-width: 0; flex: 1; }
 .prism-group-head h2 {
   color: var(--bbs-ink);
-  font-size: 17px;
-  line-height: 1.5;
-  margin: 1px 0 4px;
-  font-weight: 650;
+  font: 600 19px/1.5 var(--bbs-font-reading);
+  letter-spacing: .04em;
+  margin: 0 0 2px;
   scroll-margin-block-start: 24px;
 }
 .prism-group-head p {
   color: var(--bbs-ink-muted);
-  font-size: 12px;
+  font-size: 12.5px;
   line-height: 1.75;
   margin: 0;
-}
-.prism-group-tag {
-  flex: 0 0 auto;
-  padding: 4px 8px;
-  border: 1px solid var(--bbs-line);
-  border-radius: var(--bbs-radius-pill);
-  color: var(--bbs-ink-soft);
-  background: var(--bbs-surface-2);
-  font-size: 10px;
-  line-height: 1.5;
-}
-.prism-group-data .prism-group-tag {
-  color: var(--bbs-warning);
-  background: var(--bbs-warning-soft);
 }
 .prism-group-cards { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
 .prism-settings-card {
@@ -3509,15 +3372,16 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
   visibility: hidden;
 }
 .prism-card-intro {
-  margin: 0 0 18px;
+  margin: 0 0 16px;
   padding: 0 0 14px;
   border-bottom: 1px solid var(--bbs-line);
   color: var(--bbs-ink-soft);
-  font-size: 12px;
+  font-size: 12.5px;
   line-height: 1.8;
 }
 .prism-settings .bbs-field-label { line-height: 1.6; overflow-wrap: anywhere; }
-.prism-settings .bbs-field-hint { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.prism-settings .bbs-field-hint { font-size: 12.5px; line-height: 1.8; overflow-wrap: anywhere; }
+.prism-inline-notice { margin: 8px 0 0; font-size: 12.5px; }
 .bbs-switch-row,
 .bbs-num-row { gap: 20px; min-height: 46px; }
 .bbs-switch-row > .bbs-field-label,
@@ -3582,7 +3446,6 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
   outline-offset: 3px;
 }
 @container prism-settings (min-width: 760px) {
-  .prism-status-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .prism-group-common .prism-group-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .prism-card-wide { grid-column: 1 / -1; }
   .bbs-prompt-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -3590,29 +3453,18 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
 @container prism-settings (min-width: 1100px) {
   .prism-settings-layout { grid-template-columns: 180px minmax(0, 1fr); gap: 28px; align-items: start; }
   .prism-settings-nav { position: sticky; top: 20px; flex-direction: column; }
-  .prism-nav-label { flex-basis: auto; padding-left: 12px; }
-  .prism-settings-nav button { padding: 13px 12px; }
+  .prism-settings-nav button { padding: 11px 12px; border-radius: 12px; }
   .prism-settings-nav button > span { flex: 1; }
   .prism-settings-nav small { display: block; }
   .prism-nav-arrow { display: block; transform: rotate(-90deg); font-size: 12px; }
 }
 @container prism-settings (max-width: 520px) {
-  .prism-overview { border-radius: 16px; margin-bottom: 20px; }
-  .prism-overview .bbs-master { padding: 18px 16px; gap: 10px; }
-  .prism-engine-icon { display: none; }
-  .bbs-master-title { font-size: 16px; }
-  .prism-master-control { gap: 8px; }
-  .prism-status-grid { padding: 0 16px; gap: 0 16px; }
-  .prism-status-item { padding: 14px 0; }
-  .prism-status-item strong { font-size: 14px; }
-  .prism-overview-note { padding: 12px 16px; }
+  .prism-overview { margin-bottom: 20px; }
+  .prism-overview .bbs-master { padding: 14px 16px; gap: 12px; }
+  .bbs-master-title { font-size: 15px; }
   .prism-settings-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .prism-nav-label { grid-column: 1 / -1; }
-  .prism-settings-nav button { padding: 10px; }
-  .prism-group-head { flex-wrap: wrap; gap: 8px; }
-  .prism-group-head > div { flex-basis: calc(100% - 42px); }
-  .prism-group-tag { margin-left: 38px; }
-  .prism-group-head h2 { font-size: 16px; }
+  .prism-settings-nav button { padding: 8px 10px; }
+  .prism-group-head h2 { font-size: 17px; }
   .prism-settings-card :deep(.bbs-collapsible-head) { padding: 14px; }
   .prism-settings-card :deep(.bbs-collapsible-body) { padding: 14px; }
   .bbs-switch-row,
@@ -3640,11 +3492,4 @@ const customPromptCount = computed(() => PROMPT_METAS.filter(meta => isCustom(me
 @media (prefers-reduced-motion: reduce) {
   .prism-settings *, .prism-settings :deep(*), .bbs-modal * { transition: none !important; }
 }
-
-
-.prism-config-details { border-top:1px solid var(--bbs-line); }
-.prism-config-details > summary { cursor:pointer; padding:13px 24px; color:var(--bbs-ink-soft); font-size:12px; }
-.prism-config-details > summary span { margin-left:10px; color:var(--bbs-ink-muted); }
-.prism-config-details > summary:focus-visible { outline:2px solid var(--bbs-accent); outline-offset:-3px; }
-@media(max-width:640px){ .prism-config-details > summary { padding:12px 16px; } .prism-config-details > summary span { font-size:11px; } }
 </style>

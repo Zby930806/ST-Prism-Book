@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue';
-import PageHeader from '@/components/PageHeader.vue';
 import OutlineDiscussion from './OutlineDiscussion.vue';
 import { getContext } from '@/st/context';
 import type { ApiChannel } from '@/api/settings';
@@ -90,7 +89,7 @@ watch(() => [outlineState.revision, outlineState.draft?.id], () => {
   confirmation.value = null;
   loadEditor();
   if (switched) { brief.value = ''; chapterCount.value = 6; error.value = ''; notice.value = ''; }
-  if (discarded && !pending.value) notice.value = '聊天或规划版本已变化，旧编辑已失效；请基于重新载入的草稿编辑，未写入其他聊天。';
+  if (discarded && !pending.value) notice.value = '聊天或规划已经变了，之前没保存的修改已作废，请在重新载入的草稿上编辑。';
 }, { immediate: true });
 watch([brief, chapterCount], () => { if (confirmation.value?.kind === 'generate') confirmation.value = null; });
 watch([editor, editBrief], () => { if (confirmation.value?.kind === 'activate') confirmation.value = null; }, { deep: true });
@@ -100,7 +99,7 @@ async function runAction(action: () => Promise<void>, success: string) {
   if (locked.value) return;
   if (!sameChat(editorChat) || expectedRevision.value !== outlineState.revision) {
     confirmation.value = null;
-    error.value = '聊天或规划版本已变化，请在重新载入后操作；未修改任何内容。';
+    error.value = '聊天或规划已经变了，请等重新载入后再操作，这次没有改动任何内容。';
     return;
   }
   const chat = captureChat();
@@ -112,7 +111,7 @@ async function runAction(action: () => Promise<void>, success: string) {
 }
 function requireEditor() {
   if (!sameChat(editorChat) || expectedRevision.value !== outlineState.revision || draftId !== outlineState.draft?.id) {
-    throw new Error('聊天或规划版本已变化，请重新载入后编辑；旧内容未保存。');
+    throw new Error('聊天或规划已经变了，请重新载入后再编辑，刚才的修改没有保存。');
   }
 }
 function contentForSave(): OutlineContent {
@@ -134,7 +133,7 @@ function saveDraft() {
   return runAction(async () => {
     requireEditor();
     await saveOutlineDraft(contentForSave(), editBrief.value, expectedRevision.value);
-  }, '规划草稿已保存，尚未加入计划；已有创作规划未替换。');
+  }, '草稿已保存。确认加入计划后才会生效。');
 }
 function addStage() {
   if (locked.value || !editor.value || editor.value.chapters.length >= 12) return;
@@ -150,9 +149,9 @@ function requestConfirmation(kind: Confirmation['kind']) {
   if (locked.value) return;
   error.value = ''; notice.value = '';
   if (kind === 'activate') {
-    if (dirty.value) { error.value = '草稿有未保存修改，请先保存，再确认加入计划。'; return; }
+    if (dirty.value) { error.value = '草稿还有没保存的修改，请先保存再加入计划。'; return; }
     try { requireEditor(); } catch (cause) { error.value = errorText(cause); return; }
-    if (!draftCurrent.value) { error.value = '参考剧情已变化，请核对草稿并重新保存后加入计划。'; return; }
+    if (!draftCurrent.value) { error.value = '草稿生成后剧情有变动，请核对草稿、重新保存后再加入计划。'; return; }
   }
   confirmation.value = { kind, revision: outlineState.revision, id: kind === 'activate' ? outlineState.draft?.id ?? null : active.value?.id ?? null, chat: captureChat() };
 }
@@ -160,7 +159,7 @@ function validConfirmation(kind: Confirmation['kind']): Confirmation | null {
   const request = confirmation.value;
   confirmation.value = null;
   if (!request || request.kind !== kind || !sameChat(request.chat) || request.revision !== outlineState.revision) {
-    error.value = '聊天或规划已变化，请重新核对并确认。'; return null;
+    error.value = '聊天或规划已经变了，请重新核对后再确认。'; return null;
   }
   return request;
 }
@@ -172,22 +171,22 @@ function confirmActivate() {
     requireEditor();
     if (dirty.value) throw new Error('请先保存修改，再加入计划。');
     await activateOutlineDraft(request.id!);
-  }, '已加入计划中的「创作规划」，从第一阶段开始；普通剧情计划保持不变。');
+  }, '已加入创作规划，从第一阶段开始。');
 }
 function confirmReconfirm() {
   if (locked.value) return;
   const request = validConfirmation('reconfirm');
   if (!request || request.id !== active.value?.id) return;
-  return runAction(reconfirmOutline, '已按当前剧情重新确认创作规划，继续当前阶段。');
+  return runAction(reconfirmOutline, '已按当前剧情重新启用，继续当前阶段。');
 }
 function toggleActive() {
   const value = active.value;
   if (!value) return;
-  return runAction(() => setOutlineEnabled(!value.enabled), value.enabled ? '创作规划已暂停，不再注入。' : '创作规划已继续。');
+  return runAction(() => setOutlineEnabled(!value.enabled), value.enabled ? '规划已暂停，不再交给正文模型。' : '规划已继续。');
 }
 function moveStage(index: number) {
   return runAction(() => setOutlineChapter(index), index === active.value?.content.chapters.length
-    ? '规划进度已结束，已撤下注入；不代表剧情事件已经发生。' : '已调整规划阶段；没有写入剧情事实或发送正文。');
+    ? '规划已结束，不再交给正文模型。' : '已切换到新的阶段。');
 }
 
 const apiDraft = reactive(copy(outlineSettings.channel));
@@ -207,14 +206,14 @@ watch(outlineSettings, () => {
   apiBaseline.value = JSON.stringify([apiMode.value, apiDraft]);
 }, { deep: true });
 function channelIssue(channel: ApiChannel): string {
-  if (!channel.url.trim() || !channel.model.trim()) return '请填写 API 地址和模型。';
+  if (!channel.url.trim() || !channel.model.trim()) return '请填写 API 地址和模型名。';
   try {
     const url = new URL(channel.url.trim());
     if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password || /[?#\\\s]/.test(channel.url.trim())) throw new Error();
-  } catch { return 'API 地址须为不含账号、查询参数或片段的完整 HTTP / HTTPS 地址。'; }
-  if (!Number.isFinite(channel.temperature) || channel.temperature < 0 || channel.temperature > 2) return '温度须为0–2。';
-  if (!Number.isSafeInteger(channel.maxTokens) || channel.maxTokens < 256 || channel.maxTokens > 65535) return '最大输出须为256–65535之间的整数。';
-  if (!Number.isSafeInteger(channel.timeoutSec) || channel.timeoutSec < 10 || channel.timeoutSec > 600) return '超时须为10–600之间的整数秒。';
+  } catch { return 'API 地址要写完整的 http(s) 地址，不能带账号、? 参数或 #。'; }
+  if (!Number.isFinite(channel.temperature) || channel.temperature < 0 || channel.temperature > 2) return '温度要在 0–2 之间。';
+  if (!Number.isSafeInteger(channel.maxTokens) || channel.maxTokens < 256 || channel.maxTokens > 65535) return '最大输出要是 256–65535 之间的整数。';
+  if (!Number.isSafeInteger(channel.timeoutSec) || channel.timeoutSec < 10 || channel.timeoutSec > 600) return '超时要是 10–600 之间的整数（秒）。';
   return '';
 }
 const configurationIssue = computed(() => {
@@ -233,7 +232,7 @@ function saveApi() {
     saveOutlineSettings();
     Object.assign(apiDraft, copy(outlineSettings.channel)); apiMode.value = outlineSettings.apiMode;
     apiBaseline.value = JSON.stringify([apiMode.value, apiDraft]);
-    notice.value = '规划 API 设置已保存，未发送生成请求，也未修改札记配置。';
+    notice.value = '规划 API 设置已保存。';
   } catch (cause) { Object.assign(outlineSettings, previous); error.value = errorText(cause); }
 }
 const canGenerate = computed(() => engineEnabled.value && !locked.value && !protectedSettings.value && !configurationIssue.value
@@ -242,7 +241,7 @@ async function startGeneration(confirmed = false) {
   if (!canGenerate.value) return;
   if (!sameChat(editorChat) || expectedRevision.value !== outlineState.revision) {
     confirmation.value = null;
-    error.value = '聊天或规划版本已变化，请在当前聊天重新填写创作要求。';
+    error.value = '聊天或规划已经变了，请在当前聊天重新填写要求。';
     return;
   }
   if (outlineState.draft || active.value) {
@@ -263,43 +262,47 @@ async function startGeneration(confirmed = false) {
       <p v-if="notice" role="status">{{ notice }}</p>
       <p v-if="outlineRun.status" role="status">{{ outlineRun.status }}</p>
     </div>
-    <div v-if="error || outlineRun.error || outlineState.issue || outlineSettingsIssue" class="warning" role="alert">
+    <div v-if="error || outlineRun.error || outlineState.issue || outlineSettingsIssue" class="bbs-callout is-danger" role="alert">
       <p v-if="error">{{ error }}</p><p v-if="outlineRun.error">{{ outlineRun.error }}</p>
       <p v-if="outlineState.issue">{{ outlineState.issue }}</p><p v-if="outlineSettingsIssue">{{ outlineSettingsIssue }}</p>
+      <details v-if="outlineRun.error && outlineRun.errorDetail"><summary>技术细节</summary><p>{{ outlineRun.errorDetail }}</p></details>
     </div>
-    <p v-if="disabled" class="hint">当前记忆处于保护状态，暂不可修改创作规划。</p>
-    <p v-if="!engineEnabled" class="hint">当前角色的棱镜宝书尚未启用；可以查看已保存规划，但不生成或注入正文。</p>
+    <p v-if="disabled" class="hint">记忆处于只读保护，暂时不能修改规划。</p>
+    <p v-if="!engineEnabled" class="hint">当前角色没有启用棱镜宝书：可以查看规划，但不会生成，也不会交给正文。</p>
 
-    <section v-if="active" class="planner-card" aria-label="已确认的创作规划">
-      <h3>创作规划 · {{ active.content.title }}</h3>
-      <p class="hint">这些是未来创作方向，不是角色已作出的承诺或已发生的剧情。普通剧情计划保持独立。</p>
-      <p v-if="!currentStage">规划进度已结束，已撤下注入。</p>
+    <section v-if="active" class="planner-card planner-active" aria-label="已确认的创作规划">
+      <header class="planner-active-head">
+        <h3>{{ active.content.title }}</h3>
+        <span class="planner-state" :class="{ 'is-on': currentStage && engineEnabled && activeCurrent && active.enabled }">{{ !currentStage ? '已结束' : !engineEnabled ? '未启用' : !activeCurrent ? '剧情有改动，已暂停' : active.enabled ? '正在生效' : '已暂停' }}</span>
+      </header>
+      <p v-if="!currentStage" class="hint">规划已经全部走完，不再交给正文模型。</p>
       <template v-else>
-        <p><strong>当前阶段 {{ active.currentChapter + 1 }} / {{ active.content.chapters.length }} · {{ currentStage.title }}</strong></p>
-        <p class="hint">{{ !engineEnabled ? '棱镜宝书未启用，暂不注入' : !activeCurrent ? '参考剧情已变化，暂停注入，须重新核对' : active.enabled ? '已启用当前阶段指引' : '已暂停注入' }}</p>
-        <p class="plain"><strong>阶段目标：</strong>{{ currentStage.goal }}</p>
-        <ul><li v-for="(beat, index) in currentStage.beats" :key="index">{{ beat }}</li></ul>
-        <p class="plain"><strong>发展方式：</strong>{{ currentStage.approach }}</p>
-        <p class="plain"><strong>推进条件：</strong>{{ currentStage.exitCriteria }}</p>
+        <p class="planner-stage-line">第 {{ active.currentChapter + 1 }} / {{ active.content.chapters.length }} 阶段 · {{ currentStage.title }}</p>
+        <dl class="planner-stage">
+          <div><dt>阶段目标</dt><dd class="plain">{{ currentStage.goal }}</dd></div>
+          <div><dt>剧情要点</dt><dd><ul><li v-for="(beat, index) in currentStage.beats" :key="index">{{ beat }}</li></ul></dd></div>
+          <div><dt>发展方式</dt><dd class="plain">{{ currentStage.approach }}</dd></div>
+          <div><dt>推进条件</dt><dd class="plain">{{ currentStage.exitCriteria }}</dd></div>
+        </dl>
       </template>
       <div class="actions">
         <button v-if="currentStage && (activeCurrent || active.enabled)" type="button" class="bbs-btn" :disabled="locked" @click="toggleActive">{{ active.enabled ? '暂停规划' : '继续规划' }}</button>
         <button v-if="currentStage && !activeCurrent" type="button" class="bbs-btn" :disabled="locked" @click="requestConfirmation('reconfirm')">核对后重新启用</button>
         <button type="button" class="bbs-btn" :disabled="locked || active.currentChapter === 0" @click="moveStage(active.currentChapter - 1)">上一阶段</button>
-        <button v-if="currentStage" type="button" class="bbs-btn" :disabled="locked" @click="moveStage(active.currentChapter + 1)">{{ active.currentChapter + 1 === active.content.chapters.length ? '结束规划并撤下注入' : '下一阶段' }}</button>
+        <button v-if="currentStage" type="button" class="bbs-btn" :disabled="locked" @click="moveStage(active.currentChapter + 1)">{{ active.currentChapter + 1 === active.content.chapters.length ? '结束规划' : '下一阶段' }}</button>
       </div>
-      <p class="hint">手动推进只标记规划进度，不代表剧情完成；最后阶段结束后不再注入。不会自动连写或发送正文。</p>
+      <p class="hint">阶段由你手动切换；切换只代表规划进度，不代表剧情已经发生。</p>
       <div v-if="confirmation?.kind === 'reconfirm'" class="confirmation">
-        <p>请先核对下方全部阶段与当前剧情。确认后以当前剧情为依据，重新启用当前阶段，不改写普通剧情计划。</p>
+        <p>先对照当前剧情看一遍下面的各阶段。确认后会以当前剧情为准，重新启用当前阶段。</p>
         <div class="actions"><button type="button" class="bbs-btn bbs-btn-primary" :disabled="locked" @click="confirmReconfirm">已核对，重新启用</button><button type="button" class="bbs-btn" @click="confirmation = null">取消</button></div>
       </div>
-      <details class="all-stages">
-        <summary>查看全部已确认阶段（{{ active.content.chapters.length }}）</summary>
+      <details class="bbs-disclosure all-stages">
+        <summary>全部阶段 <span class="bbs-disclosure-meta">{{ active.content.chapters.length }} 个</span></summary>
         <p class="plain">{{ active.content.premise }}</p>
         <ul v-if="active.content.constraints.length"><li v-for="(constraint, index) in active.content.constraints" :key="index">{{ constraint }}</li></ul>
         <ol class="stage-list">
           <li v-for="(stage, index) in active.content.chapters" :key="index">
-            <h4>{{ stage.title }} <span class="hint">{{ index < active.currentChapter ? '已越过' : index === active.currentChapter ? '当前' : '待推进' }}</span></h4>
+            <h4>{{ stage.title }} <span class="hint">{{ index < active.currentChapter ? '已过' : index === active.currentChapter ? '当前' : '未开始' }}</span></h4>
             <p class="plain"><strong>阶段目标：</strong>{{ stage.goal }}</p>
             <ul><li v-for="(beat, beatIndex) in stage.beats" :key="beatIndex">{{ beat }}</li></ul>
             <p class="plain"><strong>发展方式：</strong>{{ stage.approach }}</p>
@@ -310,76 +313,78 @@ async function startGeneration(confirmed = false) {
     </section>
 
     <OutlineDiscussion :disabled="locked" :unsaved="dirty" :configuration-issue="configurationIssue" :api-dirty="apiDirty" />
-    <details class="planner-workbench">
-      <summary>{{ active ? '编辑 / 重新生成创作规划' : '大纲规划 · 生成草稿并确认加入计划' }}<span v-if="dirty">（未保存）</span></summary>
-      <PageHeader title="大纲规划" description="结合当前剧情与你的创作要求，规划剧情要点和发展方式。" icon="plans" />
-      <p class="hint">生成规划草稿 → 编辑剧情要点与发展方式 → 确认加入计划。只有确认后的内容才进入上方「创作规划」。</p>
-      <p class="hint">角色的动机、知情范围与关系连续性优先，不强迫人物配合节点。大纲总上限 {{ L.json }} 字符；正文只注入全局约束与当前阶段，合计最多 {{ L.injection }} 字符，不提前注入后续阶段。API 输出 token 上限需在所用渠道中单独设置。</p>
-      <section class="planner-card" aria-label="生成规划草稿">
+    <details class="bbs-disclosure is-card planner-workbench">
+      <summary>{{ active ? '修改或重新生成规划' : '生成规划草稿' }}<span v-if="dirty" class="bbs-disclosure-meta">有未保存的修改</span></summary>
+      <p class="hint">写下你希望故事怎么发展，模型会结合当前剧情给出分阶段的草稿；你可以修改，确认加入计划后才生效。</p>
+      <section class="planner-section" aria-label="生成规划草稿">
         <fieldset :disabled="locked">
-          <label>创作要求 / 你的 input<textarea v-model="brief" class="bbs-input" rows="4" maxlength="8000" placeholder="想往哪里发展？可写人物关系、希望出现的转折、节奏与禁区；系统会结合当前聊天剧情。" /></label>
-          <label>规划阶段数（1–12）<input v-model.number="chapterCount" class="bbs-input" type="number" min="1" max="12" step="1" inputmode="numeric" /></label>
-          <button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canGenerate" @click="startGeneration()">{{ outlineState.draft || active ? '重新生成规划草稿' : '生成规划草稿' }}</button>
+          <label>你希望怎么发展<textarea v-model="brief" class="bbs-input" rows="4" maxlength="8000" placeholder="比如人物关系往哪走、想要的转折、节奏、不想出现的情节……会结合当前剧情来规划。" /></label>
+          <div class="planner-row">
+            <label class="planner-count">分几个阶段（1–12）<input v-model.number="chapterCount" class="bbs-input" type="number" min="1" max="12" step="1" inputmode="numeric" /></label>
+            <button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canGenerate" @click="startGeneration()">{{ outlineState.draft || active ? '重新生成规划草稿' : '生成规划草稿' }}</button>
+          </div>
         </fieldset>
         <button v-if="outlineRun.busy || generating" type="button" class="bbs-btn" @click="cancelOutline">取消生成</button>
-        <p v-if="configurationIssue" class="warning">{{ configurationIssue }} <button type="button" class="bbs-btn" @click="apiOpen = true">配置 API</button></p>
-        <p v-if="apiDirty" class="hint">API 配置有未保存修改；生成仅使用已保存配置。</p>
+        <p v-if="configurationIssue" class="bbs-callout is-warning">{{ configurationIssue }} <button type="button" class="bbs-btn bbs-btn-sm" @click="apiOpen = true">打开规划 API 设置</button></p>
+        <p v-if="apiDirty" class="hint">API 设置还没保存，生成会用上次保存的设置。</p>
         <div v-if="confirmation?.kind === 'generate'" class="confirmation">
-          <p>重新生成会再次调用 API，可能产生费用；成功后替换草稿和未保存编辑，但不会替换已确认创作规划。</p>
+          <p>重新生成会再请求一次 API。成功后会替换当前草稿（包括没保存的修改），正在用的规划不受影响。</p>
           <div class="actions"><button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canGenerate" @click="startGeneration(true)">确认重新生成</button><button type="button" class="bbs-btn" @click="confirmation = null">取消</button></div>
         </div>
-        <pre v-if="outlineRun.draft" class="stream" aria-label="规划生成中的纯文本草稿">{{ outlineRun.draft }}</pre>
+        <pre v-if="outlineRun.draft" class="stream" aria-label="正在生成的草稿">{{ outlineRun.draft }}</pre>
       </section>
 
-      <section v-if="editor" class="planner-card" aria-label="未确认的规划草稿编辑器">
-        <h3>规划草稿 <span class="hint">{{ dirty ? '有未保存修改' : '已保存，待确认加入计划' }}</span></h3>
-        <p v-if="!draftCurrent" class="warning">参考剧情已变化；请核对编辑内容，并重新保存后加入计划。</p>
+      <section v-if="editor" class="planner-section" aria-label="未确认的规划草稿编辑器">
+        <h3>规划草稿 <span class="hint">{{ dirty ? '有未保存的修改' : '已保存，还没加入计划' }}</span></h3>
+        <p v-if="!draftCurrent" class="bbs-callout is-warning">草稿生成后剧情有变动，请核对后重新保存再加入计划。</p>
         <fieldset :disabled="locked">
           <label>规划标题<input v-model="editor.title" class="bbs-input" :maxlength="L.title" /></label>
           <label>整体发展方向<textarea v-model="editor.premise" class="bbs-input" rows="3" :maxlength="L.premise" /></label>
-          <label>创作约束（每行一条，最多{{ L.constraints }}条，每条{{ L.constraint }}字）<textarea v-model="editor.constraints" class="bbs-input" rows="3" /></label>
-          <label>草稿对应的创作要求<textarea v-model="editBrief" class="bbs-input" rows="3" maxlength="8000" /></label>
-          <label>编辑阶段（一次只展开一个）<select v-model.number="selectedChapter" class="bbs-input"><option v-for="(stage, index) in editor.chapters" :key="index" :value="index">{{ index + 1 }} · {{ stage.title || '未命名阶段' }}</option></select></label>
-          <div class="actions"><button type="button" class="bbs-btn" :disabled="editor.chapters.length >= 12" @click="addStage">新增阶段</button><button type="button" class="bbs-btn" :disabled="editor.chapters.length <= 1" @click="removeStage">删除当前编辑阶段</button></div>
+          <label>整体约束（每行一条）<textarea v-model="editor.constraints" class="bbs-input" rows="3" /></label>
+          <label>当时的要求<textarea v-model="editBrief" class="bbs-input" rows="3" maxlength="8000" /></label>
+          <div class="planner-row">
+            <label class="planner-stage-pick">编辑哪个阶段<select v-model.number="selectedChapter" class="bbs-input"><option v-for="(stage, index) in editor.chapters" :key="index" :value="index">{{ index + 1 }} · {{ stage.title || '未命名阶段' }}</option></select></label>
+            <div class="actions"><button type="button" class="bbs-btn" :disabled="editor.chapters.length >= 12" @click="addStage">新增阶段</button><button type="button" class="bbs-btn" :disabled="editor.chapters.length <= 1" @click="removeStage">删除这个阶段</button></div>
+          </div>
           <div v-if="currentEdit" class="stage-editor">
             <label>阶段标题<input v-model="currentEdit.title" class="bbs-input" :maxlength="L.title" /></label>
             <label>阶段目标<textarea v-model="currentEdit.goal" class="bbs-input" rows="3" :maxlength="L.goal" /></label>
-            <label>剧情要点（每行一条，1–{{ L.beats }}条，每条{{ L.beat }}字）<textarea v-model="currentEdit.beats" class="bbs-input" rows="5" /></label>
-            <label>发展方式（1–{{ L.approach }}字）<textarea v-model="currentEdit.approach" class="bbs-input" rows="4" :maxlength="L.approach" /></label>
+            <label>剧情要点（每行一条）<textarea v-model="currentEdit.beats" class="bbs-input" rows="5" /></label>
+            <label>发展方式<textarea v-model="currentEdit.approach" class="bbs-input" rows="4" :maxlength="L.approach" /></label>
             <label>推进条件<textarea v-model="currentEdit.exitCriteria" class="bbs-input" rows="3" :maxlength="L.exitCriteria" /></label>
           </div>
-          <div class="actions"><button type="button" class="bbs-btn" @click="saveDraft">保存草稿编辑</button><button type="button" class="bbs-btn bbs-btn-primary" @click="requestConfirmation('activate')">确认加入计划</button></div>
+          <div class="actions"><button type="button" class="bbs-btn" @click="saveDraft">保存草稿</button><button type="button" class="bbs-btn bbs-btn-primary" @click="requestConfirmation('activate')">确认加入计划</button></div>
         </fieldset>
-        <p v-if="dirty" class="hint">请先保存修改，才能确认加入计划。保存草稿不会自动启用。</p>
+        <p v-if="dirty" class="hint">保存修改后才能加入计划。</p>
         <div v-if="confirmation?.kind === 'activate'" class="confirmation">
-          <p>将已保存草稿加入「创作规划」，替换此前确认的创作规划并从第一阶段开始。普通剧情计划不变，不会把这些内容记为已发生的事实。</p>
-          <div class="actions"><button type="button" class="bbs-btn bbs-btn-primary" :disabled="locked || dirty" @click="confirmActivate">确认加入并启用</button><button type="button" class="bbs-btn" @click="confirmation = null">取消</button></div>
+          <p>把这份草稿设为当前的创作规划，从第一阶段开始；之前确认的规划会被替换。</p>
+          <div class="actions"><button type="button" class="bbs-btn bbs-btn-primary" :disabled="locked || dirty" @click="confirmActivate">加入并启用</button><button type="button" class="bbs-btn" @click="confirmation = null">取消</button></div>
         </div>
       </section>
 
-      <details class="planner-card" :open="apiOpen" @toggle="apiOpen = ($event.target as HTMLDetailsElement).open">
-        <summary>规划 API 设置 · {{ outlineSettings.apiMode === 'notes' ? '复用札记' : '专用渠道' }}</summary>
-        <p class="hint">默认复用札记 API 配置，不要求开启札记开关；不使用正文 / 摘要渠道，不改动札记提示词或数据。</p>
-        <p class="hint">配置只有显式保存后才生效。密钥保存在酒馆扩展设置中，请勿分享含密钥的备份。</p>
+      <details class="bbs-disclosure planner-api" :open="apiOpen" @toggle="apiOpen = ($event.target as HTMLDetailsElement).open">
+        <summary>规划 API 设置 <span class="bbs-disclosure-meta">{{ outlineSettings.apiMode === 'notes' ? '用札记的 API' : '专用 API' }}</span></summary>
+        <p class="hint">默认直接用札记填好的 API（不需要打开札记功能），也可以给规划单独设一个。改完点保存才生效；密钥保存在酒馆的扩展设置里，分享设置备份前记得删掉。</p>
         <form @submit.prevent="saveApi">
           <fieldset :disabled="locked || protectedSettings">
-            <label>API 模式<select v-model="apiMode" class="bbs-input" aria-label="API 模式"><option value="notes">复用札记 API（默认）</option><option value="independent">大纲规划专用 API</option></select></label>
+            <label>用哪个 API<select v-model="apiMode" class="bbs-input" aria-label="API 模式"><option value="notes">用札记的 API（默认）</option><option value="independent">规划专用 API</option></select></label>
             <template v-if="apiMode === 'independent'">
               <label>API 地址<input v-model="apiDraft.url" class="bbs-input" type="url" required autocomplete="off" spellcheck="false" placeholder="https://your-api.example/v1" /></label>
               <label>API 密钥<input v-model="apiDraft.key" class="bbs-input" type="password" autocomplete="new-password" spellcheck="false" /></label>
               <div class="actions"><button type="button" class="bbs-btn" :disabled="modelsLoading || !apiDraft.url.trim()" @click="pullModels">{{ modelsLoading ? '拉取中…' : '拉取模型列表' }}</button><button v-if="modelsLoading" type="button" class="bbs-btn" @click="cancelModels">取消拉取</button></div>
               <label v-if="models.length">搜索模型<input v-model="modelSearch" class="bbs-input" type="search" /></label>
-              <label>模型下拉选择<select class="bbs-input" aria-label="模型下拉选择" :value="visibleModels.includes(apiDraft.model) ? apiDraft.model : ''" :disabled="!visibleModels.length || modelsLoading" @change="apiDraft.model = ($event.target as HTMLSelectElement).value"><option value="" disabled>{{ models.length ? '选择匹配模型，或在下方手填' : '先拉取列表，也可直接手填' }}</option><option v-for="model in visibleModels" :key="model" :value="model">{{ model }}</option></select></label>
-              <p v-if="matchingModels.length > 200" class="hint">仅显示前200个匹配项，请搜索缩小范围。</p>
-              <label>模型 ID / 手动输入<input v-model="apiDraft.model" class="bbs-input" required autocomplete="off" spellcheck="false" /></label>
-              <p class="hint">拉取使用当前表单地址和密钥，不调用生成接口，不自动选择模型或保存。</p>
-              <p v-if="modelsMessage" class="hint" role="status">{{ modelsMessage }}</p><p v-if="modelsError" class="warning" role="alert">{{ modelsError.replace('札记 API', '规划 API') }}</p>
-              <label>温度<input v-model.number="apiDraft.temperature" class="bbs-input" type="number" required min="0" max="2" step="0.1" /></label>
-              <label>最大输出 tokens<input v-model.number="apiDraft.maxTokens" class="bbs-input" type="number" required min="256" max="65535" step="1" /></label>
-              <label>超时（秒）<input v-model.number="apiDraft.timeoutSec" class="bbs-input" type="number" required min="10" max="600" step="1" /></label>
-              <label class="checkbox"><input v-model="apiDraft.stream" type="checkbox" />流式输出</label>
+              <label>从列表选择<select class="bbs-input" aria-label="模型下拉选择" :value="visibleModels.includes(apiDraft.model) ? apiDraft.model : ''" :disabled="!visibleModels.length || modelsLoading" @change="apiDraft.model = ($event.target as HTMLSelectElement).value"><option value="" disabled>{{ models.length ? '选择一个模型' : '先拉取列表，或直接在下面填写' }}</option><option v-for="model in visibleModels" :key="model" :value="model">{{ model }}</option></select></label>
+              <p v-if="matchingModels.length > 200" class="hint">只显示前 200 个，可以搜索缩小范围。</p>
+              <label>模型名<input v-model="apiDraft.model" class="bbs-input" required autocomplete="off" spellcheck="false" /></label>
+              <p v-if="modelsMessage" class="hint" role="status">{{ modelsMessage }}</p><p v-if="modelsError" class="bbs-callout is-warning" role="alert">{{ modelsError }}</p>
+              <div class="planner-grid">
+                <label>温度<input v-model.number="apiDraft.temperature" class="bbs-input" type="number" required min="0" max="2" step="0.1" /></label>
+                <label>最大输出 tokens<input v-model.number="apiDraft.maxTokens" class="bbs-input" type="number" required min="256" max="65535" step="1" /></label>
+                <label>超时（秒）<input v-model.number="apiDraft.timeoutSec" class="bbs-input" type="number" required min="10" max="600" step="1" /></label>
+              </div>
+              <label class="checkbox"><input v-model="apiDraft.stream" type="checkbox" class="bbs-switch" />流式输出</label>
             </template>
-            <button type="submit" class="bbs-btn bbs-btn-primary">保存规划 API 设置</button>
+            <button type="submit" class="bbs-btn bbs-btn-primary">保存</button>
           </fieldset>
         </form>
       </details>
@@ -388,26 +393,48 @@ async function startGeneration(confirmed = false) {
 </template>
 
 <style scoped>
-.outline-planner { min-width:0; max-width:100%; margin:12px 0; color:var(--bbs-ink); font-size:12px; line-height:1.8; overflow-wrap:anywhere; }
+.outline-planner { min-width:0; max-width:100%; margin:6px 0 0; color:var(--bbs-ink); font-size:13px; line-height:1.75; overflow-wrap:anywhere; }
 .outline-planner *, .outline-planner *::before, .outline-planner *::after { box-sizing:border-box; }
-.planner-card { min-width:0; margin:12px 0; padding:12px; background:var(--bbs-surface); border:1px solid var(--bbs-line); border-radius:8px; }
-.outline-planner h3 { margin:0 0 8px; font-size:14px; }.outline-planner h4 { margin:8px 0; font-size:13px; }
-.outline-planner p { margin:8px 0; }.outline-planner ul,.outline-planner ol { padding-left:20px; }
-.outline-planner summary { display:list-item; min-height:44px; padding:10px 0; cursor:pointer; font-weight:600; white-space:normal; }
+.planner-card { min-width:0; margin:12px 0; padding:16px 18px; background:var(--bbs-surface); border:1px solid var(--bbs-line); border-radius:12px; }
+.planner-active { border-left:3px solid var(--bbs-accent); }
+.planner-active-head { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+.planner-state { padding:2px 10px; border-radius:var(--bbs-radius-pill); background:var(--bbs-surface-2); font-size:12px; color:var(--bbs-ink-muted); }
+.planner-state.is-on { background:var(--bbs-accent-soft); color:var(--bbs-accent); }
+.planner-stage-line { margin:6px 0 10px; font-weight:600; color:var(--bbs-ink-soft); }
+.planner-stage { display:grid; gap:10px; margin:0; }
+.planner-stage > div { display:grid; grid-template-columns:72px minmax(0,1fr); gap:10px; }
+.planner-stage dt { font-size:12px; line-height:1.9; color:var(--bbs-ink-muted); }
+.planner-stage dd { margin:0; min-width:0; }
+.planner-stage ul { margin:0; padding-left:18px; }
+.planner-section { margin:12px 0 4px; }
+.planner-section + .planner-section { padding-top:14px; border-top:1px solid var(--bbs-line); }
+.planner-row { display:flex; align-items:flex-end; flex-wrap:wrap; gap:10px 14px; }
+.planner-row .actions { margin:0 0 10px; }
+.planner-count { flex:0 1 180px; }
+.planner-stage-pick { flex:1 1 220px; }
+.planner-row > .bbs-btn { margin-bottom:10px; }
+.planner-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,140px),1fr)); gap:0 12px; }
+.planner-api { margin-top:10px; border-top:1px solid var(--bbs-line); }
+.outline-planner h3 { margin:0; font-size:15px; font-weight:650; }
+.outline-planner h4 { margin:8px 0; font-size:13px; }
+.outline-planner p { margin:8px 0; }
+.outline-planner ul,.outline-planner ol { padding-left:20px; }
 .outline-planner fieldset { min-width:0; margin:0; padding:0; border:0; }
-.outline-planner label { display:flex; flex-direction:column; gap:5px; min-width:0; margin:10px 0; }
-.outline-planner .bbs-input { display:block; width:100%; min-width:0; max-width:100%; min-height:44px; }
+.outline-planner label { display:flex; flex-direction:column; gap:5px; min-width:0; margin:10px 0; font-size:12.5px; color:var(--bbs-ink-soft); }
+.outline-planner .bbs-input { display:block; width:100%; min-width:0; max-width:100%; min-height:40px; font-size:13px; color:var(--bbs-ink); }
 .outline-planner textarea { resize:vertical; line-height:1.7; font:inherit; }
-.outline-planner .checkbox { flex-direction:row; align-items:center; min-height:44px; }.checkbox input { width:18px; height:18px; }
-.actions { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }
-.outline-planner .bbs-btn { min-width:44px; min-height:44px; max-width:100%; white-space:normal; overflow-wrap:anywhere; }
-.hint { color:var(--bbs-ink-muted); font-size:11px; font-weight:400; }
-.warning { color:var(--bbs-danger); }.feedback { color:var(--bbs-accent); }
-.confirmation { padding:10px; margin:12px 0; border-left:2px solid var(--bbs-accent); background:var(--bbs-accent-soft); }
-.stream { white-space:pre-wrap; overflow-wrap:anywhere; max-height:260px; overflow:auto; font:12px/1.7 var(--bbs-font-mono); }
-.plain { white-space:pre-wrap; }.stage-editor { border-top:1px solid var(--bbs-line); margin-top:12px; }
+.outline-planner .checkbox { flex-direction:row; align-items:center; gap:10px; min-height:40px; }
+.actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+.outline-planner .bbs-btn { min-width:44px; min-height:38px; max-width:100%; white-space:normal; overflow-wrap:anywhere; }
+.hint { color:var(--bbs-ink-muted); font-size:12.5px; font-weight:400; }
+.feedback { color:var(--bbs-accent); font-size:13px; }
+.feedback p:empty { display:none; }
+.confirmation { padding:10px 14px; margin:12px 0; border-left:2px solid var(--bbs-accent); border-radius:0 8px 8px 0; background:var(--bbs-accent-soft); }
+.stream { white-space:pre-wrap; overflow-wrap:anywhere; max-height:260px; overflow:auto; padding:10px 12px; border-radius:8px; background:var(--bbs-surface-2); font:12px/1.7 var(--bbs-font-mono); }
+.plain { white-space:pre-wrap; }
+.stage-editor { border-top:1px solid var(--bbs-line); margin-top:12px; }
 .stage-list > li + li { border-top:1px solid var(--bbs-line); margin-top:12px; padding-top:6px; }
-.outline-planner :deep(.prism-page-title) { font-size:21px; }.outline-planner :deep(.prism-page-header) { margin:12px 0; }
 .outline-planner :is(button,input,select,textarea,summary):focus-visible { outline:2px solid var(--bbs-accent); outline-offset:2px; }
-@media(max-width:360px) { .planner-card { padding:8px; }.actions { gap:6px; } }
+@media(max-width:480px) { .planner-card { padding:14px; } .planner-stage > div { grid-template-columns:minmax(0,1fr); gap:2px; } }
+@media(max-width:360px) { .planner-card { padding:10px; } .actions { gap:6px; } }
 </style>

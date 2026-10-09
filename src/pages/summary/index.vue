@@ -20,7 +20,7 @@ import SummaryNode from './SummaryNode.vue';
 import SummaryPager from './SummaryPager.vue';
 import InitialTime from './InitialTime.vue';
 import { summaryErrorPresentation } from './errorPresentation';
-const summaryFailure = computed(() => summaryErrorPresentation(engineState.lastError));
+const summaryFailure = computed(() => summaryErrorPresentation(engineState.lastError, engineState.lastFailure));
 import { arrayPage, createSummaryIndex, PENDING_PAGE_SIZE, SUMMARY_PAGE_SIZE, treePage, walkExpanded } from './view';
 import { SUMMARY_CTX, type SummaryRow } from './ctx';
 
@@ -46,7 +46,7 @@ function isSameChat(snapshot: ChatSnapshot): boolean {
 function allowMemoryEdit(): boolean {
   const issue = memoryWriteIssue();
   if (!issue && !conversionPending.value) return true;
-  toast(issue || '正在本地转换旧记忆，请等待保存结果。', 'warning');
+  toast(issue || '正在转换旧记忆，请等保存完成。', 'warning');
   return false;
 }
 function openConversionConfirm() {
@@ -63,7 +63,7 @@ async function confirmConversion() {
   const target = conversionChat;
   if (!target || !isSameChat(target)) {
     convertConfirmOpen.value = false;
-    toast('聊天已切换，请在目标聊天重新确认转换。', 'warning');
+    toast('聊天已切换，请回到要转换的聊天再确认。', 'warning');
     return;
   }
   conversionPending.value = true;
@@ -75,11 +75,11 @@ async function confirmConversion() {
     recomputeDerived();
     refreshInjection();
     convertConfirmOpen.value = false;
-    toast('旧记忆已本地转换并保存，已保留备份、刷新摘要与注入；未调用 AI，无需重建。', 'success');
+    toast('旧记忆已转换并保存，原数据另有备份。', 'success');
   } catch (error) {
     if (!isSameChat(target)) return;
     conversionError.value = error instanceof Error ? error.message : String(error);
-    toast('本地转换未确认成功：' + conversionError.value + ' 请先导出聊天核对，不要重建或反复转换。', 'error');
+    toast('转换没有成功：' + conversionError.value + ' 请先导出聊天检查，不要反复转换或重建。', 'error');
     convertConfirmOpen.value = false;
   } finally {
     conversionPending.value = false;
@@ -215,12 +215,12 @@ const foldGroups = computed(() => [
   {
     kind: 'plan' as const, title: '计划', items: plansOnly.value,
     foldable: true, shown: plansShown.value,
-    empty: '还没有普通剧情计划。摘要时会自动记下角色的打算,也可在此手动添加；创作规划在上方独立管理。',
+    empty: '还没有计划。角色说出的打算会在摘要时自动记下，也可以手动添加。',
   },
   {
     kind: 'suspense' as const, title: '悬念', items: suspenses.value,
     foldable: suspenseFoldable.value, shown: suspenseShown.value,
-    empty: '还没有悬念。故事里埋下的谜团、未解之事会记在这里。',
+    empty: '还没有悬念。故事里没解开的谜团会记在这里。',
   },
 ]);
 
@@ -410,8 +410,8 @@ async function doResummarize() {
       resummaryHint.value = `已生成 ${made} 条总结`;
     } else {
       // 未达阈值:补一句动态节奏,告诉用户大概每多少楼总结一次
-      const cadence = showCadence.value ? `,约每 ${resummaryEvery.value} 楼总结一次` : '';
-      resummaryHint.value = `当前没有达到总结阈值的摘要${cadence}`;
+      const cadence = showCadence.value ? `，大约每 ${resummaryEvery.value} 楼合并一次` : '';
+      resummaryHint.value = `还没攒够需要合并的摘要${cadence}。`;
     }
   } finally {
     resummaryRunning.value = false;
@@ -525,7 +525,7 @@ function closeImportHistory() {
 function openImportHistory() {
   if (!allowMemoryEdit()) return;
   if (memory.summaries.some(s => s.imported)) {
-    toast('当前聊天已有一条导入历史;请直接编辑或删除后重导', 'warning');
+    toast('这个聊天已经导入过旧总结，可以直接编辑它，或删掉后重新导入。', 'warning');
     return;
   }
   const chat = getContext()?.chat ?? [];
@@ -534,7 +534,7 @@ function openImportHistory() {
     if (isAiFloor(chat[i])) { lastAi = i; break; }
   }
   if (lastAi < 0) {
-    toast('当前聊天没有可接管的 AI 剧情楼层', 'warning');
+    toast('这个聊天还没有 AI 回复，没有可以覆盖的楼层。', 'warning');
     return;
   }
   importHistoryText.value = '';
@@ -548,26 +548,26 @@ async function saveImportedHistory() {
   const text = importHistoryText.value.trim();
   const floor = Number(importHistoryFloor.value);
   if (!text) {
-    toast('请先粘贴旧总结正文', 'warning');
+    toast('请先粘贴旧总结的内容。', 'warning');
     return;
   }
   if (!Number.isInteger(floor) || floor < 0 || floor > importHistoryMaxFloor.value) {
-    toast(`覆盖截止楼层应在 #0 - #${importHistoryMaxFloor.value} 之间`, 'warning');
+    toast(`截止楼层要在 #0 – #${importHistoryMaxFloor.value} 之间。`, 'warning');
     return;
   }
   const chat = getContext()?.chat ?? [];
   if (!isAiFloor(chat[floor])) {
-    toast('覆盖截止楼层必须是一条 AI 剧情楼层,避免把尚未回应的用户消息一起隐藏', 'warning');
+    toast('截止楼层要选一条 AI 回复，免得把还没回复的用户消息也藏起来。', 'warning');
     return;
   }
   if (memory.summaries.some(s => s.imported)) {
-    toast('当前聊天已有导入历史,没有重复导入', 'warning');
+    toast('这个聊天已经有导入的旧总结了。', 'warning');
     return;
   }
   // 不静默覆盖棱镜宝书已经做过的逐楼摘要:重叠时两套叙事会同时进入上下文,应由用户先处理边界。
   const overlap = derivedMeta.leaves.some(l => !l.stale && l.msgIndex <= floor);
   if (overlap) {
-    toast('所选范围内已有棱镜宝书摘要;请缩小截止楼层,或先删除重叠摘要', 'warning');
+    toast('这个范围里已经有棱镜宝书的摘要了，请把截止楼层往前调，或先删掉重叠的摘要。', 'warning');
     return;
   }
 
@@ -589,7 +589,7 @@ async function saveImportedHistory() {
   closeImportHistory();
   recomputeDerived();
   await syncHiddenNow(true);
-  toast(`已导入旧总结,接管 #0 - #${floor}`, 'success');
+  toast(`已导入旧总结，覆盖 #0 – #${floor}。`, 'success');
 }
 
 const searching = computed(() => searchQuery.value.trim().length > 0);
@@ -822,7 +822,7 @@ const currentTime = computed(() => derivedMeta.latestStoryTime || memory.state.t
 const currentWeekday = computed(() => weekdayLabel(currentTime.value));
 
 function levelLabel(level: number, imported = false): string {
-  if (imported) return '导入历史';
+  if (imported) return '旧总结';
   if (level === 0) return '摘要';
   return `总结L${level}`;
 }
@@ -835,17 +835,17 @@ function floorLabel(r: SummaryRow): string {
 async function onDelete(r: SummaryRow) {
   if (!allowMemoryEdit()) return;
   if (r.kind === 'leaf') {
-    if (!confirm('删除这条摘要?它带来的物品、计划、时间地点变化会按剩余摘要重新计算(可能回退);包含它的总结也会一并删除。原文楼层仍保持隐藏。')) return;
+    if (!confirm('删除这条摘要？它记下的物品、计划、时间地点等变化会按剩下的摘要重新计算，包含它的总结也会一起删除。原楼层保持隐藏。')) return;
     if (typeof r.msgIndex === 'number') deleteLeafAt(r.msgIndex);
   } else {
     if (r.imported) {
-      if (!confirm('删除这条导入历史?它接管的旧楼层会重新显示并回到待摘要状态;原世界书内容不受影响。')) return;
+      if (!confirm('删除这条导入的旧总结？它覆盖的楼层会重新显示，并变回待摘要。世界书不受影响。')) return;
       invalidateSummaryAncestors(r.id);
       recomputeDerived();
       await syncHiddenNow(true);
       return;
     }
-    if (!confirm('删除这条总结?被它收纳的下层摘要会重新展开,物品/计划等不受影响。')) return;
+    if (!confirm('删除这条总结？它合并的摘要会重新显示，物品、计划等不受影响。')) return;
     deleteSummary(r.id);
   }
   refreshInjection();
@@ -908,82 +908,147 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
 
 <template>
   <section class="bbs-page bbs-summary-page">
-    <PageHeader title="故事记忆" eyebrow="STORY ARCHIVE / 摘要" description="故事向前，来路留在这里。" />
-    <InitialTime />
-    <section class="bbs-overview" aria-label="当前聊天实时概览">
-      <div class="bbs-overview-head">
-        <span class="bbs-overview-caption">本篇记录</span>
-        <span class="bbs-overview-status" :class="{ 'is-protected': editingBlocked }">{{ conversionBusy ? '转换保存中' : compatibilityState.mode === 'ready' ? '记忆可用' : compatibilityState.mode === 'convert' ? '待本地转换' : '写入保护中' }}</span>
-      </div>
+    <PageHeader icon="summary" title="摘要" description="每层楼发生的事记成摘要，攒够了再合并成总结；生成正文时，这些记忆会一起交给模型。" />
+
+    <section class="bbs-overview" aria-label="当前聊天概览">
       <dl class="bbs-overview-stats">
         <div><dt>逐楼摘要</dt><dd>{{ editingBlocked ? '—' : liveLeafCount }}</dd></div>
-        <div><dt>上层总结</dt><dd>{{ editingBlocked ? '—' : memory.summaries.length }}</dd></div>
-        <div><dt>阅读入口</dt><dd>{{ editingBlocked ? '—' : rootNodes.length }}</dd></div>
-        <div class="bbs-overview-pending"><dt>待补录</dt><dd>{{ editingBlocked ? '—' : pendingFloors.length }}</dd></div>
+        <div><dt>总结</dt><dd>{{ editingBlocked ? '—' : memory.summaries.length }}</dd></div>
+        <div class="bbs-overview-pending" :class="{ 'has-pending': !editingBlocked && pendingFloors.length > 0 }"><dt>待补摘</dt><dd>{{ editingBlocked ? '—' : pendingFloors.length }}</dd></div>
       </dl>
-      <div class="bbs-backfill-entry">
-        <p>{{ editingBlocked ? '先核对下方兼容说明，再继续编辑。' : pendingFloors.length ? '有缺失楼层，只补录，不重建。' : '已记录的故事，无需重新摘要。' }}</p>
-        <button class="bbs-btn bbs-btn-primary" type="button" :disabled="editingBlocked || engineState.running || batchState.running || !pendingFloors.length" title="调用 AI 补齐缺失摘要及状态；不覆盖已有摘要，不是手动补写" @click="openBatchConfirm"><Icon name="plus" />补录摘要（AI）</button>
+      <div class="bbs-overview-side">
+        <span class="bbs-overview-status" :class="{ 'is-protected': editingBlocked }">{{ conversionBusy ? '正在转换' : compatibilityState.mode === 'ready' ? '记忆正常' : compatibilityState.mode === 'convert' ? '需要转换' : '只读保护' }}</span>
+        <!-- 补摘入口常驻：没有漏摘的楼层时灰掉，有就显示层数，点开是批量补摘的确认。 -->
+        <button
+          class="bbs-btn bbs-btn-primary bbs-backfill-btn"
+          type="button"
+          :disabled="editingBlocked || engineState.running || batchState.running || !pendingFloors.length"
+          title="用 AI 给没有摘要的楼层补上摘要和状态，按楼层顺序一层一层来，不会覆盖已有的摘要"
+          @click="openBatchConfirm"
+        ><Icon name="plus" />{{ !editingBlocked && pendingFloors.length ? `补摘 ${pendingFloors.length} 层` : '补摘' }}</button>
       </div>
     </section>
-    <aside class="bbs-compatibility" :class="{ 'bbs-compatibility-warning': compatibilityState.mode !== 'ready' }" aria-label="旧记忆兼容状态" aria-live="polite">
-      <h2 v-if="compatibilityState.mode !== 'ready'" class="bbs-title bbs-title-sub">{{ compatibilityState.mode === 'convert' ? '旧记忆兼容 · 待本地转换' : '旧记忆兼容 · 保护中' }}</h2>
-      <details v-if="compatibilityState.mode === 'ready'" class="bbs-compatibility-ready">
-        <summary>旧版记忆已兼容<span>无需重建</span></summary>
-        <p>已按兼容格式读取本聊天已有摘要及 L1 / L2 等上层总结（如有），不需要因升级重新摘要或重建。</p>
-        <p class="bbs-field-hint">最近一次加载／兼容检查报告：{{ compatibilityState.leaves }} 条逐楼摘要、{{ compatibilityState.summaries }} 条上层总结。这是检查时快照，不是实时数量；当前内容以下方列表为准。</p>
-      </details>
-      <template v-else-if="compatibilityState.mode === 'convert'">
-        <p>检测到可本地转换的旧格式；转换不调用 AI，也不是重新摘要。确认后会备份旧记忆元数据，保留原摘要与上层总结，再尝试保存聊天。</p>
-        <p class="bbs-field-hint">最近一次检查：待转换旧摘要 {{ compatibilityState.conversion.length }} 条、已识别逐楼摘要 {{ compatibilityState.leaves }} 条、上层总结 {{ compatibilityState.summaries }} 条（非实时数量）。请先导出聊天备份；转换前暂停补摘、重建、总结、导入等编辑。</p>
-        <button class="bbs-btn bbs-btn-primary" type="button" :disabled="conversionBusy || engineState.running" @click="openConversionConfirm">{{ conversionBusy ? '正在本地转换并保存…' : '确认本地转换…' }}</button>
-        <p v-if="engineState.running" class="bbs-field-hint">请先等待当前摘要任务结束，再进行转换。</p>
+
+    <aside v-if="compatibilityState.mode !== 'ready'" class="bbs-callout is-warning bbs-compatibility" aria-label="旧记忆兼容状态" aria-live="polite">
+      <template v-if="compatibilityState.mode === 'convert'">
+        <strong class="bbs-callout-title">旧记忆需要转换</strong>
+        <p>这个聊天用的是旧版存储格式。转换只改存储结构，不请求 AI，也不改动摘要内容，转换前会自动备份。</p>
+        <p class="bbs-compat-note">上次检查：待转换 {{ compatibilityState.conversion.length }} 条，逐楼摘要 {{ compatibilityState.leaves }} 条，总结 {{ compatibilityState.summaries }} 条。转换前请先导出聊天备份，期间不要补摘、重建或导入。</p>
+        <button class="bbs-btn bbs-btn-primary" type="button" :disabled="conversionBusy || engineState.running" @click="openConversionConfirm">{{ conversionBusy ? '正在转换…' : '备份并转换…' }}</button>
+        <p v-if="engineState.running" class="bbs-compat-note">等当前的摘要任务结束后再转换。</p>
       </template>
       <template v-else>
-        <p>无法确认旧记忆可安全写入，已暂停补摘、重建、总结、导入及其他编辑入口。原始数据保留，未按空记忆覆盖。</p>
+        <strong class="bbs-callout-title">旧记忆处于只读保护</strong>
+        <p>没法确认旧记忆能安全写入，补摘、重建、总结、导入和编辑都暂停了。原数据还在，没有被当成空记忆覆盖。</p>
         <ul v-if="compatibilityState.issues.length">
           <li v-for="(issue, index) in compatibilityState.issues" :key="index">{{ issue }}</li>
         </ul>
-        <p v-else>兼容检查尚未给出可安全写入的结论。</p>
-        <p>建议先使用酒馆的导出聊天功能备份，再核对以上原因。不要通过重建或导入覆盖来解除保护。</p>
+        <p v-else>兼容检查还没有给出结论。</p>
+        <p class="bbs-compat-note">建议先用酒馆的导出聊天功能备份，再对照上面的原因检查。不要用重建或导入来解除保护。</p>
       </template>
-      <p v-if="conversionBusy" role="status">转换／保存尚未结束，请勿重复提交或切换聊天；隐藏确认窗口不会取消已经开始的保存。</p>
-      <p v-if="conversionError" class="bbs-compatibility-error" role="alert">本地转换未确认成功：{{ conversionError }} 请先导出聊天并核对保存结果，不要重建或反复转换。</p>
+      <p v-if="conversionBusy" role="status">转换和保存还没结束，请不要重复提交或切换聊天；关掉确认窗口也不会中断保存。</p>
+      <p v-if="conversionError" class="bbs-compatibility-error" role="alert">转换没有成功：{{ conversionError }} 请先导出聊天检查保存结果，不要反复转换或重建。</p>
     </aside>
     <ConfirmDialog
       v-model:open="convertConfirmOpen"
-      title="本地转换旧记忆"
-      confirm-text="备份并本地转换"
+      title="转换旧记忆"
+      confirm-text="备份并转换"
       :busy="conversionBusy || engineState.running"
-      busy-text="请等待当前操作完成…"
+      busy-text="请等当前操作完成…"
       @confirm="confirmConversion"
     >
-      此操作仅转换当前聊天的旧存储格式，不调用 AI，不重写摘要正文；保留摘要、L1 / L2 等上层总结，并在聊天元数据中备份旧记录。升级不需要重建。
-      请先额外导出聊天备份。转换需要保存聊天和元数据，保存可能失败；若提示失败，请导出并核对磁盘中的实际结果，不要直接重试或重建。保存期间请勿切换聊天。继续？
+      只转换当前聊天的旧存储格式：不请求 AI，不改写摘要内容，摘要和各层总结都会保留，旧记录另存一份备份。
+      请先另外导出聊天备份。转换要保存聊天和元数据，保存可能失败；如果提示失败，请导出聊天检查实际结果，不要直接重试或重建。保存期间不要切换聊天。继续吗？
     </ConfirmDialog>
+
+    <div v-if="engineState.lastError" class="bbs-callout is-danger bbs-summary-failure" role="alert">
+      <strong class="bbs-callout-title">{{ summaryFailure.title }}</strong>
+      <span v-if="summaryFailure.help" class="bbs-callout-help">{{ summaryFailure.help }}</span>
+      <details v-if="summaryFailure.details">
+        <summary>{{ summaryFailure.detailsLabel }}</summary>
+        <p>{{ summaryFailure.details }}</p>
+      </details>
+    </div>
+
     <fieldset class="bbs-memory-editors" :disabled="editingBlocked" aria-label="本聊天记忆编辑">
 
+    <div v-if="batchState.running" class="bbs-pending bbs-job-progress" role="status" aria-live="polite">
+        <span class="bbs-batch-progress">
+          <span class="bbs-pending-spin"></span>
+          正在补摘 {{ batchState.done }}/{{ batchState.total }}
+          <button class="bbs-batch-cancel" type="button" :disabled="batchState.cancelRequested" @click="cancelBatchBackfill">
+            {{ batchState.cancelRequested ? '停止中…' : '取消' }}
+          </button>
+        </span>
+    </div>
+
+    <!-- 未摘要楼层:只列楼层号,点一下单独补摘那一楼;楼层多时可「批量补摘」 -->
+    <section v-if="pendingFloors.length" class="bbs-pending bbs-backfill" aria-label="未摘要楼层">
+      <div class="bbs-pending-head">
+        <span class="bbs-pending-label" :data-count="pendingFloors.length">
+          <Icon name="summary" />未摘要楼层
+        </span>
+        <button
+          v-if="!batchState.running"
+          class="bbs-btn bbs-btn-sm bbs-batch-btn"
+          type="button"
+          :disabled="engineState.running || summarizingFloor !== null"
+          title="按楼层顺序逐层补摘（每层请求一次 AI）" aria-label="按楼层顺序逐层补摘（每层请求一次 AI）"
+          @click="openBatchConfirm"
+        >
+          <Icon name="plans" />批量补摘
+        </button>
+      </div>
+      <p class="bbs-backfill-description">点楼层号单独补摘，或按顺序批量补摘。每层楼请求一次 AI。</p>
+      <div class="bbs-pending-chips">
+        <button
+          v-for="f in pendingWindow.items"
+          :key="f"
+          class="bbs-pending-chip"
+          type="button"
+          :disabled="engineState.running || summarizingFloor !== null || batchState.running"
+          :title="`给楼层 #${f} 生成摘要`" :aria-label="`给楼层 #${f} 生成摘要`"
+          @click="summarizeOne(f)"
+        >
+          <span v-if="summarizingFloor === f" class="bbs-pending-spin"></span>
+          <template v-else>#{{ f }}</template>
+        </button>
+      </div>
+    </section>
+
+    <SummaryPager :page="pendingWindow.page" :total="pendingWindow.total" :size="PENDING_PAGE_SIZE" label="待补摘楼层" @update:page="pendingPage = $event" />
+
+    <ConfirmDialog
+      v-if="!editingBlocked"
+      v-model:open="batchConfirmOpen"
+      title="批量补摘"
+      confirmText="开始"
+      @confirm="runBatchBackfill"
+    >
+      共有 {{ pendingFloors.length }} 层楼没有摘要。会按楼层顺序逐层生成摘要，并更新人物、物品、计划等状态，每层请求一次 AI。
+      中途可以取消，会在当前这层完成后停下。继续吗？
+    </ConfirmDialog>
+
     <details class="bbs-reader-context">
-      <summary><span class="bbs-context-icon"><Icon name="plans" /></span><span>当前局势与计划<small>{{ focus?.situation || '查看此刻的场景与未竟之事' }}</small></span><Icon name="chevron" class="bbs-context-chevron" /></summary>
+      <summary><span class="bbs-context-icon"><Icon name="plans" /></span><span>当前局势与计划<small>{{ focus?.situation || '此刻的场面、计划、悬念和创作规划' }}</small></span><Icon name="chevron" class="bbs-context-chevron" /></summary>
       <div class="bbs-reader-context-body">
     <!-- ===== 眼下局势卡:当前场面快照(覆盖型;省略=不动,清空=落幕) ===== -->
     <div class="bbs-fold-section">
       <div class="bbs-section-head">
-        <div><span class="bbs-section-kicker">01 / 此刻</span><h2 class="bbs-title bbs-title-sub">眼下局势</h2><p class="bbs-section-description">当前场面的快照，随故事进展更新。</p></div>
+        <h2 class="bbs-title bbs-title-sub">眼下局势</h2>
         <!-- 无卡时:铅笔留在区块头;有卡时:编辑/清空收进卡头操作区 -->
         <span v-if="!focus" class="bbs-focus-acts">
           <button
             class="bbs-add-mini"
             type="button"
             :disabled="!hasLeaf"
-            :title="hasLeaf ? '手动编写局势卡' : '需先有摘要才能手动编写'" :aria-label="hasLeaf ? '手动编写局势卡' : '需先有摘要才能手动编写'"
+            :title="hasLeaf ? '手动写局势卡' : '有摘要后才能手动写'" :aria-label="hasLeaf ? '手动写局势卡' : '有摘要后才能手动写'"
             @click="openFocusEdit"
           >
             <Icon name="edit" />
           </button>
         </span>
       </div>
-      <!-- 与角色卡同构:左色条 + 头行(在场者 + 记时 + 操作区)+ 主文 + 彩色分类小标签字段表 -->
       <article v-if="focus" class="bbs-focus">
         <div class="bbs-focus-head">
           <span class="bbs-focus-names" :class="{ 'is-empty': !focus.participants.length }">
@@ -995,7 +1060,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
               class="bbs-plan-act"
               type="button"
               :disabled="!hasLeaf"
-              :title="hasLeaf ? '手动修改局势卡' : '需先有摘要才能手动修改'" :aria-label="hasLeaf ? '手动修改局势卡' : '需先有摘要才能手动修改'"
+              :title="hasLeaf ? '修改局势卡' : '有摘要后才能修改'" :aria-label="hasLeaf ? '修改局势卡' : '有摘要后才能修改'"
               @click="openFocusEdit"
             >
               <Icon name="edit" />
@@ -1004,7 +1069,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
               class="bbs-plan-act bbs-plan-del"
               type="button"
               :disabled="!hasLeaf"
-              title="清空局势卡(场面落幕)" aria-label="清空局势卡(场面落幕)"
+              title="清空局势卡（场面结束）" aria-label="清空局势卡（场面结束）"
               @click="clearFocus"
             >
               <Icon name="close" />
@@ -1028,7 +1093,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           </div>
         </dl>
       </article>
-      <p v-else class="bbs-plan-empty">{{ hasLeaf ? '还没有局势卡。场面实质变化时摘要会自动更新，也可用右上角铅笔手动编写。' : '先生成一条摘要，再手动编写局势卡；场面变化也会在摘要时自动记录。' }}</p>
+      <p v-else class="bbs-plan-empty">{{ hasLeaf ? '还没有局势卡。场面有实质变化时，摘要会自动更新；也可以点右边的铅笔自己写。' : '有了第一条摘要后才能手动写局势卡，之后场面变化也会在摘要时自动记下。' }}</p>
     </div>
 
     <!-- 当前状态 -->
@@ -1051,20 +1116,20 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           <button class="bbs-summary-act" type="button" title="关闭" aria-label="关闭" @click="cancelFocusEdit"><Icon name="close" /></button>
         </header>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">局面(一句话)</span>
-          <textarea v-model="editingFocus.situation" class="bbs-input bbs-modal-textarea" rows="2" placeholder="如「午后同居日常,她情绪有点低落」/「潜行中,刚被巡逻队发现」"></textarea>
+          <span class="bbs-modal-label">局面（一句话）</span>
+          <textarea v-model="editingFocus.situation" class="bbs-input bbs-modal-textarea" rows="2" placeholder="如「午后在家，她情绪有点低落」「潜行中，刚被巡逻队发现」"></textarea>
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">在场参与者(顿号分隔)</span>
-          <input v-model="editingFocus.participants" class="bbs-input" type="text" placeholder="如 主角、阿黛尔" />
+          <span class="bbs-modal-label">在场的人（用顿号分隔）</span>
+          <input v-model="editingFocus.participants" class="bbs-input" type="text" placeholder="如：主角、阿黛尔" />
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">互动张力(可选,高门槛)</span>
-          <input v-model="editingFocus.tension" class="bbs-input" type="text" placeholder="仅明确且持续的社交张力,如 冷战/尴尬" />
+          <span class="bbs-modal-label">互动张力（可选，只写明确且持续的）</span>
+          <input v-model="editingFocus.tension" class="bbs-input" type="text" placeholder="如：冷战、尴尬" />
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">即将发生(可选,禁预测)</span>
-          <input v-model="editingFocus.pendingBeat" class="bbs-input" type="text" placeholder="仅正文明确预告/约定的事" />
+          <span class="bbs-modal-label">即将发生（可选，只写正文里约好的事）</span>
+          <input v-model="editingFocus.pendingBeat" class="bbs-input" type="text" placeholder="正文里明确预告或约定的事" />
         </label>
         <footer class="bbs-modal-foot">
           <button class="bbs-btn" type="button" @click="cancelFocusEdit">取消</button>
@@ -1073,10 +1138,8 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
       </div>
     </ModalMask>
 
-    <!-- ===== 计划 / 悬念:顶部两区,各自折叠计数 ===== -->
-    <!-- 结构同构、配置驱动(foldGroups):标题行兼折叠开关,右侧「+」独立(disabled 时不响应,不误触折叠) -->
+    <!-- ===== 计划 / 悬念 / 创作规划 ===== -->
     <section class="bbs-planning" aria-label="进行中的计划与悬念">
-      <div class="bbs-planning-intro"><span class="bbs-section-kicker">02 / 未竟之事</span><p class="bbs-section-description">计划中可管理角色的打算，也可根据剧情和你的输入生成创作规划。创作规划是未来方向，不是已发生的事实；悬念保留尚未揭晓的线索。</p></div>
       <div class="bbs-planning-grid">
         <div v-for="g in foldGroups" :key="g.kind" class="bbs-fold-section">
           <div class="bbs-section-head">
@@ -1092,13 +1155,12 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
               <Icon v-if="g.foldable" name="chevron" class="bbs-fold-caret" :class="{ 'is-collapsed': !g.shown }" />
               <h2 class="bbs-title bbs-title-sub">{{ g.title }}</h2>
               <span class="bbs-fold-count">{{ g.items.length }}</span>
-              <span v-if="g.kind === 'plan' && outlineState.active" class="bbs-outline-count">创作规划 {{ outlineState.active.content.chapters.length }} 阶段</span>
             </button>
             <button
               class="bbs-add-mini"
               type="button"
               :disabled="!hasLeaf"
-              :title="hasLeaf ? `手动添加${g.title}` : '需先有摘要才能手动添加'" :aria-label="hasLeaf ? `手动添加${g.title}` : '需先有摘要才能手动添加'"
+              :title="hasLeaf ? `手动添加${g.title}` : '有摘要后才能手动添加'" :aria-label="hasLeaf ? `手动添加${g.title}` : '有摘要后才能手动添加'"
               @click="openComposer(g.kind)"
             >
               <Icon name="plus" />
@@ -1108,7 +1170,6 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           <!-- grid 1fr↔0fr 收展:高度自适应、无需写死 max-height;reduced-motion 下瞬切(见样式) -->
           <div class="bbs-fold-wrap" :class="{ 'is-collapsed': !g.shown }" :inert="!g.shown" :aria-hidden="!g.shown">
             <div v-if="g.shown" class="bbs-fold-inner">
-              <OutlinePlanner v-if="g.kind === 'plan'" :disabled="editingBlocked" />
               <div v-if="g.items.length" class="bbs-plan-group">
                 <div v-for="p in arrayPage(g.items, planPages[g.kind]).items" :key="p.id" class="bbs-plan">
                   <div class="bbs-plan-head">
@@ -1127,95 +1188,37 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
                   </div>
                 </div>
               </div>
-              <p v-else class="bbs-plan-empty">{{ g.empty }}<span v-if="!hasLeaf" class="bbs-empty-prerequisite">手动添加需先有一条摘要。</span></p>
+              <p v-else class="bbs-plan-empty">{{ g.empty }}<span v-if="!hasLeaf" class="bbs-empty-prerequisite">有了第一条摘要后就能手动添加。</span></p>
               <SummaryPager :page="arrayPage(g.items, planPages[g.kind]).page" :total="g.items.length" :size="SUMMARY_PAGE_SIZE" :label="g.title" @update:page="planPages[g.kind] = $event" />
             </div>
           </div>
         </div>
-
       </div>
+
+      <section class="bbs-outline-section" aria-label="创作规划">
+        <div class="bbs-section-head">
+          <h2 class="bbs-title bbs-title-sub">创作规划</h2>
+          <span v-if="outlineState.active" class="bbs-outline-count">{{ outlineState.active.content.chapters.length }} 个阶段</span>
+        </div>
+        <p class="bbs-outline-intro">按剧情和你的想法规划接下来怎么写。规划是写作方向，不是已经发生的事；确认后才会交给正文模型，一次只给当前阶段。</p>
+        <OutlinePlanner :disabled="editingBlocked" />
+      </section>
     </section>
 
       </div>
     </details>
 
-    <!-- 分章分隔:两侧细线 + 居中金色菱形(古籍分章鱼尾标记),比普通 hr 更明确地隔开两区 -->
-    <div class="bbs-divider" role="separator" aria-hidden="true">
-      <span class="bbs-divider-mark"></span>
-    </div>
-
-    <div v-if="batchState.running" class="bbs-pending bbs-job-progress" role="status" aria-live="polite">
-        <span class="bbs-batch-progress">
-          <span class="bbs-pending-spin"></span>
-          记忆处理中 {{ batchState.done }}/{{ batchState.total }}
-          <button class="bbs-batch-cancel" type="button" :disabled="batchState.cancelRequested" @click="cancelBatchBackfill">
-            {{ batchState.cancelRequested ? '停止中…' : '取消' }}
-          </button>
-        </span>
-    </div>
-
-    <!-- 未摘要楼层:只列楼层号,点一下单独补摘那一楼;楼层多时可「批量补摘」 -->
-    <section v-if="pendingFloors.length" class="bbs-pending bbs-backfill" aria-label="普通补摘">
-      <div class="bbs-pending-head">
-        <span class="bbs-pending-label" :data-count="pendingFloors.length">
-          <Icon name="summary" />未摘要楼层
-        </span>
-        <!-- 批量补摘:把全部未摘楼层逐楼串行补完(完整更新状态);批量进行中显示进度+取消 -->
-        <button
-          v-if="!batchState.running"
-          class="bbs-btn bbs-btn-sm bbs-batch-btn"
-          type="button"
-          :disabled="engineState.running || summarizingFloor !== null"
-          title="按楼序逐一补完摘要和状态（每楼单独请求）" aria-label="按楼序逐一补完摘要和状态（每楼单独请求）"
-          @click="openBatchConfirm"
-        >
-          <Icon name="plans" />批量补摘
-        </button>
-
-      </div>
-      <p class="bbs-backfill-description">点楼层号补摘该楼，或批量按楼序处理。每楼一次 AI 请求，包含摘要与状态更新。</p>
-      <div class="bbs-pending-chips">
-        <button
-          v-for="f in pendingWindow.items"
-          :key="f"
-          class="bbs-pending-chip"
-          type="button"
-          :disabled="engineState.running || summarizingFloor !== null || batchState.running"
-          :title="`对楼层 #${f} 生成摘要`" :aria-label="`对楼层 #${f} 生成摘要`"
-          @click="summarizeOne(f)"
-        >
-          <span v-if="summarizingFloor === f" class="bbs-pending-spin"></span>
-          <template v-else>#{{ f }}</template>
-        </button>
-      </div>
-    </section>
-
-    <SummaryPager :page="pendingWindow.page" :total="pendingWindow.total" :size="PENDING_PAGE_SIZE" label="待补录楼层" @update:page="pendingPage = $event" />
-
-    <!-- 批量补摘确认弹窗 -->
-    <ConfirmDialog
-      v-if="!editingBlocked"
-      v-model:open="batchConfirmOpen"
-      title="补录摘要（AI 批量补摘）"
-      confirmText="开始"
-      @confirm="runBatchBackfill"
-    >
-      共 {{ pendingFloors.length }} 个未摘楼层,将按楼序逐楼生成完整摘要和人物、物品、计划等状态（每楼一次请求）。
-      过程中可随时取消(会在当前楼完成后停下)。继续?
-    </ConfirmDialog>
-
     <!-- ===== 摘要 ===== -->
     <div class="bbs-section-head bbs-reading-head">
       <div class="bbs-summary-heading">
-        <h2 class="bbs-title bbs-title-sub">故事脉络</h2>
-        <button class="bbs-btn bbs-btn-sm bbs-estimate-toggle" type="button" :aria-expanded="showInjectionEstimate" @click="showInjectionEstimate = !showInjectionEstimate">{{ showInjectionEstimate ? '收起注入量估算' : '按需估算注入量' }}</button>
-        <div v-if="showInjectionEstimate" class="bbs-token-estimate" title="按 UTF-8 字节数估算,不会请求后端">
+        <h2 class="bbs-title bbs-title-sub">摘要与总结</h2>
+        <button class="bbs-btn bbs-btn-sm bbs-estimate-toggle" type="button" :aria-expanded="showInjectionEstimate" @click="showInjectionEstimate = !showInjectionEstimate">{{ showInjectionEstimate ? '收起估算' : '估算注入量' }}</button>
+        <div v-if="showInjectionEstimate" class="bbs-token-estimate" title="按字数粗略估算，不请求接口">
           <span>摘要注入 ≈ {{ injectionTokenEstimate.summary }} tokens</span>
           <span>其他注入 ≈ {{ injectionTokenEstimate.other }} tokens</span>
         </div>
       </div>
-      <div class="bbs-summary-tools" role="group" aria-label="摘要阅读与整理工具">
-        <!-- 搜索:点放大镜展开搜索框(平时收起不占版面);已展开则收起并清空 -->
+      <div class="bbs-summary-tools" role="group" aria-label="摘要整理工具">
         <button
           v-if="!selectMode"
           class="bbs-add-mini"
@@ -1227,14 +1230,12 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
         >
           <Icon name="search" /><span class="bbs-btn-label">搜索</span>
         </button>
-        <!-- 选择模式:进/出。选择态下换成「完成」,并隐藏立即总结(避免与合并撞车) -->
-        <!-- 窄屏使用带中文名称的双列工具栏，避免只靠图标辨认操作。 -->
         <button
           v-if="!selectMode"
           class="bbs-btn bbs-btn-sm"
           type="button"
           :disabled="!rootNodes.length || searching"
-          title="勾选连续的多条摘要,手动合并成一条总结" aria-label="勾选连续的多条摘要,手动合并成一条总结"
+          title="勾选几条相邻的摘要，手动合并成一条总结" aria-label="勾选几条相邻的摘要，手动合并成一条总结"
           @click="enterSelectMode"
         >
           <Icon name="checklist" /><span class="bbs-btn-label">多选</span>
@@ -1253,7 +1254,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           class="bbs-btn bbs-btn-sm"
           type="button"
           :disabled="engineState.running"
-          title="粘贴并导入使用棱镜宝书之前的旧总结" aria-label="粘贴并导入使用棱镜宝书之前的旧总结"
+          title="把用棱镜宝书之前写的旧总结导入进来" aria-label="把用棱镜宝书之前写的旧总结导入进来"
           @click="openImportHistory"
         >
           <Icon name="download" />
@@ -1264,7 +1265,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           class="bbs-btn bbs-btn-sm bbs-btn-primary bbs-resummary-btn"
           type="button"
           :disabled="resummaryRunning || engineState.running"
-          title="检测摘要是否达到总结阈值,达到则立即总结一次" aria-label="检测摘要是否达到总结阈值,达到则立即总结一次"
+          title="摘要攒够数量就立刻合并成总结" aria-label="摘要攒够数量就立刻合并成总结"
           @click="doResummarize"
         >
           <span v-if="resummaryRunning" class="bbs-pending-spin"></span>
@@ -1283,8 +1284,8 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
         v-model="searchQuery"
         class="bbs-input bbs-search-input"
         type="text"
-        aria-label="搜索摘要正文、时间或楼层号"
-        placeholder="搜索正文 / 时间 / #楼层号"
+        aria-label="搜索摘要内容、时间或楼层号"
+        placeholder="搜索内容、时间或 #楼层号"
         @keydown.esc.stop="closeSearch"
       />
       <button class="bbs-search-clear" type="button" :title="searching ? '清空' : '收起搜索'" :aria-label="searching ? '清空' : '收起搜索'" @click="searching ? (searchQuery = '') : closeSearch()">
@@ -1292,18 +1293,9 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
       </button>
     </div>
 
-    <div v-if="engineState.lastError" class="bbs-summary-failure" role="alert">
-      <p class="bbs-error">{{ summaryFailure.title }}</p>
-      <p v-if="summaryFailure.help" class="bbs-field-hint">{{ summaryFailure.help }}</p>
-      <details v-if="summaryFailure.details">
-        <summary>查看校验原因</summary>
-        <p class="bbs-field-hint">{{ summaryFailure.details }}</p>
-      </details>
-    </div>
-
-    <p v-if="searching" class="bbs-result-note" role="status">找到 {{ searchNodes.length }} 条匹配（包含已收纳的下层摘要）</p>
-    <p v-else-if="selectMode" class="bbs-result-note">多选整理 · 翻页保留勾选，全选覆盖所有页；合并需连续，删除总结将同时删除其下层内容。</p>
-    <p v-else-if="rootNodes.length" class="bbs-result-note">{{ rootNodes.length }} 个阅读入口</p>
+    <p v-if="searching" class="bbs-result-note" role="status">找到 {{ searchNodes.length }} 条（含已合并进总结的摘要）</p>
+    <p v-else-if="selectMode" class="bbs-result-note">翻页时勾选会保留，「全选」包括所有页。合并只能选相邻的条目；删除总结会连带删除它合并的摘要。</p>
+    <p v-else-if="rootNodes.length" class="bbs-result-note">共 {{ rootNodes.length }} 条</p>
     <div ref="summaryList" tabindex="-1"></div>
     <SummaryPager :page="activeWindow.page" :total="activeWindow.total" :size="SUMMARY_PAGE_SIZE" label="摘要" @update:page="changeSummaryPage" />
     <!-- 展开结果平铺后统一分页；整页最多 20 张摘要卡片，无递归组件/折叠 DOM。 -->
@@ -1341,14 +1333,12 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
         </span>
         <div class="bbs-summary-main">
           <header class="bbs-summary-meta">
-            <!-- 总结:层级标签 + 范围药丸 + 相对时间(留题首行)+ 绝对时间(窄屏换行) -->
             <template v-if="r.kind === 'comp'">
               <span class="bbs-summary-badge">{{ levelLabel(r.level, r.imported) }}</span>
               <span class="bbs-summary-loc">{{ floorLabel(r) }}</span>
               <span v-if="rowRelative(r)" class="bbs-summary-rel">({{ rowRelative(r) }})</span>
               <span v-if="rowTime(r)" class="bbs-summary-time">{{ rowTime(r) }}</span>
             </template>
-            <!-- 摘要:相对时间 + 楼层号都做成等高小标签(盒子居中,免去 CJK 基线下沉),绝对时间作题首文本(窄屏换行) -->
             <template v-else>
               <span v-if="rowRelative(r)" class="bbs-summary-rel">{{ rowRelative(r) }}</span>
               <span class="bbs-summary-loc">{{ floorLabel(r) }}</span>
@@ -1361,7 +1351,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
               <button
                 class="bbs-summary-act"
                 type="button"
-                :title="r.imported ? '编辑导入历史' : r.kind === 'comp' ? '编辑总结' : '编辑摘要'" :aria-label="r.imported ? '编辑导入历史' : r.kind === 'comp' ? '编辑总结' : '编辑摘要'"
+                :title="r.imported ? '编辑导入的旧总结' : r.kind === 'comp' ? '编辑总结' : '编辑摘要'" :aria-label="r.imported ? '编辑导入的旧总结' : r.kind === 'comp' ? '编辑总结' : '编辑摘要'"
                 @click="openEdit(r)"
               >
                 <Icon name="edit" />
@@ -1370,7 +1360,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
                 v-if="!r.isChild"
                 class="bbs-summary-act bbs-summary-del"
                 type="button"
-                :title="r.imported ? '删除导入历史' : r.kind === 'comp' ? '删除总结(下层会展开)' : '删除摘要'" :aria-label="r.imported ? '删除导入历史' : r.kind === 'comp' ? '删除总结(下层会展开)' : '删除摘要'"
+                :title="r.imported ? '删除导入的旧总结' : r.kind === 'comp' ? '删除总结（下层会重新显示）' : '删除摘要'" :aria-label="r.imported ? '删除导入的旧总结' : r.kind === 'comp' ? '删除总结（下层会重新显示）' : '删除摘要'"
                 @click="onDelete(r)"
               >
                 <Icon name="trash" />
@@ -1389,11 +1379,11 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
     <!-- 搜索无结果:与「还没有摘要」区分 -->
     <div v-else-if="searching" class="bbs-empty">
       <span class="bbs-empty-icon"><Icon name="search" /></span>
-      <h3>没有找到匹配的摘要</h3><p>「{{ searchQuery.trim() }}」暂无匹配。换个关键词，或输入 #楼层号试试。</p><button class="bbs-btn" type="button" @click="closeSearch">清除搜索，返回阅读</button>
+      <h3>没有找到匹配的摘要</h3><p>没有和「{{ searchQuery.trim() }}」匹配的内容。换个关键词，或输入 #楼层号试试。</p><button class="bbs-btn" type="button" @click="closeSearch">清除搜索</button>
     </div>
     <div v-else class="bbs-empty">
       <span class="bbs-empty-icon"><Icon name="summary" /></span>
-      <h3>{{ editingBlocked ? '记忆已进入保护状态' : '从第一条摘要开始' }}</h3><p>{{ editingBlocked ? '请先核对上方兼容说明。这不代表原聊天没有记忆，请勿用重建或导入覆盖来解除保护。' : pendingFloors.length ? '上方已有待补摘楼层，点楼层号即可生成摘要。你也可以等待对话累积到设定楼层后自动生成。' : '对话累积到设定楼层后会自动生成摘要；已有旧总结可通过阅读工具栏导入。' }}</p>
+      <h3>{{ editingBlocked ? '记忆处于只读保护' : '还没有摘要' }}</h3><p>{{ editingBlocked ? '请先看上面的说明。这不代表聊天没有记忆，不要用重建或导入来解除保护。' : pendingFloors.length ? '上面列出了还没摘要的楼层，点楼层号就能生成。也可以等对话继续，到设定楼层后会自动摘要。' : '对话进行到设定的楼层后会自动生成摘要；之前的旧总结可以用「导入旧总结」放进来。' }}</p>
     </div>
 
     <SummaryPager :page="activeWindow.page" :total="activeWindow.total" :size="SUMMARY_PAGE_SIZE" label="摘要" @update:page="changeSummaryPage" />
@@ -1404,19 +1394,18 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
         <template v-if="selectionSummary.count">
           已选 {{ selectionSummary.count }} 条
           <template v-if="selectionSummary.floorLo >= 0">
-            · 覆盖 {{ selectionSummary.floorLo === selectionSummary.floorHi ? `#${selectionSummary.floorLo}` : `#${selectionSummary.floorLo} - #${selectionSummary.floorHi}` }}
+            · 覆盖 {{ selectionSummary.floorLo === selectionSummary.floorHi ? `#${selectionSummary.floorLo}` : `#${selectionSummary.floorLo} – #${selectionSummary.floorHi}` }}
           </template>
-          · 生成 {{ levelLabel(selectionSummary.level) }}
+          · 合并为 {{ levelLabel(selectionSummary.level) }}
         </template>
-        <template v-else>勾选连续的多条摘要合并</template>
+        <template v-else>勾选相邻的几条来合并</template>
       </span>
-      <span v-if="selectionSummary.count >= 2 && !canMerge" class="bbs-select-warn">需选连续的摘要</span>
-      <!-- 全选/取消全选:列表长时免逐条点;文案随 allSelected 切换 -->
+      <span v-if="selectionSummary.count >= 2 && !canMerge" class="bbs-select-warn">要选相邻的条目</span>
       <button
         class="bbs-btn bbs-btn-sm"
         type="button"
         :disabled="!rootNodes.length || deleting"
-        :title="allSelected ? '取消全选' : '全选全部根摘要'" :aria-label="allSelected ? '取消全选' : '全选全部根摘要'"
+        :title="allSelected ? '取消全选' : '全选所有条目'" :aria-label="allSelected ? '取消全选' : '全选所有条目'"
         @click="toggleSelectAll"
       >
         {{ allSelected ? '取消全选' : '全选' }}
@@ -1425,7 +1414,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
         class="bbs-btn bbs-btn-sm bbs-btn-danger"
         type="button"
         :disabled="!selectionSummary.count || deleting || merging || engineState.running"
-        title="删除所选条目及其收纳的下层摘要" aria-label="删除所选条目及其收纳的下层摘要"
+        title="删除选中的条目，连同它们合并的摘要" aria-label="删除选中的条目，连同它们合并的摘要"
         @click="openDeleteConfirm"
       >
         <span v-if="deleting" class="bbs-pending-spin"></span>
@@ -1436,8 +1425,8 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
         class="bbs-btn bbs-btn-sm bbs-btn-primary"
         type="button"
         :disabled="!canMerge || merging || deleting || engineState.running"
-        title="将连续选中的摘要合并为上层总结"
-        aria-label="将连续选中的摘要合并为上层总结"
+        title="把选中的相邻条目合并成上一层总结"
+        aria-label="把选中的相邻条目合并成上一层总结"
         @click="openMergeConfirm"
       >
         <span v-if="merging" class="bbs-pending-spin"></span>
@@ -1446,18 +1435,10 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
       </button>
     </div>
 
-    <details v-if="hasLeaf" class="bbs-maintenance">
-      <summary><Icon name="bolt" /><span>高级维护 · 重建记忆<small>危险操作，日常补摘无需使用</small></span><Icon name="chevron" /></summary>
-      <div class="bbs-maintenance-body">
-      <p class="bbs-maintenance-warning">重建会重新调用 AI，并覆盖手动修改。请先导出聊天备份。</p>
-      <button class="bbs-btn bbs-btn-danger" type="button" :disabled="engineState.running" @click="openRebuildConfirm">重建本聊天记忆</button>
-      <span class="bbs-field-hint">升级无需重建。仅在确需重新摘要时使用：会调用 AI，并覆盖手动修改。</span>
-      </div>
-    </details>
-    <ConfirmDialog v-if="!editingBlocked" v-model:open="rebuildConfirmOpen" title="重建本聊天记忆" tone="danger" confirmText="按楼序重建" @confirm="rebuildChatMemory">
-      升级无需重建；兼容读取或本地转换即可沿用旧摘要和上层总结。本操作会调用 AI，覆盖手改摘要及相关状态。
-      将按先后顺序重新摘要本聊天的有效 AI 楼层（不处理番外、导入历史和跨聊天继承种子），每楼一次请求，失败可能重试，可能产生较多费用。请先备份聊天，并在完成前不要切换聊天或编辑正文。
-      每楼成功后替换该楼原摘要及附带状态更新（包含该楼手动修改，请先备份），相关上层总结会失效并按阈值重建。失败或取消会停止，已成功的楼层保留新结果，尚未成功的保留旧结果；不会删除剧情原文。继续？
+    <ConfirmDialog v-if="!editingBlocked" v-model:open="rebuildConfirmOpen" title="重建本聊天记忆" tone="danger" confirmText="按楼层顺序重建" @confirm="rebuildChatMemory">
+      升级插件不需要重建：旧摘要和总结能直接读取，或转换后继续用。重建会重新请求 AI，覆盖手动改过的摘要和相关状态。
+      会按顺序重新摘要这个聊天的所有 AI 楼层（番外、导入的旧总结和继承来的数据除外），每层一次请求，失败可能重试，费用可能不少。请先备份聊天，完成前不要切换聊天或修改正文。
+      每层成功后替换这层原来的摘要和状态（包括你手动改过的），相关的上层总结会作废并按设置重新生成。失败或取消就停下：已完成的用新结果，没完成的保留旧结果，剧情原文不会被删。继续吗？
     </ConfirmDialog>
 
     <!-- 合并确认弹窗 -->
@@ -1468,8 +1449,8 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
       confirmText="合并"
       @confirm="runMerge"
     >
-      将把选中的 {{ selectionSummary.count }} 条摘要合并成一条 {{ levelLabel(selectionSummary.level) }}(无视自动总结阈值)。
-      原摘要会被收纳进新总结、从列表收起(数据不删,可删掉新总结还原)。继续?
+      把选中的 {{ selectionSummary.count }} 条合并成一条{{ levelLabel(selectionSummary.level) }}（不受自动总结的数量限制）。
+      原来的条目会收进新总结里，不会被删除；删掉新总结就能还原。继续吗？
     </ConfirmDialog>
 
     <!-- 批量删除确认:选中总结代表整段历史,会连同其收纳的下层节点永久删除。 -->
@@ -1482,11 +1463,10 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
       tone="danger"
       @confirm="runDeleteSelected"
     >
-      将永久删除所选 {{ selectionSummary.count }} 个条目所代表的全部内容
-      ({{ selectionDeleteSummary.leaves }} 条逐楼摘要、{{ selectionDeleteSummary.summaries }} 条总结)。
-      选中的总结所收纳的下层摘要也会一并删除；逐楼摘要带来的物品、计划、时间地点等状态会按剩余摘要重新计算，原文楼层仍保持隐藏。
-      <template v-if="selectionDeleteSummary.imported">导入历史覆盖的原文楼层会重新显示。</template>
-      此操作无法撤销，继续?
+      将永久删除选中的 {{ selectionSummary.count }} 项（共 {{ selectionDeleteSummary.leaves }} 条逐楼摘要、{{ selectionDeleteSummary.summaries }} 条总结）。
+      删除总结会连带删除它合并的摘要；逐楼摘要带来的物品、计划、时间地点等会按剩下的摘要重新计算，原楼层保持隐藏。
+      <template v-if="selectionDeleteSummary.imported">导入的旧总结覆盖的楼层会重新显示。</template>
+      删除后无法撤销，继续吗？
     </ConfirmDialog>
 
     <!-- ===== 导入旧总结弹窗 ===== -->
@@ -1497,10 +1477,10 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           <button class="bbs-summary-act" type="button" title="关闭" aria-label="关闭" @click="closeImportHistory"><Icon name="close" /></button>
         </header>
         <p class="bbs-field-hint bbs-import-note">
-          把使用棱镜宝书之前写在世界书等位置的剧情总结粘贴到这里。只导入叙事正文,不会自动生成物品、计划或角色状态。
+          把用棱镜宝书之前写在世界书等地方的剧情总结粘贴进来。只导入文字，不会生成物品、计划或角色状态。
         </p>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">旧总结正文</span>
+          <span class="bbs-modal-label">旧总结内容</span>
           <textarea
             v-model="importHistoryText"
             class="bbs-input bbs-modal-textarea"
@@ -1509,7 +1489,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           ></textarea>
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">覆盖截止楼层(含)</span>
+          <span class="bbs-modal-label">覆盖到哪一层（含）</span>
           <input
             v-model.number="importHistoryFloor"
             class="bbs-input"
@@ -1517,10 +1497,10 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
             min="0"
             :max="importHistoryMaxFloor"
           />
-          <span class="bbs-field-hint">导入内容将代表 #0 - #{{ importHistoryFloor }}；这些楼层不再重复补摘。当前最后一个 AI 楼层为 #{{ importHistoryMaxFloor }}。</span>
+          <span class="bbs-field-hint">导入的内容代表 #0 – #{{ importHistoryFloor }}，这些楼层不会再补摘。当前最后一条 AI 回复是 #{{ importHistoryMaxFloor }}。</span>
         </label>
         <p class="bbs-field-hint bbs-import-warning">
-          导入后请停用世界书里的原总结条目,避免主模型同时收到两份重复内容。原世界书不会被本操作修改。
+          导入后请关掉世界书里原来的总结条目，免得模型收到两份重复内容。导入不会修改世界书。
         </p>
         <footer class="bbs-modal-foot">
           <button class="bbs-btn" type="button" @click="closeImportHistory">取消</button>
@@ -1550,18 +1530,18 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
             v-model="newContent"
             class="bbs-input bbs-modal-textarea"
             rows="3"
-            placeholder="描述这条计划或悬念…"
+            placeholder="写下这条计划或悬念…"
             @keydown.enter.exact.prevent="addPlan"
           ></textarea>
         </label>
         <!-- 目标时间仅「计划」可填,可选;悬念一般无目标时间故不显示 -->
         <label v-if="newKind === 'plan'" class="bbs-modal-field">
-          <span class="bbs-modal-label">目标时间(可选)</span>
+          <span class="bbs-modal-label">目标时间（可选）</span>
           <input
             v-model="newTargetTime"
             class="bbs-input"
             type="text"
-            placeholder="如 放学后 / 1988/10/1;模糊或留空都可"
+            placeholder="如：放学后、1988/10/1，可以模糊或留空"
           />
         </label>
         <footer class="bbs-modal-foot">
@@ -1583,12 +1563,12 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           <textarea v-model="editingPlan.content" class="bbs-input bbs-modal-textarea" rows="3"></textarea>
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">创建时间(可选)</span>
-          <input v-model="editingPlan.createdTime" class="bbs-input" type="text" placeholder="故事内时间,如 1988/9/29" />
+          <span class="bbs-modal-label">创建时间（可选）</span>
+          <input v-model="editingPlan.createdTime" class="bbs-input" type="text" placeholder="故事内时间，如 1988/9/29" />
         </label>
         <label v-if="editingPlan.kind === 'plan'" class="bbs-modal-field">
-          <span class="bbs-modal-label">目标时间(可选)</span>
-          <input v-model="editingPlan.targetTime" class="bbs-input" type="text" placeholder="如 放学后 / 1988/10/1;模糊或留空都可" />
+          <span class="bbs-modal-label">目标时间（可选）</span>
+          <input v-model="editingPlan.targetTime" class="bbs-input" type="text" placeholder="如：放学后、1988/10/1，可以模糊或留空" />
         </label>
         <footer class="bbs-modal-foot">
           <button class="bbs-btn" type="button" @click="cancelPlanEdit">取消</button>
@@ -1609,13 +1589,13 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
         <!-- 已被总结收纳的节点:提醒上层总结不会跟着变。叶子才提向量召回(总结不进向量库) -->
         <p v-if="editing.nested" class="bbs-field-hint bbs-nested-hint">
           {{ editing.kind === 'leaf'
-            ? '这条已被上层总结收纳:改动会用于向量召回,但上层总结的文本不会自动更新;若总结里也有同样的错误,请一并编辑。'
-            : '这条已被更上层总结收纳:改动不会同步到上层总结;若上层里也有同样的错误,请一并编辑。' }}
+            ? '这条已经合并进上层总结。改动会用于向量召回，但上层总结的文字不会跟着变；如果总结里也有同样的错误，请一起改。'
+            : '这条已经合并进更上层的总结，改动不会同步上去；如果上层也有同样的错误，请一起改。' }}
         </p>
         <!-- 时间仅叶子可编辑(起止两端);总结只压文本,无时间字段 -->
         <div v-if="editing.kind === 'leaf'" class="bbs-modal-field bbs-time-pair">
           <label class="bbs-time-col">
-            <span class="bbs-modal-label">起始时间</span>
+            <span class="bbs-modal-label">开始时间</span>
             <input v-model="editing.timeStart" class="bbs-input" type="text" placeholder="如 1988/9/29 21:00" />
           </label>
           <label class="bbs-time-col">
@@ -1624,7 +1604,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           </label>
         </div>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">{{ editing.kind === 'comp' ? (editing.imported ? '导入历史正文' : '总结正文') : '摘要正文' }}</span>
+          <span class="bbs-modal-label">{{ editing.kind === 'comp' ? (editing.imported ? '旧总结内容' : '总结内容') : '摘要内容' }}</span>
           <textarea v-model="editing.text" class="bbs-input bbs-modal-textarea" rows="8"></textarea>
         </label>
         <footer class="bbs-modal-foot">
@@ -1634,6 +1614,22 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
       </div>
     </ModalMask>
     </fieldset>
+
+    <footer class="bbs-summary-footer" aria-label="更多">
+      <InitialTime />
+      <details v-if="compatibilityState.mode === 'ready'" class="bbs-disclosure bbs-compat-ready">
+        <summary>旧记忆兼容 <span class="bbs-disclosure-meta">正常，不需要重建</span></summary>
+        <p class="bbs-field-hint">这个聊天的旧摘要和 L1/L2 总结按原格式读取，升级后不需要重新摘要或重建。</p>
+        <p class="bbs-field-hint">上次检查：逐楼摘要 {{ compatibilityState.leaves }} 条，总结 {{ compatibilityState.summaries }} 条（检查时的数量，以上方列表为准）。</p>
+      </details>
+      <details v-if="hasLeaf" class="bbs-disclosure bbs-maintenance">
+        <summary>重建记忆 <span class="bbs-disclosure-meta">高级操作，平时用不到</span></summary>
+        <div class="bbs-callout is-danger bbs-maintenance-body">
+          <p>重建会按楼层顺序重新请求 AI，覆盖现有摘要和你手动改过的内容。升级插件不需要重建。动手前请先导出聊天备份。</p>
+          <button class="bbs-btn bbs-btn-danger" type="button" :disabled="engineState.running || editingBlocked" @click="openRebuildConfirm">重建本聊天记忆…</button>
+        </div>
+      </details>
+    </footer>
   </section>
 </template>
 
@@ -1652,22 +1648,6 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
   padding: 0;
   border: 0;
 }
-.bbs-compatibility {
-  flex: 0 0 auto;
-  margin-bottom: 14px;
-  padding: 12px;
-  border: 1px solid var(--bbs-line-strong);
-  border-radius: 8px;
-  color: var(--bbs-ink-soft);
-  font-size: 13px;
-  line-height: 1.7;
-  overflow-wrap: anywhere;
-}
-.bbs-compatibility p { margin: 8px 0 0; }
-.bbs-compatibility ul { margin: 8px 0; padding-left: 20px; }
-.bbs-compatibility .bbs-btn { margin-top: 10px; }
-.bbs-compatibility-warning { border-color: var(--bbs-warning); }
-.bbs-compatibility-error { color: var(--bbs-danger); }
 /* 起止时间:两个输入框并排,各占一半 */
 .bbs-time-pair {
   display: flex;
@@ -1935,12 +1915,6 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
   word-break: break-word;
 }
 
-.bbs-error {
-  margin: 12px 0 0;
-  font-size: 12px;
-  color: var(--bbs-danger);
-}
-
 /* —— 立即总结按钮:摘要标题右侧的次级操作,小一号,带图标 —— */
 .bbs-resummary-btn {
   flex: 0 0 auto;
@@ -1961,16 +1935,24 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
   color: var(--bbs-ink-soft);
 }
 
-/* —— 未摘要楼层:待办面板,用强调色描边的卡片框起来,提示「这些楼还没摘」 —— */
+/* —— 未摘要楼层:待办面板,细边卡片加左侧强调条,提示「这些楼还没摘」 —— */
 .bbs-pending {
   display: flex;
   flex-direction: column;
   gap: 10px;
   margin-top: 14px;
-  padding: 12px 14px;
-  border: 1px solid var(--bbs-accent);
+  padding: 12px 16px 14px;
+  border: 1px solid var(--bbs-line);
+  border-left: 3px solid var(--bbs-accent);
   border-radius: var(--bbs-radius);
-  background: var(--bbs-accent-soft);
+  background: var(--bbs-surface);
+}
+.bbs-backfill-description {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.7;
+  color: var(--bbs-ink-muted);
 }
 /* 标题行:标签靠左,批量补摘按钮/进度推到右侧 */
 .bbs-pending-head {
@@ -2058,18 +2040,19 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
   min-width: 40px;
   height: 28px;
   padding: 0 9px;
-  border: 1px solid var(--bbs-accent);
+  border: 1px solid var(--bbs-line);
   border-radius: var(--bbs-radius-sm);
-  background: var(--bbs-surface);
-  color: var(--bbs-accent);
+  background: var(--bbs-surface-2);
+  color: var(--bbs-ink);
   font-size: 12px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   cursor: pointer;
-  transition: color 0.15s, background 0.15s;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
 }
 .bbs-pending-chip:hover:not(:disabled) {
   color: var(--bbs-accent-ink);
+  border-color: var(--bbs-accent);
   background: var(--bbs-accent);
 }
 .bbs-pending-chip:disabled {
@@ -2216,30 +2199,6 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
 }
 .bbs-focus-field.f-next dd {
   color: var(--bbs-ink);
-}
-
-/* —— 分章分隔:计划/悬念 与 摘要 两区之间的明确界线 —— */
-/* 两侧细线在中间断开,嵌一枚金色小菱形——古籍分章的鱼尾标记,呼应纸墨主题 */
-.bbs-divider {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin: 26px 0;
-}
-.bbs-divider::before,
-.bbs-divider::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: var(--bbs-line-strong);
-}
-.bbs-divider-mark {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
-  transform: rotate(45deg);
-  background: var(--bbs-accent);
-  border-radius: 1px;
 }
 
 /* —— 摘要区工具行:标题右侧「选择 / 立即总结」并排 —— */
@@ -2480,112 +2439,117 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
 }
 
 /* 阅读器：纸面、细线和文字层级，避免每个信息块都变成带框表单。 */
-.bbs-summary-page :deep(.prism-page-header) { margin-bottom:16px; }
-.bbs-summary-page :deep(.prism-page-description) { margin-top:5px; }
 .bbs-summary-page { height:auto; min-height:100%; min-width:0; max-width:860px; margin:0 auto; color:var(--bbs-ink); overflow-wrap:anywhere; }
-.bbs-overview { margin:0 0 10px; padding:17px 20px; border:0; border-radius:14px; background:var(--bbs-surface); box-shadow:0 2px 12px -8px #00000020; }
-.bbs-overview-head { display:flex; justify-content:space-between; align-items:center; gap:8px; }
-.bbs-overview-caption { font-size:11px; color:var(--bbs-ink-muted); letter-spacing:.08em; }
-.bbs-overview-status { font-size:10px; color:var(--bbs-ink-soft); }
-.bbs-overview-status::before { content:''; display:inline-block; width:5px; height:5px; margin:0 6px 1px 0; border-radius:50%; background:var(--bbs-accent); }
-.bbs-overview-status.is-protected { color:var(--bbs-warning); }
-.bbs-overview-stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin:10px 0; }
+
+/* 概览：三项计数一行，状态靠右。 */
+.bbs-overview { display:flex; align-items:center; gap:16px; margin:0 0 14px; padding:16px 20px; border:1px solid var(--bbs-line); border-radius:14px; background:var(--bbs-surface); }
+.bbs-overview-stats { flex:1 1 auto; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin:0; }
 .bbs-overview-stats > div { display:flex; flex-direction:column; min-width:0; }
-.bbs-overview-stats dd { order:-1; margin:0 0 3px; font:500 27px/1.2 var(--bbs-font-reading); font-variant-numeric:tabular-nums; }
-.bbs-overview-stats dt { font-size:10px; color:var(--bbs-ink-muted); }
-.bbs-overview-pending dd { color:var(--bbs-accent); }
-.bbs-backfill-entry { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-top:8px; border-top:1px solid var(--bbs-line); }
-.bbs-backfill-entry p { font-size:11px; line-height:1.7; margin:0; color:var(--bbs-ink-muted); }
-.bbs-backfill-entry .bbs-btn { flex-shrink:0; min-height:40px; font-size:11px; padding:7px 11px; border-radius:8px; }
-.bbs-compatibility { margin:0 0 7px; padding:0 3px; border:0; background:transparent; border-radius:0; }
-.bbs-compatibility-ready summary { display:flex; align-items:center; gap:9px; padding:8px 0; font-size:10px; font-weight:400; color:var(--bbs-ink-muted); list-style:none; cursor:pointer; }
-.bbs-compatibility-ready summary::before { content:'✓'; color:var(--bbs-accent); font-size:11px; }
-.bbs-compatibility-ready summary span { margin-left:auto; font-size:10px; }
-.bbs-compatibility-ready summary::after { content:'›'; font-size:15px; }
-.bbs-compatibility-ready[open] summary::after { transform:rotate(90deg); }
-.bbs-compatibility-ready p { font-size:12px; line-height:1.8; }
-.bbs-compatibility-warning { padding:16px; border:1px solid var(--bbs-warning); border-radius:10px; background:var(--bbs-warning-soft); }
-.bbs-compatibility-warning p { font-size:12px; line-height:1.9; }
-.bbs-compatibility-ready summary:focus-visible { outline:2px solid var(--bbs-accent); outline-offset:3px; }
-.bbs-reader-context { margin-bottom:17px; border-top:1px solid var(--bbs-line); border-bottom:1px solid var(--bbs-line); }
-.bbs-reader-context > summary { display:flex; align-items:center; gap:12px; padding:12px 0; cursor:pointer; list-style:none; font-size:13px; color:var(--bbs-ink); }
-.bbs-reader-context summary::-webkit-details-marker,.bbs-compatibility-ready summary::-webkit-details-marker { display:none; }
+.bbs-overview-stats dd { order:-1; margin:0 0 2px; font:500 26px/1.2 var(--bbs-font-reading); font-variant-numeric:tabular-nums; color:var(--bbs-ink); }
+.bbs-overview-stats dt { font-size:12px; color:var(--bbs-ink-muted); }
+.bbs-overview-pending.has-pending dd { color:var(--bbs-accent); }
+.bbs-overview-status { flex:0 0 auto; display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:var(--bbs-radius-pill); background:var(--bbs-surface-2); font-size:12px; color:var(--bbs-ink-soft); }
+.bbs-overview-status::before { content:''; width:6px; height:6px; border-radius:50%; background:var(--bbs-accent); }
+.bbs-overview-status.is-protected { color:var(--bbs-warning); background:var(--bbs-warning-soft); }
+.bbs-overview-status.is-protected::before { background:var(--bbs-warning); }
+.bbs-overview-side { flex:0 0 auto; display:flex; flex-direction:column; align-items:flex-end; gap:10px; }
+.bbs-backfill-btn { white-space:nowrap; }
+
+/* 兼容警告与失败提示：沿用共享提示条，只补间距。 */
+.bbs-compatibility ul { margin:6px 0; padding-left:20px; }
+.bbs-compatibility .bbs-btn { margin-top:8px; }
+.bbs-compat-note { font-size:12.5px; color:var(--bbs-ink-soft); }
+.bbs-compatibility-error { color:var(--bbs-danger); }
+.bbs-summary-failure { min-width:0; overflow-wrap:anywhere; }
+
+/* 当前局势与计划：整行可点的折叠入口。 */
+.bbs-reader-context { margin:6px 0 20px; border-top:1px solid var(--bbs-line); border-bottom:1px solid var(--bbs-line); }
+.bbs-reader-context > summary { display:flex; align-items:center; gap:12px; min-height:56px; padding:12px 0; cursor:pointer; list-style:none; font-size:14px; font-weight:600; color:var(--bbs-ink); }
+.bbs-reader-context summary::-webkit-details-marker { display:none; }
 .bbs-reader-context > summary > span:nth-child(2) { min-width:0; flex:1; }
-.bbs-reader-context > summary small { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:4px; font-size:11px; font-weight:400; color:var(--bbs-ink-muted); }
-.bbs-context-icon { font-size:18px; color:var(--bbs-accent); }
-.bbs-context-chevron { color:var(--bbs-ink-muted); transform:rotate(-90deg); }
+.bbs-reader-context > summary small { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:3px; font-size:12px; font-weight:400; color:var(--bbs-ink-muted); }
+.bbs-reader-context > summary:hover .bbs-context-chevron { color:var(--bbs-accent); }
+.bbs-context-icon { display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px; border-radius:10px; background:var(--bbs-accent-soft); font-size:17px; color:var(--bbs-accent); }
+.bbs-context-chevron { color:var(--bbs-ink-muted); transform:rotate(-90deg); transition:transform var(--bbs-dur) var(--bbs-ease); }
 .bbs-reader-context[open] > summary .bbs-context-chevron { transform:rotate(0); }
-.bbs-reader-context-body { padding:10px 0 20px; }
-.bbs-reader-context-body .bbs-section-kicker,.bbs-reader-context-body .bbs-section-description { display:none; }
+.bbs-reader-context-body { padding:8px 0 22px; }
 .bbs-section-head { align-items:center; gap:14px; margin-bottom:12px; }
-.bbs-section-kicker { display:block; font:500 9px/1.5 var(--bbs-font-sans); letter-spacing:.18em; color:var(--bbs-accent); margin-bottom:5px; }
-.bbs-section-description { color:var(--bbs-ink-muted); font-size:11px; margin:5px 0 0; }
-.bbs-title-sub { font-family:var(--bbs-font-reading); font-size:21px; font-weight:600; letter-spacing:.05em; }
-.bbs-focus,.bbs-plan { border:0; border-radius:8px; background:var(--bbs-surface); box-shadow:none; }
+.bbs-title-sub { font-family:var(--bbs-font-reading); font-size:20px; font-weight:600; letter-spacing:.04em; }
+.bbs-focus,.bbs-plan { border:0; border-radius:10px; background:var(--bbs-surface); box-shadow:none; }
 .bbs-focus { border-left:2px solid var(--bbs-accent); padding:14px 16px; }
 .bbs-focus-head { flex-wrap:wrap; gap:6px; }
 .bbs-focus-situation { font-size:14px; line-height:1.9; }
-.bbs-focus-time,.bbs-plan-times { font-size:10px; color:var(--bbs-ink-muted); }
+.bbs-focus-time,.bbs-plan-times { font-size:12px; color:var(--bbs-ink-muted); }
 .bbs-focus-acts { margin-left:auto; }
-.bbs-focus-field { grid-template-columns:32px minmax(0,1fr); }
-.bbs-focus-fields dd { font-size:12px; }
-.bbs-planning { margin-top:20px; }
-.bbs-planning-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:22px; }
-.bbs-plan { padding:12px; margin-top:8px; }
-.bbs-plan-kind { font-size:10px; }
+.bbs-focus-fields dd { font-size:13px; }
+.bbs-planning { margin-top:22px; }
+.bbs-planning-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px; }
+.bbs-planning-grid > .bbs-fold-section + .bbs-fold-section { margin-top:0; }
+.bbs-plan { padding:12px 14px; margin-top:8px; }
+.bbs-plan-kind { font-size:11px; }
 .bbs-state { background:transparent; padding:12px 0; border:0; }
-.bbs-state-key { font-size:10px; }
-.bbs-state-val { font-size:12px; }
-.bbs-divider { display:none; }
-.bbs-reading-head { display:flex; align-items:flex-end; flex-wrap:wrap; gap:12px; margin:0 0 10px; }
+.bbs-state-key { font-size:11px; }
+.bbs-state-val { font-size:13px; }
+
+/* 创作规划：放在计划、悬念下面，占满整行，编辑器有足够宽度。 */
+.bbs-outline-section { margin-top:26px; padding-top:20px; border-top:1px solid var(--bbs-line); }
+.bbs-outline-section .bbs-section-head { justify-content:flex-start; margin-bottom:6px; }
+.bbs-outline-count { padding:2px 9px; border-radius:var(--bbs-radius-pill); background:var(--bbs-accent-soft); font-size:12px; font-weight:500; color:var(--bbs-accent); }
+.bbs-outline-intro { margin:0 0 12px; max-width:62ch; font-size:13px; line-height:1.75; color:var(--bbs-ink-soft); }
+
+/* 摘要列表 */
+.bbs-reading-head { display:flex; align-items:flex-end; flex-wrap:wrap; gap:12px; margin:8px 0 10px; }
 .bbs-summary-heading { min-width:0; flex:1; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; }
-.bbs-summary-heading .bbs-token-estimate { flex-basis:100%; }
-.bbs-estimate-toggle { margin-top:0; padding:0; min-height:32px; border:0; background:transparent; font-size:10px; color:var(--bbs-ink-muted); text-decoration:underline; text-underline-offset:3px; }
-.bbs-summary-tools { display:flex; flex-wrap:wrap; gap:4px; padding:0; background:transparent; border:0; }
-.bbs-summary-tools .bbs-btn,.bbs-summary-tools .bbs-add-mini { min-height:40px; height:auto; width:auto; padding:7px 11px; border:0; border-radius:7px; font-size:11px; background:var(--bbs-surface-2); color:var(--bbs-ink-soft); }
+.bbs-summary-heading .bbs-token-estimate { flex-basis:100%; font-size:12px; }
+.bbs-estimate-toggle { margin-top:0; padding:0 4px; min-height:32px; border:0; background:transparent; font-size:12px; color:var(--bbs-ink-muted); text-decoration:underline; text-underline-offset:3px; }
+.bbs-summary-tools { display:flex; flex-wrap:wrap; gap:6px; padding:0; background:transparent; border:0; }
+.bbs-summary-tools .bbs-btn,.bbs-summary-tools .bbs-add-mini { min-height:38px; height:auto; width:auto; padding:7px 12px; border:0; border-radius:8px; font-size:12px; background:var(--bbs-surface-2); color:var(--bbs-ink-soft); }
+.bbs-summary-tools .bbs-btn:hover,.bbs-summary-tools .bbs-add-mini:hover:not(:disabled) { color:var(--bbs-accent); background:var(--bbs-accent-soft); }
 .bbs-summary-tools .bbs-resummary-btn { color:var(--bbs-accent); background:var(--bbs-accent-soft); }
 .bbs-btn-label { display:inline; }
-.bbs-result-note { color:var(--bbs-ink-muted); font-size:10px; margin:14px 0 0; }
+.bbs-result-note { color:var(--bbs-ink-muted); font-size:12px; margin:12px 0 0; }
 .bbs-summary-list { display:block; margin:0; }
-.bbs-summary-page :deep(.bbs-summary-card) { margin:0; padding:22px 0; border:0; border-bottom:1px solid var(--bbs-line); border-radius:0; background:transparent; box-shadow:none; gap:10px; }
-.bbs-summary-page :deep(.bbs-summary-card.is-deep) { margin:14px 0 0; padding:18px 20px; background:var(--bbs-surface); border:0; border-radius:10px; }
+.bbs-summary-page :deep(.bbs-summary-card) { margin:0; padding:20px 0; border:0; border-bottom:1px solid var(--bbs-line); border-radius:0; background:transparent; box-shadow:none; gap:10px; }
+.bbs-summary-page :deep(.bbs-summary-card.is-deep) { margin:14px 0 0; padding:18px 20px; background:var(--bbs-surface); border:1px solid var(--bbs-line); border-radius:12px; }
 .bbs-summary-page :deep(.bbs-summary-card.is-child) { padding-left:17px; border-left:1px solid var(--bbs-line); margin-left:5px; }
 .bbs-summary-page :deep(.bbs-summary-main) { min-width:0; flex:1; }
-.bbs-summary-page :deep(.bbs-summary-meta) { display:flex; flex-wrap:wrap; gap:7px; align-items:center; margin-bottom:7px; }
-.bbs-summary-page :deep(.bbs-summary-badge) { border-radius:4px; background:var(--bbs-accent-soft); color:var(--bbs-accent); font-size:10px; padding:3px 7px; font-weight:600; }
-.bbs-summary-page :deep(.bbs-summary-loc) { padding:0; border:0; background:transparent; color:var(--bbs-ink-muted); font:400 10px/1.5 var(--bbs-font-mono); }
-.bbs-summary-page :deep(.bbs-summary-rel) { color:var(--bbs-ink-soft); font-size:11px; }
-.bbs-summary-page :deep(.bbs-summary-text) { margin:0; font-size:14px; line-height:2; letter-spacing:.025em; color:var(--bbs-ink); overflow-wrap:anywhere; }
+.bbs-summary-page :deep(.bbs-summary-meta) { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:8px; }
+.bbs-summary-page :deep(.bbs-summary-badge) { height:auto; min-width:0; border:0; border-radius:5px; background:var(--bbs-accent-soft); color:var(--bbs-accent); font-size:11px; padding:3px 8px; font-weight:600; }
+.bbs-summary-page :deep(.bbs-summary-loc) { height:auto; min-width:0; padding:0; border:0; background:transparent; color:var(--bbs-ink-muted); font:500 12px/1.5 var(--bbs-font-mono); }
+.bbs-summary-page :deep(.bbs-summary-rel) { height:auto; padding:0; border:0; background:transparent; color:var(--bbs-ink-soft); font-size:12px; font-weight:500; }
+.bbs-summary-page :deep(.bbs-summary-text) { margin:0; font-size:14px; line-height:1.95; letter-spacing:.02em; color:var(--bbs-ink); overflow-wrap:anywhere; }
 .bbs-summary-page :deep(.bbs-summary-acts) { flex:0 0 auto; margin-left:auto; opacity:1; gap:0; }
-.bbs-summary-page :deep(.bbs-summary-act) { width:36px; height:36px; font-size:12px; border:0; background:transparent; color:var(--bbs-ink-muted); }
+.bbs-summary-page :deep(.bbs-summary-act) { width:34px; height:34px; font-size:13px; border:0; background:transparent; color:var(--bbs-ink-muted); }
 .bbs-summary-page :deep(.bbs-summary-act:hover) { color:var(--bbs-accent); background:var(--bbs-accent-soft); }
-.bbs-summary-page :deep(.bbs-summary-time),.bbs-summary-page :deep(.bbs-summary-dateline) { font-size:10px; color:var(--bbs-ink-muted); }
-.bbs-summary-page :deep(.bbs-expand-bar) { min-height:40px; margin-top:10px; padding:7px 0 0; border-top:1px solid var(--bbs-line); font-size:11px; color:var(--bbs-accent); }
+.bbs-summary-page :deep(.bbs-summary-del:hover) { color:var(--bbs-danger); background:var(--bbs-danger-soft); }
+.bbs-summary-page :deep(.bbs-summary-time),.bbs-summary-page :deep(.bbs-summary-dateline) { font-size:12px; font-weight:500; color:var(--bbs-ink-muted); }
+.bbs-summary-page :deep(.bbs-expand-bar) { min-height:40px; margin-top:12px; padding:8px 0 0; border-top:1px solid var(--bbs-line); font-size:12px; color:var(--bbs-accent); }
 .bbs-summary-list.is-selecting .bbs-summary-card.is-selected { background:var(--bbs-accent-soft); }
 .bbs-summary-check { flex:0 0 auto; }
 .bbs-select-bar { background:var(--bbs-surface); border-color:var(--bbs-line); box-shadow:none; padding-bottom:max(12px,env(safe-area-inset-bottom)); }
 .bbs-select-info { line-height:1.7; }
-.bbs-empty { padding:35px 10px; border:0; background:transparent; }
-.bbs-empty h3 { font:500 18px/1.7 var(--bbs-font-reading); }
-.bbs-empty p { font-size:12px; line-height:1.9; }
-.bbs-maintenance { margin-top:28px; border-top:1px solid var(--bbs-line); }
-.bbs-maintenance summary { display:flex; align-items:center; gap:10px; padding:16px 0; font-size:11px; color:var(--bbs-ink-muted); cursor:pointer; list-style:none; }
-.bbs-maintenance summary::-webkit-details-marker { display:none; }
-.bbs-maintenance summary > span { flex:1; min-width:0; }
-.bbs-maintenance summary small { display:block; font-size:10px; margin-top:4px; }
-.bbs-maintenance-body { padding:16px; border-radius:8px; background:var(--bbs-danger-soft); }
-.bbs-maintenance-warning { color:var(--bbs-danger); font-size:12px; line-height:1.8; }
+.bbs-empty { padding:36px 10px; border:0; background:transparent; }
+.bbs-empty h3 { margin:0; font:500 18px/1.7 var(--bbs-font-reading); color:var(--bbs-ink); }
+.bbs-empty p { font-size:13px; line-height:1.85; }
+
+/* 页脚：开场时间、兼容说明、重建这些不常用的入口收在最下面。 */
+.bbs-summary-footer { margin-top:32px; border-top:1px solid var(--bbs-line); }
+.bbs-summary-footer > :deep(details) { border-bottom:1px solid var(--bbs-line); }
+.bbs-summary-footer > :deep(details > summary) { font-size:13px; }
+.bbs-summary-footer > :deep(details[open]) { padding-bottom:14px; }
+.bbs-maintenance-body { margin:4px 0 0; }
+.bbs-maintenance-body .bbs-btn { margin-top:6px; }
+
 .bbs-summary-page :deep(button:focus-visible),.bbs-summary-page summary:focus-visible { outline:2px solid var(--bbs-accent); outline-offset:3px; }
 .bbs-modal { min-width:0; overflow-wrap:anywhere; }
 @media(max-width:640px) {
- .bbs-overview { padding:12px 16px; }
- .bbs-overview-stats dd { font-size:26px; }
- .bbs-backfill-entry { gap:7px; }
- .bbs-backfill-entry p { font-size:10px; }
- .bbs-backfill-entry .bbs-btn { font-size:10px; padding:7px 9px; }
+ .bbs-overview { padding:14px 16px; gap:10px; flex-wrap:wrap; }
+ .bbs-overview-stats { flex-basis:100%; }
+ .bbs-overview-stats dd { font-size:24px; }
+ .bbs-overview-side { flex-basis:100%; flex-direction:row; align-items:center; justify-content:space-between; }
  .bbs-reading-head { display:block; }
- .bbs-summary-tools { margin-top:10px; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:5px; }
- .bbs-summary-tools .bbs-btn,.bbs-summary-tools .bbs-add-mini { justify-content:center; padding:6px 3px; gap:4px; font-size:10px; white-space:nowrap; }
+ .bbs-summary-tools { margin-top:10px; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:6px; }
+ .bbs-summary-tools .bbs-btn,.bbs-summary-tools .bbs-add-mini { justify-content:center; padding:6px 3px; gap:4px; font-size:12px; white-space:nowrap; }
  .bbs-summary-tools .bbs-btn-label { display:inline; }
  .bbs-planning-grid { grid-template-columns:minmax(0,1fr); gap:20px; }
  .bbs-focus-time { flex-basis:100%; order:3; }
@@ -2597,9 +2561,8 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
  .bbs-time-pair { flex-direction:column; }
  .bbs-time-col { min-width:0; width:100%; }
 }
-.bbs-summary-failure { min-width: 0; overflow-wrap: anywhere; }
+@media(max-width:360px) {
+ .bbs-summary-tools .bbs-btn,.bbs-summary-tools .bbs-add-mini { font-size:11px; }
+}
 .bbs-planning .bbs-fold-head { flex-wrap:wrap; min-height:44px; }
-.bbs-outline-count { min-width:0; font-size:10px; font-weight:400; color:var(--bbs-accent); white-space:normal; }
-.bbs-summary-failure details { margin-block: 8px; }
-.bbs-summary-failure summary { cursor: pointer; font-size: 13px; }
 </style>

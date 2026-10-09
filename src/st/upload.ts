@@ -101,7 +101,7 @@ export async function uploadOrbImage(file: File): Promise<string> {
 
   const ctx = getContext();
   const headers = ctx?.getRequestHeaders?.();
-  if (!headers) throw new Error('SillyTavern 未就绪,请稍后再试');
+  if (!headers) throw new Error('酒馆还没准备好，请稍后再试。');
 
   const res = await fetch('/api/images/upload', {
     method: 'POST',
@@ -120,7 +120,7 @@ export async function uploadOrbImage(file: File): Promise<string> {
     } catch {
       /* 响应非 JSON */
     }
-    throw new Error(detail || `上传失败(${res.status})`);
+    throw new Error(detail || `上传失败（HTTP ${res.status}）`);
   }
   const data = (await res.json()) as { path?: string };
   if (!data.path) throw new Error('服务器未返回图片路径');

@@ -272,11 +272,11 @@ function hasAnyLeaf(chat: STMessage[]): boolean {
 export async function runHoraeMigration(): Promise<boolean> {
   const ctx = getContext();
   if (!ctx) {
-    toast('SillyTavern 上下文不可用', 'error');
+    toast('酒馆上下文不可用，请刷新页面后再试。', 'error');
     return false;
   }
   if (!ctx.getCurrentChatId?.()) {
-    toast('请先进入一个聊天再迁移', 'warning');
+    toast('请先打开一个聊天再迁移。', 'warning');
     return false;
   }
   const sourceChat = ctx.chat;
@@ -295,7 +295,7 @@ export async function runHoraeMigration(): Promise<boolean> {
   try {
     requireSource(); // 在读计划/快照之前阻断保护态与 V2 待转换。
     if (!sourceChat?.length) {
-      toast('当前聊天为空,无可迁移数据', 'warning');
+      toast('这个聊天是空的，没有可以迁移的数据。', 'warning');
       return false;
     }
     if (!meta || typeof ctx.saveChat !== 'function') {
@@ -303,7 +303,7 @@ export async function runHoraeMigration(): Promise<boolean> {
     }
     const plan = computeMigrationPlan();
     if (!plan.hasData) {
-      toast('未在当前聊天检测到 Horae 旧数据', 'warning');
+      toast('这个聊天里没有 Horae 的旧数据。', 'warning');
       return false;
     }
     // 在独立候选上造叶子/折叠状态。构造中途失败不触碰任何原消息。
@@ -489,7 +489,7 @@ export async function runHoraeMigration(): Promise<boolean> {
   } catch (e) {
     try { rollback?.(); } catch (restoreError) { console.error('[棱镜宝书] 恢复迁移内存失败:', restoreError); }
     const warning = persistenceStarted ? '；保存可能已部分完成，请返回原聊天核对，未执行磁盘回滚' : '';
-    toast(`迁移失败:${e instanceof Error ? e.message : String(e)}${warning}`, 'error');
+    toast(`迁移失败：${e instanceof Error ? e.message : String(e)}${warning}`, 'error');
     console.error('[棱镜宝书] Horae 迁移失败:', e);
     return false;
   }

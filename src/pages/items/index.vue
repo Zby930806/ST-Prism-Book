@@ -84,14 +84,14 @@ function saveEdit() {
 
 <template>
   <section class="bbs-page">
-    <PageHeader icon="items" title="物品" eyebrow="故事行囊" description="随身所携，异地所藏。让每件物品都有迹可循。" />
+    <PageHeader icon="items" title="物品" description="摘要时记下的物品：哪些带在身上，哪些放在别处。也可以手动补录和修改。" />
     <SummaryOnlyNotice subject="物品清单与变动" />
 
     <div class="bbs-ledger-meta" aria-label="物品概览">
       <span><strong>{{ memory.items.length }}</strong>种物品</span>
       <span><strong>{{ carriedCount }}</strong>随身</span>
       <span><strong>{{ memory.items.length - carriedCount }}</strong>存放</span>
-      <span class="bbs-ledger-note">{{ hasLeaf ? '手动变动写入最新有效摘要' : '先生成摘要，再手动补录' }}</span>
+      <span class="bbs-ledger-note">{{ hasLeaf ? '手动改动会记在最新一条摘要上' : '有了摘要才能手动补录' }}</span>
     </div>
 
     <div class="bbs-additem">
@@ -136,13 +136,13 @@ function saveEdit() {
     </div>
     <div v-else-if="memory.items.length" class="bbs-empty">
       <span class="bbs-empty-icon"><Icon name="search" /></span>
-      <h3>没有找到匹配的物品</h3><p>换个关键词，或查看全部携带状态。</p>
+      <h3>没有找到匹配的物品</h3><p>换个关键词，或者切回「全部」。</p>
       <button class="bbs-btn" type="button" @click="search = ''; carryFilter = 'all'">清除筛选</button>
     </div>
     <div v-else class="bbs-empty">
       <span class="bbs-empty-icon"><Icon name="items" /></span>
-      <h3>行囊待书写</h3>
-      <p>摘要会自动登记剧情中的物品。{{ hasLeaf ? '也可以在上方补录，再编辑数量、描述与存放地点。' : '生成第一条有效摘要后，即可手动补录。' }}</p>
+      <h3>还没有物品</h3>
+      <p>摘要会自动记下剧情里出现的物品。{{ hasLeaf ? '也可以在上面手动补录。' : '有了第一条摘要后就能手动补录。' }}</p>
     </div>
 
     <!-- 编辑弹窗:Teleport 出滚动容器,见 ModalMask -->
@@ -162,11 +162,11 @@ function saveEdit() {
         </label>
         <label class="bbs-modal-field bbs-modal-check">
           <input v-model="editing.carried" type="checkbox" />
-          <span class="bbs-modal-label">随身携带(取消勾选可指定存放地)</span>
+          <span class="bbs-modal-label">随身携带（取消勾选可指定存放地）</span>
         </label>
         <label v-if="!editing.carried" class="bbs-modal-field">
           <span class="bbs-modal-label">存放地点</span>
-          <input v-model="editing.location" class="bbs-input" type="text" placeholder="如:武器库、家中" />
+          <input v-model="editing.location" class="bbs-input" type="text" placeholder="如：武器库、家中" />
         </label>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">描述</span>
@@ -198,7 +198,7 @@ function saveEdit() {
 .bbs-search > .bbs-input { flex: 1; width: 100%; }
 .bbs-filterbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 18px; }
 .bbs-filter-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
-.bbs-filter-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
+.bbs-filter-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface-2); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
 .bbs-filter-tab[aria-pressed='true'] { background: var(--bbs-accent-soft); border-color: var(--bbs-accent); color: var(--bbs-accent); }
 .bbs-filter-tab span { font-variant-numeric: tabular-nums; font-size: 11px; }
 .bbs-item-act { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--bbs-ink-soft); cursor: pointer; font-size: 15px; }

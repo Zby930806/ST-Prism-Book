@@ -1,5 +1,12 @@
 import { getContext } from '@/st/context';
 import type { ApiChannel } from './settings';
+import {
+  ApiError, apiFailure, classifyHttpFailure, describeFailure, emptyReply, filteredReply, finishKind, interruptedReply,
+  invalidResponse, networkFailure, parseUpstreamError, sanitizeDetail, statusFromText, timeoutFailure,
+  truncatedReply, type ReplyMeta,
+} from './errors';
+
+export { ApiError } from './errors';
 
 /**
  * 通过 SillyTavern 的服务端代理调用任意 OpenAI 兼容端点。
@@ -15,13 +22,6 @@ const DEFAULT_TIMEOUT_SEC = 180;
 export interface ChatMsg {
   role: 'system' | 'user' | 'assistant';
   content: string;
-}
-
-export class ApiError extends Error {
-  constructor(message: string, readonly status?: number) {
-    super(message);
-    this.name = 'ApiError';
-  }
 }
 
 /**
@@ -79,11 +79,21 @@ async function withTimeout<T>(
   try {
     return await task(ctrl.signal);
   } catch (e) {
-    if (timedOut) throw new ApiError(`${label}超时(>${timeoutSec}秒)`);
+    if (timedOut) throw timeoutFailure(label, timeoutSec);
     throw e;
   } finally {
     clearTimeout(timer);
     externalSignal?.removeEventListener('abort', onExternalAbort);
+  }
+}
+
+/** fetch 本身抛出的 TypeError 只可能是浏览器连不上酒馆;取消与超时原样交给上层。 */
+async function fetchHost(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (e) {
+    if (e instanceof TypeError && !init.signal?.aborted) throw networkFailure(e.message, { toHost: true });
+    throw e;
   }
 }
 
@@ -179,6 +189,11 @@ export function buildRequestBody(
   return body;
 }
 
+/** 本次请求实际发送的最大输出;被「排除参数」去掉时由服务商自行决定。 */
+function sentMaxTokens(channel: ApiChannel): number | undefined {
+  return (channel.excludeParams ?? []).some(p => p.trim() === 'max_tokens') ? undefined : channel.maxTokens ?? 65535;
+}
+
 async function requestCompletionAtUrl(
   channel: ApiChannel,
   messages: ChatMsg[],
@@ -186,8 +201,10 @@ async function requestCompletionAtUrl(
   opts: RequestOptions = {},
 ): Promise<string> {
   const ctx = getContext();
-  if (!ctx) throw new ApiError('SillyTavern 上下文不可用');
-  if (!channel.url || !channel.model) throw new ApiError('副 API 渠道未配置完整(缺 url 或 model)');
+  if (!ctx) throw apiFailure('config', '酒馆上下文还没准备好', '请等页面加载完成后重试。');
+  if (!channel.url || !channel.model) {
+    throw apiFailure('config', `「${channel.name || '未命名渠道'}」还没有填写${!channel.url ? ' API 地址' : '模型名'}`, '请先在对应的 API 设置里补全。');
+  }
 
   const stream = channel.stream ?? false;
   // 预填充开关(默认开):关闭时丢掉末尾那条 assistant 预填充消息。
@@ -198,10 +215,11 @@ async function requestCompletionAtUrl(
       ? messages.slice(0, -1)
       : messages;
   const body = buildRequestBody(channel, outMessages, reverseProxy, stream);
+  const maxTokens = sentMaxTokens(channel);
 
   const timeoutSec = validTimeoutSec(channel.timeoutSec);
-  return withTimeout(timeoutSec, opts.signal, '副 API 请求', async signal => {
-    const resp = await fetch(GENERATE_URL, {
+  return withTimeout(timeoutSec, opts.signal, 'API 请求', async signal => {
+    const resp = await fetchHost(GENERATE_URL, {
       method: 'POST',
       headers: ctx.getRequestHeaders(),
       body: JSON.stringify(body),
@@ -210,50 +228,106 @@ async function requestCompletionAtUrl(
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      throw new ApiError(`副 API 请求失败 (${resp.status}): ${text.slice(0, 300)}`, resp.status);
+      throw classifyHttpFailure({ status: resp.status, statusText: resp.statusText, body: text });
     }
 
     // 流式:按 SSE 增量拼接;非流式:直接解析 JSON。
     if (stream) {
-      const content = await readSseContent(resp, signal, opts.onDelta);
-      if (!content) throw new ApiError('副 API 返回空内容');
-      return content;
+      const reply = await readSseContent(resp, signal, opts.onDelta);
+      return finishReply(reply.text, { ...reply.meta, maxTokens });
     }
 
-    const data = await resp.json();
-    if (data?.error) {
-      throw new ApiError(data.error.message || '副 API 返回错误');
+    let data: any;
+    try {
+      data = await resp.json();
+    } catch (e) {
+      if (e instanceof SyntaxError) throw invalidResponse(e.message);
+      throw e;
     }
-
-    const content = extractContent(data);
-    if (!content) throw new ApiError('副 API 返回空内容');
-    return content;
+    if (data?.error) throw envelopeFailure(data);
+    const reply = parseCompletion(data);
+    return finishReply(reply.text, { ...reply.meta, maxTokens });
   });
 }
 
 /**
- * 读取 SSE 流(text/event-stream),拼接 delta.content。
+ * 截断、内容审核、服务端中断都要明确报出来:模型写到一半的 JSON 不能当成完整结果,
+ * 也不能被笼统地说成「格式错误」。半截回复放进 ApiError.partial,由调用方决定是否保留。
+ */
+function finishReply(text: string, meta: ReplyMeta): string {
+  switch (finishKind(meta.finishReason)) {
+    case 'truncated': throw truncatedReply(meta, text);
+    case 'filtered': throw filteredReply(meta, text);
+    case 'interrupted': throw interruptedReply(meta, text);
+  }
+  if (!text) throw emptyReply(meta);
+  return text;
+}
+
+/** 酒馆非流式代理把上游错误改写为 200 + { error: { message: statusText }, quota_error }。 */
+function envelopeFailure(data: any): ApiError {
+  const message = data?.error && typeof data.error === 'object' ? String(data.error.message ?? '') : typeof data?.error === 'string' ? data.error : '';
+  return classifyHttpFailure({ status: statusFromText(message), body: data, quotaFlag: data?.quota_error === true });
+}
+
+/** content 既可能是字符串,也可能是 [{ type:'text', text }] 分段。 */
+function textOf(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    return value.map(part => (typeof part === 'string' ? part : typeof part?.text === 'string' ? part.text : '')).join('');
+  }
+  return '';
+}
+
+/** 优先取能识别的结束原因(OpenRouter 的 native_finish_reason、Anthropic 的 stop_reason 等)。 */
+function finishReasonOf(json: any): string | undefined {
+  const choice = json?.choices?.[0];
+  const values = [choice?.finish_reason, choice?.native_finish_reason, choice?.stop_reason, json?.stop_reason, json?.delta?.stop_reason]
+    .filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
+  return values.find(v => finishKind(v)) ?? values[0];
+}
+
+function outputTokensOf(json: any): number | undefined {
+  const value = json?.usage?.completion_tokens ?? json?.usage?.output_tokens;
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** 从标准 OpenAI(及兼容 Anthropic 结构)的完整响应体提取文本与结束信息。 */
+function parseCompletion(data: any): { text: string; meta: ReplyMeta } {
+  const choice = data?.choices?.[0];
+  const text = (textOf(choice?.message?.content) || textOf(choice?.text) || textOf(data?.content)).trim();
+  const reasoning = textOf(choice?.message?.reasoning_content) || textOf(choice?.message?.reasoning);
+  return { text, meta: { finishReason: finishReasonOf(data), outputTokens: outputTokensOf(data), sawReasoning: !!reasoning.trim() } };
+}
+
+/**
+ * 读取 SSE 流(text/event-stream),拼接 delta.content,同时记下结束原因。
  * ST 的 generate 端点在 stream=true 时透传上游 SSE:每行 `data: {json}`,以 `data: [DONE]` 结束。
+ * 有的中转无视 stream 直接回整段 JSON,或把错误写成普通 JSON;没有任何 data 行时按整体 JSON 处理。
  */
 async function readSseContent(
   resp: Response,
   signal: AbortSignal,
   onDelta?: (text: string) => void,
-): Promise<string> {
+): Promise<{ text: string; meta: ReplyMeta }> {
   const reader = resp.body?.getReader();
   if (!reader) {
     // 无法流式读取(理论上不会):退回当作整体 JSON 处理
     const data = await resp.json().catch(() => null);
     signal.throwIfAborted();
-    const content = data ? extractContent(data) : '';
-    if (content) onDelta?.(content);
+    if (data?.error) throw envelopeFailure(data);
+    const reply = data ? parseCompletion(data) : { text: '', meta: {} };
+    if (reply.text) onDelta?.(reply.text);
     signal.throwIfAborted();
-    return content;
+    return reply;
   }
   const decoder = new TextDecoder();
   let buf = '';
   let out = '';
   let reachedEof = false;
+  let sawData = false;
+  let plain = '';
+  const meta: ReplyMeta = {};
   // 主动打断 reader.read,不只依赖 fetch 实现对 signal 的转发。
   // 不等待底层 cancel 完成,避免上游清理阻塞取消/超时错误的返回。
   const cancelReader = () => { void reader.cancel().catch(() => {}); };
@@ -262,7 +336,12 @@ async function readSseContent(
   const readLine = (line: string): boolean => {
     signal.throwIfAborted();
     const t = line.trim();
-    if (!t || !t.startsWith('data:')) return false;
+    if (!t) return false;
+    if (!t.startsWith('data:')) {
+      // 注释、event/id/retry 字段是 SSE 协议本身;其余文本留作「整段 JSON」兜底。
+      if (!sawData && !/^(?::|event:|id:|retry:)/.test(t) && plain.length < 65536) plain += line + '\n';
+      return false;
+    }
     const payload = t.slice(5).trim();
     if (payload === '[DONE]') return true;
     let json;
@@ -272,14 +351,36 @@ async function readSseContent(
       // 单行 JSON 解析失败忽略;回调异常及上游错误不能在此吞掉。
       return false;
     }
-    if (json?.error) throw new ApiError(json.error.message || '副 API 返回错误');
-    const delta = json?.choices?.[0]?.delta?.content ?? json?.choices?.[0]?.message?.content ?? json?.choices?.[0]?.text;
-    if (typeof delta === 'string' && delta.length > 0) {
+    sawData = true;
+    if (json?.error) throw classifyHttpFailure({ body: json });
+    const choice = json?.choices?.[0];
+    const delta = textOf(choice?.delta?.content) || textOf(choice?.message?.content) || textOf(choice?.text)
+      || (json?.type === 'content_block_delta' ? textOf(json?.delta?.text) : '');
+    if (textOf(choice?.delta?.reasoning_content) || textOf(choice?.delta?.reasoning)) meta.sawReasoning = true;
+    const finish = finishReasonOf(json);
+    if (finish) meta.finishReason = finish;
+    const tokens = outputTokensOf(json);
+    if (tokens !== undefined) meta.outputTokens = tokens;
+    if (delta.length > 0) {
       out += delta;
       onDelta?.(out);
       signal.throwIfAborted();
     }
     return false;
+  };
+
+  const finish = (): { text: string; meta: ReplyMeta } => {
+    if (!sawData && plain.trim()) {
+      let data: any = null;
+      try { data = JSON.parse(plain); } catch { /* 不是 JSON:当作空流处理 */ }
+      if (data?.error) throw envelopeFailure(data);
+      if (data) {
+        const reply = parseCompletion(data);
+        if (reply.text) onDelta?.(reply.text);
+        return reply;
+      }
+    }
+    return { text: out.trim(), meta };
   };
 
   try {
@@ -292,14 +393,14 @@ async function readSseContent(
         // flush 解码器并消费尾行,即使上游在 EOF 前没有发送换行。
         buf += decoder.decode();
         if (buf) readLine(buf);
-        return out.trim();
+        return finish();
       }
       buf += decoder.decode(value, { stream: true });
       // 按行解析,保留最后一段不完整的行到下次。
       const lines = buf.split('\n');
       buf = lines.pop() ?? '';
       for (const line of lines) {
-        if (readLine(line)) return out.trim();
+        if (readLine(line)) return finish();
       }
     }
   } finally {
@@ -307,16 +408,6 @@ async function readSseContent(
     if (!reachedEof) cancelReader();
     reader.releaseLock();
   }
-}
-
-/** 从标准 OpenAI 响应体提取文本 */
-function extractContent(data: any): string {
-  return (
-    data?.choices?.[0]?.message?.content ??
-    data?.choices?.[0]?.text ??
-    data?.content ??
-    ''
-  ).trim();
 }
 
 /* ============ 跟随主 API(主界面当前在用的 API 设置) ============ */
@@ -343,51 +434,78 @@ export function mainApiAvailable(): boolean {
 export async function requestViaMainApi(messages: ChatMsg[], _opts: RequestOptions = {}): Promise<string> {
   const ctx = getContext();
   if (typeof ctx?.generateRaw !== 'function') {
-    throw new ApiError('当前 ST 版本不支持 generateRaw,无法跟随主 API');
+    throw apiFailure('config', '当前酒馆版本不支持「跟随主 API」', '请在设置 → 副 API 里给这个任务指派一个渠道。');
   }
-  const content = (await ctx.generateRaw({ prompt: messages, responseLength: MAIN_API_RESPONSE_LENGTH }))?.trim();
-  if (!content) throw new ApiError('主 API 返回空内容');
+  let content: string | undefined;
+  try {
+    content = (await ctx.generateRaw({ prompt: messages, responseLength: MAIN_API_RESPONSE_LENGTH }))?.trim();
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') throw e;
+    // 酒馆的 generateRaw 有时抛 Error(对象),message 只剩 [object Object];真实原因在酒馆自己的报错弹窗里。
+    const raw = e instanceof Error ? e.message : parseUpstreamError(e).message;
+    if (/no message generated/i.test(raw)) {
+      throw apiFailure('empty', '主 API 没有返回内容', '可能被内容审核拦截或输出为空；可以重试，或在设置 → 副 API 里给这个任务单独指派渠道。');
+    }
+    if (/cancel|abort/i.test(raw)) throw apiFailure('unknown', '主 API 请求被中止', '正文生成被停止时会一并中止，重新发起即可。');
+    throw apiFailure('upstream', '主 API 请求失败', '具体原因请看酒馆弹出的报错提示；也可以在设置 → 副 API 里给这个任务单独指派渠道。', {
+      detail: raw && raw !== '[object Object]' ? sanitizeDetail(raw) : '',
+    });
+  }
+  if (!content) throw apiFailure('empty', '主 API 返回了空内容', '可以重试，或在设置 → 副 API 里给这个任务单独指派渠道。');
   return content;
 }
 
+const TEST_PROMPT: ChatMsg[] = [{ role: 'user', content: '回复"ok"两个字符即可。' }];
+
+/** 能连通、只是回复本身有问题时,连接测试应当报「连得上」并说明问题。 */
+function testWarning(e: unknown): string {
+  if (!(e instanceof ApiError)) return '';
+  if (e.kind === 'truncated') return `连接正常，但测试回复被截断：${e.hint}`;
+  if (e.kind === 'filtered') return '连接正常，但测试回复被服务商的内容审核拦截了。';
+  if (e.kind === 'empty') return `连接正常，但${e.title}。`;
+  return '';
+}
+
 /** 连通性测试:发一条极短请求 */
-export async function testChannel(channel: ApiChannel): Promise<{ ok: boolean; message: string }> {
+export async function testChannel(channel: ApiChannel): Promise<{ ok: boolean; warning?: boolean; message: string; detail?: string }> {
   const primaryUrl = normalizeUrl(channel.url);
   try {
-    const reply = await requestCompletionAtUrl(
-      channel,
-      [{ role: 'user', content: '回复"ok"两个字符即可。' }],
-      primaryUrl,
-    );
+    const reply = await requestCompletionAtUrl(channel, TEST_PROMPT, primaryUrl);
     const changed = channel.url.trim().replace(/\/+$/, '') !== primaryUrl;
     if (changed) channel.url = primaryUrl;
     return {
       ok: true,
-      message: `连通正常${changed ? `,已采用:${primaryUrl}` : ''},返回:${reply.slice(0, 40)}`,
+      message: `连接正常${changed ? `，地址已规范为 ${primaryUrl}` : ''}。模型回复：${reply.slice(0, 40)}`,
     };
   } catch (e) {
+    const warning = testWarning(e);
+    if (warning) return { ok: true, warning: true, message: warning, detail: (e as ApiError).detail };
     if (!(e instanceof ApiError) || (e.status !== 404 && e.status !== 405)) {
-      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+      const view = describeFailure(e, '测试没有完成');
+      return { ok: false, message: view.message, detail: view.detail };
     }
 
     const fallbackUrl = alternateUrl(primaryUrl);
     if (!fallbackUrl || fallbackUrl === primaryUrl) {
-      return { ok: false, message: e.message };
+      const view = describeFailure(e);
+      return { ok: false, message: view.message, detail: view.detail };
     }
     try {
-      const reply = await requestCompletionAtUrl(
-        channel,
-        [{ role: 'user', content: '回复"ok"两个字符即可。' }],
-        fallbackUrl,
-      );
+      const reply = await requestCompletionAtUrl(channel, TEST_PROMPT, fallbackUrl);
       channel.url = fallbackUrl;
       return {
         ok: true,
-        message: `连通正常,已自动改用:${fallbackUrl},返回:${reply.slice(0, 40)}`,
+        message: `连接正常，已自动改用 ${fallbackUrl}。模型回复：${reply.slice(0, 40)}`,
       };
-    } catch {
+    } catch (fallbackError) {
+      const fallbackWarning = testWarning(fallbackError);
+      if (fallbackWarning) {
+        channel.url = fallbackUrl;
+        return { ok: true, warning: true, message: `已自动改用 ${fallbackUrl}。${fallbackWarning}`, detail: (fallbackError as ApiError).detail };
+      }
       // 备用地址也失败时保留首个错误,避免把模型名等真实问题掩盖成路径错误。
-      return { ok: false, message: e.message };
+      const view = describeFailure(e);
+      return { ok: false, message: view.message, detail: view.detail };
     }
   }
 }
@@ -403,8 +521,8 @@ export async function fetchModels(
   opts: Pick<RequestOptions, 'signal'> = {},
 ): Promise<string[]> {
   const ctx = getContext();
-  if (!ctx) throw new ApiError('SillyTavern 上下文不可用');
-  if (!channel.url) throw new ApiError('请先填写 API 地址');
+  if (!ctx) throw apiFailure('config', '酒馆上下文还没准备好', '请等页面加载完成后重试。');
+  if (!channel.url) throw apiFailure('config', '请先填写 API 地址');
 
   const body = {
     chat_completion_source: 'openai',
@@ -414,7 +532,7 @@ export async function fetchModels(
 
   const timeoutSec = validTimeoutSec(channel.timeoutSec);
   return withTimeout(timeoutSec, opts.signal, '拉取模型', async signal => {
-    const resp = await fetch(STATUS_URL, {
+    const resp = await fetchHost(STATUS_URL, {
       method: 'POST',
       headers: ctx.getRequestHeaders(),
       body: JSON.stringify(body),
@@ -423,12 +541,21 @@ export async function fetchModels(
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      throw new ApiError(`拉取模型失败 (${resp.status}): ${text.slice(0, 200)}`, resp.status);
+      throw classifyHttpFailure({ status: resp.status, statusText: resp.statusText, body: text });
     }
 
-    const data = await resp.json();
+    let data: any;
+    try {
+      data = await resp.json();
+    } catch (e) {
+      if (e instanceof SyntaxError) throw invalidResponse(e.message);
+      throw e;
+    }
+    // 酒馆的模型列表代理失败时只回 { error: true },不带状态码和原因。
     if (data?.error && !Array.isArray(data?.data)) {
-      throw new ApiError(data?.message || '拉取模型失败');
+      throw apiFailure('upstream', '服务商没有返回模型列表', '常见原因是地址不对、密钥无效，或这个服务不提供模型列表；可以直接手动填写模型名。', {
+        detail: typeof data?.message === 'string' ? sanitizeDetail(data.message) : '',
+      });
     }
 
     const list: unknown = data?.data ?? data?.models ?? [];

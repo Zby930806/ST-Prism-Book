@@ -105,7 +105,10 @@ describe('requestCompletion streaming progress', () => {
     const body = new Response(`${event('partial')}\n\ndata: {"error":{"message":"upstream failed"}}${ending}`);
     mockResponse(body);
     const onDelta = vi.fn();
-    await expect(requestCompletion(channel, messages, { onDelta })).rejects.toThrow('upstream failed');
+    const error = await requestCompletion(channel, messages, { onDelta }).catch(cause => cause);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.detail).toContain('upstream failed');
+    expect(error.message).toContain('API 返回了错误');
     expect(onDelta).toHaveBeenCalledExactlyOnceWith('partial');
     expect(body.body?.locked).toBe(false);
   });
@@ -122,7 +125,7 @@ describe('requestCompletion streaming progress', () => {
   it('空流继续抛出空内容错误', async () => {
     mockResponse(new Response('data: [DONE]'));
     const onDelta = vi.fn();
-    await expect(requestCompletion(channel, messages, { onDelta })).rejects.toThrow('副 API 返回空内容');
+    await expect(requestCompletion(channel, messages, { onDelta })).rejects.toMatchObject({ kind: 'empty', title: 'API 返回了空内容' });
     expect(onDelta).not.toHaveBeenCalled();
   });
 
@@ -166,7 +169,7 @@ describe('stream reader edge cases', () => {
     mockResponse(new Response(body));
     const onDelta = vi.fn();
     const promise = requestCompletion(channel, messages, { onDelta });
-    const rejection = expect(promise).rejects.toThrow('副 API 请求超时(>2秒)');
+    const rejection = expect(promise).rejects.toThrow('API 请求超时（超过 2 秒）');
     await vi.advanceTimersByTimeAsync(2000);
     await rejection;
     expect(cancel).toHaveBeenCalledTimes(1);
@@ -217,7 +220,7 @@ describe('stream cancellation and timeout', () => {
     const { body, controller, cancel, fetchMock } = openStream();
     const onDelta = vi.fn();
     const promise = requestCompletion(channel, messages, { onDelta });
-    const rejection = expect(promise).rejects.toThrow('副 API 请求超时(>2秒)');
+    const rejection = expect(promise).rejects.toThrow('API 请求超时（超过 2 秒）');
     controller.enqueue(encoder.encode(`${event('partial')}\n`));
     await vi.advanceTimersByTimeAsync(0);
     expect(onDelta).toHaveBeenCalledExactlyOnceWith('partial');

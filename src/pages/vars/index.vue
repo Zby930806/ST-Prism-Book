@@ -62,7 +62,7 @@ function openEditState() {
 function saveState() {
   const json = parseObj(stateEdit.value);
   if (!json) { stateEditErr.value = 'JSON 无效或根不是对象 {…}'; return; }
-  if (!setVarsRoot(json)) { stateEditErr.value = '保存失败:需要先有摘要才能写入'; return; }
+  if (!setVarsRoot(json)) { stateEditErr.value = '保存失败：要先有摘要才能写入。'; return; }
   refreshInjection();
   editStateOpen.value = false;
 }
@@ -100,7 +100,7 @@ function switchMode(m: 'tree' | 'source') {
   if (m === editorMode.value) return;
   if (m === 'tree') {
     const obj = parseObj(editorJson.value);
-    if (!obj) { jsonError.value = '源码 JSON 无效,修正后才能切到结构视图'; return; }
+    if (!obj) { jsonError.value = '源码 JSON 不对，改好后才能切到结构视图。'; return; }
     editorTree.value = obj;
     jsonError.value = '';
   } else {
@@ -156,7 +156,7 @@ async function copyExport() {
     await navigator.clipboard.writeText(exportText.value);
     toast('已复制到剪贴板', 'success');
   } catch {
-    toast('复制失败,请在框里手动选择复制', 'error');
+    toast('复制失败，请在框里手动选中复制。', 'error');
   }
 }
 function downloadExport() {
@@ -177,7 +177,7 @@ function onImportFile(e: Event) {
 }
 function applyImport() {
   let parsed: unknown;
-  try { parsed = JSON.parse(importText.value); } catch { toast('JSON 解析失败,请检查', 'error'); return; }
+  try { parsed = JSON.parse(importText.value); } catch { toast('JSON 格式不对，解析失败，请检查。', 'error'); return; }
   // 接受 {json,meaning,rule} 包裹(兼容旧 guide → 并入 rule),或裸对象(当作 json)
   let json: Record<string, JsonValue> = {};
   let meaning = '';
@@ -210,9 +210,9 @@ function applyImport() {
 
 <template>
   <section class="bbs-page">
-    <PageHeader icon="vars" title="变量" eyebrow="叙事数据" description="查看故事里的当前值，定义可复用的结构与变化规则。">
+    <PageHeader icon="vars" title="变量" description="自定义变量的当前值，以及它们的初始结构和变化规则（模板）。">
       <template #actions>
-        <button class="bbs-btn" type="button" :disabled="!hasAnyTemplate" title="导出模板(分享)" @click="openExport"><Icon name="upload" />导出模板</button>
+        <button class="bbs-btn" type="button" :disabled="!hasAnyTemplate" title="导出模板（分享）" @click="openExport"><Icon name="upload" />导出模板</button>
         <button class="bbs-btn" type="button" title="导入模板" @click="openImport"><Icon name="download" />导入模板</button>
       </template>
     </PageHeader>
@@ -224,24 +224,24 @@ function applyImport() {
     <!-- 当前状态：读取面板与模板编辑明确分区。 -->
     <section class="bbs-var-state" aria-labelledby="bbs-vars-state-heading">
     <div class="bbs-var-blockhead">
-      <div class="bbs-var-section-title"><span class="bbs-var-step">01</span><h2 id="bbs-vars-state-heading" class="bbs-var-sub">当前状态</h2></div>
+      <div class="bbs-var-section-title"><h2 id="bbs-vars-state-heading" class="bbs-var-sub">当前状态</h2></div>
       <button class="bbs-mini-btn" type="button" :disabled="!hasLeaf" title="手动编辑整份 JSON" @click="openEditState">
         <Icon name="edit" />编辑
       </button>
     </div>
     <pre v-if="hasState" class="bbs-json-view" tabindex="0" aria-label="当前变量 JSON 状态">{{ stateJson }}</pre>
-    <div v-else class="bbs-var-emptyline"><Icon name="vars" /><div><h3>故事的数据，尚待落笔</h3><p>在下方定义初始模板，或让 AI 在剧情里自行创建势力、关系与其他条目。</p></div></div>
-    <p v-if="!hasLeaf" class="bbs-modal-hint bbs-var-statehint">改「当前值」需先有摘要；已有内容为初始状态。下方模板仍可编辑。</p>
+    <div v-else class="bbs-var-emptyline"><Icon name="vars" /><div><h3>还没有变量</h3><p>可以在下面定义初始模板，也可以让 AI 在剧情里自己建（比如势力、关系）。</p></div></div>
+    <p v-if="!hasLeaf" class="bbs-modal-hint bbs-var-statehint">有了摘要才能改当前值；现在显示的是初始状态。下面的模板随时可以改。</p>
     </section>
 
     <!-- 初始模板与说明 -->
     <section class="bbs-var-template" aria-labelledby="bbs-vars-template-heading">
     <div class="bbs-var-blockhead bbs-var-tmplhead">
-      <div class="bbs-var-section-title"><span class="bbs-var-step">02</span><h2 id="bbs-vars-template-heading" class="bbs-var-sub">初始模板与说明</h2></div>
+      <div class="bbs-var-section-title"><h2 id="bbs-vars-template-heading" class="bbs-var-sub">初始模板与说明</h2></div>
       <span class="bbs-var-scope">聊天 &gt; 角色 &gt; 全局</span>
     </div>
     <p class="bbs-modal-hint bbs-var-tmpltip">
-      初始结构 + 给 AI 的说明。三层合并(聊天 &gt; 角色 &gt; 全局)作为重放起点,AI 在剧情里用命令增删改。改初始值会影响整条聊天的当前值。
+      初始结构 + 给 AI 的说明。三层合并（聊天 &gt; 角色 &gt; 全局）作为重放起点，AI 在剧情里用命令增删改。改初始值会影响整条聊天的当前值。
     </p>
 
     <div class="bbs-typegrid bbs-var-tierpick" aria-label="选择模板作用范围">
@@ -259,12 +259,12 @@ function applyImport() {
       </button>
     </div>
     <span class="bbs-modal-hint">
-      {{ editorTier === 'char' && !charAvailable ? '当前无单一角色(群聊/未进入),暂不能编辑角色层' : TIER_META[editorTier].hint }}
+      {{ editorTier === 'char' && !charAvailable ? '当前无单一角色（群聊/未进入），暂不能编辑角色层' : TIER_META[editorTier].hint }}
     </span>
 
     <div class="bbs-modal-field">
       <div class="bbs-jte-fieldhead">
-        <span class="bbs-modal-label">初始结构(可留空让 AI 从零建)</span>
+        <span class="bbs-modal-label">初始结构（可留空让 AI 从零建）</span>
         <div class="bbs-mode-toggle" aria-label="模板编辑模式">
           <button class="bbs-mode-btn" :class="{ on: editorMode === 'tree' }" :aria-pressed="editorMode === 'tree'" type="button" @click="switchMode('tree')">结构</button>
           <button class="bbs-mode-btn" :class="{ on: editorMode === 'source' }" :aria-pressed="editorMode === 'source'" type="button" @click="switchMode('source')">源码</button>
@@ -272,28 +272,28 @@ function applyImport() {
       </div>
       <div v-if="editorMode === 'tree'" class="bbs-jte-wrap">
         <JsonTreeEditor v-model="editorTree" />
-        <p v-if="!Object.keys(editorTree).length" class="bbs-jte-empty">空结构。点「加字段」搭出想追踪的结构,或留空让 AI 在剧情里自建。</p>
+        <p v-if="!Object.keys(editorTree).length" class="bbs-jte-empty">空结构。点「加字段」搭出想追踪的结构，或留空让 AI 在剧情里自建。</p>
       </div>
       <textarea v-else v-model="editorJson" class="bbs-input bbs-json-edit" aria-label="初始结构 JSON 源码" spellcheck="false" rows="7"></textarea>
       <span v-if="jsonError" class="bbs-json-err">{{ jsonError }}</span>
     </div>
     <div class="bbs-var-guide-grid">
     <label class="bbs-modal-field">
-      <span class="bbs-modal-label">含义(各字段是什么;正文 AI 与摘要 AI 都会看到,用于理解当前值)</span>
+      <span class="bbs-modal-label">含义（各字段是什么；正文 AI 与摘要 AI 都会看到，用于理解当前值）</span>
       <textarea
         v-model="editorMeaning"
         class="bbs-input bbs-modal-textarea"
         rows="5"
-        placeholder="如:xxx好感度指的是该角色对{{user}}的好感度,角色好感度的不同,行为表现也会不同。"
+        placeholder="如：xxx好感度指的是该角色对{{user}}的好感度，角色好感度的不同，行为表现也会不同。"
       ></textarea>
     </label>
     <label class="bbs-modal-field">
-      <span class="bbs-modal-label">变化规则(何时怎么改、可否新建;只发摘要 AI,不进正文,避免正文复述变量)</span>
+      <span class="bbs-modal-label">变化规则（何时怎么改、可否新建；只发摘要 AI，不进正文，避免正文复述变量）</span>
       <textarea
         v-model="editorRule"
         class="bbs-input bbs-modal-textarea"
         rows="5"
-        placeholder="如: 角色每次和{{user}}触发事件时,好感度都会变化,但每次浮动不得超过5"
+        placeholder="如：角色每次和{{user}}触发事件时，好感度都会变化，但每次浮动不得超过5"
       ></textarea>
     </label>
     </div>
@@ -318,7 +318,7 @@ function applyImport() {
           <span class="bbs-modal-title">编辑当前值</span>
           <button class="bbs-item-act" type="button" title="关闭" @click="editStateOpen = false"><Icon name="close" /></button>
         </header>
-        <p class="bbs-modal-hint">直接改整份 JSON,保存即写进最新摘要楼层(删该楼可回退)。</p>
+        <p class="bbs-modal-hint">直接改整份 JSON，保存即写进最新摘要楼层（删该楼可回退）。</p>
         <textarea v-model="stateEdit" aria-label="编辑当前变量 JSON" class="bbs-input bbs-json-edit bbs-io-area" spellcheck="false"></textarea>
         <span v-if="stateEditErr" class="bbs-json-err">{{ stateEditErr }}</span>
         <footer class="bbs-modal-foot">
@@ -335,7 +335,7 @@ function applyImport() {
           <span class="bbs-modal-title">导出变量模板</span>
           <button class="bbs-item-act" type="button" title="关闭" @click="exportOpen = false"><Icon name="close" /></button>
         </header>
-        <p class="bbs-modal-hint">三层合并后的初始结构 + 说明(不含具体值)。复制发给别人即可分享。</p>
+        <p class="bbs-modal-hint">三层合并后的初始结构 + 说明（不含具体值）。复制发给别人即可分享。</p>
         <textarea class="bbs-input bbs-json-edit bbs-io-area" aria-label="导出的变量模板 JSON" readonly :value="exportText"></textarea>
         <footer class="bbs-modal-foot">
           <button class="bbs-btn" type="button" @click="downloadExport"><Icon name="download" />下载文件</button>
@@ -353,7 +353,7 @@ function applyImport() {
         </header>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">粘贴模板 JSON</span>
-          <textarea v-model="importText" class="bbs-input bbs-json-edit bbs-io-area" spellcheck="false" placeholder="把分享来的变量模板 JSON 粘到这里,或用下面的文件选择"></textarea>
+          <textarea v-model="importText" class="bbs-input bbs-json-edit bbs-io-area" spellcheck="false" placeholder="把分享来的变量模板 JSON 粘到这里，或用下面的文件选择"></textarea>
         </label>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">或从文件导入</span>
@@ -374,7 +374,7 @@ function applyImport() {
               {{ TIER_META[t].label }}
             </button>
           </div>
-          <span class="bbs-modal-hint">合并进该层模板(顶层同名字段会被覆盖);说明会追加。</span>
+          <span class="bbs-modal-hint">合并进该层模板（顶层同名字段会被覆盖）；说明会追加。</span>
         </div>
         <footer class="bbs-modal-foot">
           <button class="bbs-btn" type="button" @click="importOpen = false">取消</button>
@@ -402,7 +402,7 @@ function applyImport() {
 .bbs-search > .bbs-input { flex: 1; width: 100%; }
 .bbs-filterbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 18px; }
 .bbs-filter-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
-.bbs-filter-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
+.bbs-filter-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface-2); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
 .bbs-filter-tab[aria-pressed='true'] { background: var(--bbs-accent-soft); border-color: var(--bbs-accent); color: var(--bbs-accent); }
 .bbs-filter-tab span { font-variant-numeric: tabular-nums; font-size: 11px; }
 .bbs-item-act { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--bbs-ink-soft); cursor: pointer; font-size: 15px; }
@@ -432,10 +432,9 @@ function applyImport() {
 .bbs-var-state, .bbs-var-template { min-width: 0; }
 .bbs-var-blockhead { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
 .bbs-var-section-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.bbs-var-step { color: var(--bbs-accent); font-family: var(--bbs-font-mono); font-size: 11px; letter-spacing: .06em; }
 .bbs-var-sub { margin: 0; font-size: 16px; font-weight: 650; color: var(--bbs-ink); }
-.bbs-mini-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 6px 12px; border: 1px solid var(--bbs-line-strong); border-radius: 9px; background: var(--bbs-surface); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
-.bbs-mini-btn:hover:not(:disabled) { border-color: var(--bbs-accent); color: var(--bbs-accent); }
+.bbs-mini-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 6px 12px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface-2); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
+.bbs-mini-btn:hover:not(:disabled) { border-color: var(--bbs-accent); background: var(--bbs-accent-soft); color: var(--bbs-accent); }
 .bbs-mini-btn:disabled { opacity: .5; }
 .bbs-json-view { margin: 0; width: 100%; min-width: 0; padding: 18px; border: 1px solid var(--bbs-line); border-left: 3px solid var(--bbs-accent); border-radius: 12px; background: var(--bbs-surface-2); color: var(--bbs-ink-soft); font-family: var(--bbs-font-mono); font-size: 12px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 150px; max-height: 50vh; overflow: auto; tab-size: 2; }
 .bbs-json-view:focus-visible { outline: 2px solid var(--bbs-accent); outline-offset: 3px; }

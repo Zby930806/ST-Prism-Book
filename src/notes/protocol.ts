@@ -24,6 +24,10 @@ export function fingerprint(text: string): string {
 }
 export function noteText(reply: string): string {
   const clean = reply.replace(/<(?:think|thinking)\b[^>]*>[\s\S]*?<\/(?:think|thinking)>/gi, '').trim();
-  if (clean.length > 80000) throw new Error('札记返回过长，未保存；请降低输出上限。');
-  return extractAftertalk(clean).join('\n\n') || clean;
+  if (clean.length > 80000) throw new Error('札记返回过长（超过 8 万字），没有保存；请调低最大输出。');
+  const blocks = extractAftertalk(clean);
+  if (blocks.length) return blocks.join('\n\n');
+  // 写到一半被截断时只有开头标签，去掉标签、保留已写出的内容。
+  const open = /<aftertalk\b[^>]*>([\s\S]*)$/i.exec(clean);
+  return open ? open[1].trim() : clean;
 }

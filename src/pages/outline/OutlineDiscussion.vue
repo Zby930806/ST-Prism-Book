@@ -60,12 +60,12 @@ async function confirm() {
   confirmation.value = null;
   if (!sameOutlineChat(choice.source) || choice.revision !== outlineState.revision
     || choice.discussionRevision !== discussionState.revision || choice.target !== target.value || choice.count !== stageCount.value) {
-    error.value = '聊天、讨论或大纲已变化，请重新核对。'; return;
+    error.value = '聊天、讨论或规划已经变了，请重新核对。'; return;
   }
   try {
     if (choice.kind === 'clear') {
       await clearOutlineDiscussion(choice.discussionRevision);
-      if (mounted && sameOutlineChat(choice.source)) { discussionRun.error = ''; discussionRun.status = '本聊天讨论已清空，草稿与已确认规划未改变。'; }
+      if (mounted && sameOutlineChat(choice.source)) { discussionRun.error = ''; discussionRun.errorDetail = ''; discussionRun.status = '讨论已清空。'; }
       return;
     }
     const reference = captureOutlineRefinement(choice.target);
@@ -80,44 +80,48 @@ async function confirm() {
 </script>
 
 <template>
-  <details class="outline-discussion" aria-label="大纲讨论区">
-    <summary>与模型讨论大纲 <span v-if="discussionState.messages.length">· {{ discussionState.messages.length / 2 }} 轮</span></summary>
-    <p>可商量动机、节奏、分支或修改方向。讨论与规划共用所选规划 API；聊天本身不会改大纲，也不会发进正文。</p>
-    <p class="hint">记录随本聊天保存，最多12轮、合计48000字符；每次请求参考最近24000字符的完整问答。讨论后点击“按讨论生成草稿”，核对并确认加入计划才会生效。</p>
-    <p v-if="unsaved" class="warning">编辑器有未保存修改：讨论只参考已保存版本。建议先保存，再讨论；生成修订草稿会替换旧草稿与未保存编辑。</p>
-    <p v-if="configurationIssue" class="warning">{{ configurationIssue }} 请在下方“规划 API 设置”中配置。</p>
-    <p v-if="apiDirty" class="hint">API 表单尚未保存；讨论使用已保存的渠道。</p>
-    <label>讨论参考
+  <details class="bbs-disclosure is-card outline-discussion" aria-label="大纲讨论区">
+    <summary>和模型讨论规划 <span v-if="discussionState.messages.length" class="bbs-disclosure-meta">{{ discussionState.messages.length / 2 }} 轮</span></summary>
+    <p class="hint">先和模型聊聊人物动机、节奏或走向。讨论不会改动规划，也不会发给正文；想采纳时点「按讨论生成草稿」。</p>
+    <p v-if="unsaved" class="bbs-callout is-warning">草稿有没保存的修改：讨论只会参考已保存的版本，按讨论生成草稿也会覆盖这些修改。</p>
+    <p v-if="configurationIssue" class="bbs-callout is-warning">{{ configurationIssue }}</p>
+    <p v-if="apiDirty" class="hint">API 设置还没保存，讨论会用上次保存的设置。</p>
+    <label>参考哪个版本
       <select v-model="target" class="bbs-input" aria-label="讨论参考" :disabled="locked" @change="touchedTarget = true">
-        <option v-if="outlineState.active" value="active">已确认规划 · {{ outlineState.active.content.title }}</option>
-        <option v-if="outlineState.draft" value="draft">已保存草稿 · {{ outlineState.draft.content.title }}</option>
-        <option value="none">先讨论方向（不参考现有大纲）</option>
+        <option v-if="outlineState.active" value="active">正在用的规划 · {{ outlineState.active.content.title }}</option>
+        <option v-if="outlineState.draft" value="draft">草稿 · {{ outlineState.draft.content.title }}</option>
+        <option value="none">不参考，先聊方向</option>
       </select>
     </label>
     <ol v-if="discussionState.messages.length" class="discussion-messages" aria-label="已保存的大纲讨论">
       <li v-for="(message, index) in discussionState.messages" :key="index" :class="message.role">
-        <strong>{{ message.role === 'user' ? '你' : '规划模型' }}</strong>
+        <strong>{{ message.role === 'user' ? '你' : '模型' }}</strong>
         <div class="discussion-text">{{ message.content }}</div>
       </li>
     </ol>
-    <p v-else class="hint">还没有讨论。可以问：“这个转折会不会让角色突然变得太配合？有没有更自然的发展？”</p>
-    <label>你的大纲意见<textarea v-model="question" class="bbs-input" rows="4" maxlength="4000" :disabled="locked" placeholder="说说想保留、想调整的地方，也可以先问模型的看法。" @keydown.ctrl.enter.prevent="send" /></label>
+    <p v-else class="hint">还没有讨论。可以问问：「这个转折会不会让角色太配合了？有没有更自然的走法？」</p>
+    <label>你想聊的<textarea v-model="question" class="bbs-input" rows="4" maxlength="4000" :disabled="locked" placeholder="想保留什么、想改什么，或者先问问模型的看法。Ctrl+Enter 发送" @keydown.ctrl.enter.prevent="send" /></label>
     <div class="discussion-actions">
-      <button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canSend" @click="send">发送讨论</button>
-      <button v-if="discussionRun.busy" type="button" class="bbs-btn" :disabled="discussionState.saving" @click="cancelOutlineDiscussion">取消讨论</button>
+      <button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canSend" @click="send">发送</button>
+      <button v-if="discussionRun.busy" type="button" class="bbs-btn" :disabled="discussionState.saving" @click="cancelOutlineDiscussion">取消</button>
     </div>
-    <p v-if="discussionRun.status" role="status">{{ discussionRun.status }}</p>
-    <p v-if="error || discussionRun.error || discussionState.issue" class="warning" role="alert">{{ error || discussionRun.error || discussionState.issue }}</p>
-    <label>讨论修订阶段数（1–12）<input v-model.number="stageCount" class="bbs-input" type="number" min="1" max="12" step="1" :disabled="locked" /></label>
-    <div class="discussion-actions">
-      <button type="button" class="bbs-btn" :disabled="!available || !discussionState.messages.length || !Number.isInteger(stageCount) || stageCount < 1 || stageCount > 12" @click="request('refine')">按讨论生成草稿</button>
-      <button type="button" class="bbs-btn" :disabled="locked || !discussionState.messages.length" @click="request('clear')">清空本聊天讨论</button>
-      <button v-if="refining && outlineRun.busy" type="button" class="bbs-btn" @click="cancelOutline">取消修订生成</button>
+    <p v-if="discussionRun.status" class="discussion-status" role="status">{{ discussionRun.status }}</p>
+    <div v-if="error || discussionRun.error || discussionState.issue" class="bbs-callout is-danger" role="alert">
+      <p>{{ error || discussionRun.error || discussionState.issue }}</p>
+      <details v-if="!error && discussionRun.error && discussionRun.errorDetail"><summary>技术细节</summary><p>{{ discussionRun.errorDetail }}</p></details>
+    </div>
+    <div class="discussion-refine">
+      <label>草稿分几个阶段（1–12）<input v-model.number="stageCount" class="bbs-input" type="number" min="1" max="12" step="1" :disabled="locked" /></label>
+      <div class="discussion-actions">
+        <button type="button" class="bbs-btn" :disabled="!available || !discussionState.messages.length || !Number.isInteger(stageCount) || stageCount < 1 || stageCount > 12" @click="request('refine')">按讨论生成草稿</button>
+        <button type="button" class="bbs-btn" :disabled="locked || !discussionState.messages.length" @click="request('clear')">清空讨论</button>
+        <button v-if="refining && outlineRun.busy" type="button" class="bbs-btn" @click="cancelOutline">取消生成</button>
+      </div>
     </div>
     <div v-if="confirmation" class="discussion-confirmation">
-      <p>{{ confirmation.kind === 'clear' ? '只清空本聊天的讨论记录，不改草稿、已确认规划、札记或摘要。确定清空？' : '将再次调用规划 API，可能产生费用；成功后替换草稿和未保存编辑，不替换已确认规划。需要你另行确认加入计划。' }}</p>
+      <p>{{ confirmation.kind === 'clear' ? '只清空这个聊天的讨论记录，草稿、规划、札记和摘要都不受影响。确定清空吗？' : '会再请求一次规划 API，按讨论生成新草稿，替换当前草稿（包括没保存的修改）。正在用的规划不受影响，新草稿也要你确认后才生效。' }}</p>
       <div class="discussion-actions">
-        <button type="button" class="bbs-btn bbs-btn-primary" :disabled="locked" @click="confirm">{{ confirmation.kind === 'clear' ? '确认清空讨论' : '确认生成修订草稿' }}</button>
+        <button type="button" class="bbs-btn bbs-btn-primary" :disabled="locked" @click="confirm">{{ confirmation.kind === 'clear' ? '清空' : '生成草稿' }}</button>
         <button type="button" class="bbs-btn" @click="confirmation = null">取消</button>
       </div>
     </div>
@@ -125,18 +129,24 @@ async function confirm() {
 </template>
 
 <style scoped>
-.outline-discussion { min-width:0; max-width:100%; padding:12px; margin:12px 0; border:1px solid var(--bbs-line); border-radius:8px; background:var(--bbs-surface); overflow-wrap:anywhere; }
-summary { cursor:pointer; min-height:44px; padding:10px 0; font-weight:600; }
-label { display:flex; flex-direction:column; gap:5px; margin:10px 0; min-width:0; }
-.bbs-input { box-sizing:border-box; width:100%; min-width:0; max-width:100%; min-height:44px; }
+.outline-discussion { min-width:0; max-width:100%; margin:12px 0; overflow-wrap:anywhere; font-size:13px; line-height:1.75; }
+label { display:flex; flex-direction:column; gap:5px; margin:10px 0; min-width:0; font-size:12.5px; color:var(--bbs-ink-soft); }
+.bbs-input { box-sizing:border-box; width:100%; min-width:0; max-width:100%; min-height:40px; font-size:13px; color:var(--bbs-ink); }
 textarea { resize:vertical; font:inherit; }
 .discussion-actions { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }
-.bbs-btn { min-height:44px; max-width:100%; white-space:normal; overflow-wrap:anywhere; }
-.discussion-messages { list-style:none; margin:12px 0; padding:0; max-height:360px; overflow:auto; overscroll-behavior:contain; }
-.discussion-messages li { margin:8px 0; padding:10px; border:1px solid var(--bbs-line); border-radius:8px; }
-.discussion-messages .user { border-left:3px solid var(--bbs-accent); }
+.bbs-btn { min-height:38px; max-width:100%; white-space:normal; overflow-wrap:anywhere; }
+.discussion-messages { list-style:none; margin:12px 0; padding:0; max-height:380px; overflow:auto; overscroll-behavior:contain; display:flex; flex-direction:column; gap:8px; }
+.discussion-messages li { padding:10px 12px; border-radius:10px; background:var(--bbs-surface-2); }
+.discussion-messages li strong { display:block; margin-bottom:2px; font-size:12px; color:var(--bbs-ink-muted); }
+.discussion-messages .user { margin-left:12%; background:var(--bbs-accent-soft); }
+.discussion-messages .user strong { color:var(--bbs-accent); }
+.discussion-messages .assistant { margin-right:12%; }
 .discussion-text { white-space:pre-wrap; overflow-wrap:anywhere; }
-.discussion-confirmation { padding:10px; border-left:2px solid var(--bbs-accent); background:var(--bbs-accent-soft); }
-.hint { color:var(--bbs-ink-muted); font-size:11px; }.warning { color:var(--bbs-danger); }
+.discussion-status { color:var(--bbs-accent); }
+.discussion-refine { margin-top:6px; padding-top:6px; border-top:1px solid var(--bbs-line); }
+.discussion-refine label { max-width:220px; }
+.discussion-confirmation { padding:10px 14px; border-left:2px solid var(--bbs-accent); border-radius:0 8px 8px 0; background:var(--bbs-accent-soft); }
+.hint { color:var(--bbs-ink-muted); font-size:12.5px; }
 :is(button,input,select,textarea,summary):focus-visible { outline:2px solid var(--bbs-accent); outline-offset:2px; }
+@media(max-width:480px) { .discussion-messages .user { margin-left:0; } .discussion-messages .assistant { margin-right:0; } .discussion-refine label { max-width:none; } }
 </style>

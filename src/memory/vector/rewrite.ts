@@ -23,7 +23,8 @@ import { renderHistoryNodes, selectHistoryNodesBefore } from '../inject';
 import { fmtItems, fmtNpcs, fmtPlans, fmtProtagonist, QUERY_REWRITE_SYSTEM, QUERY_REWRITE_TAIL } from '../prompts';
 import { memory } from '../store';
 import { cleanBody } from '../timeTag';
-import { fetchWithTimeoutRetry } from './embed';
+import { EmbedError, fetchWithTimeoutRetry, vectorFailure, vectorHttpFailure } from './embed';
+import { emptyReply, finishKind, truncatedReply } from '@/api/errors';
 
 /** rewrite 模型最多取几条 query(对齐 Horae) */
 const MAX_QUERIES = 5;
@@ -215,9 +216,9 @@ function sanitize(text: string, limit = MAX_QUERY_LEN): string {
  */
 export async function rewriteQuery(signal?: AbortSignal): Promise<RewriteResult> {
   const ep = resolveVectorModel('queryRewrite');
-  if (!ep.model) throw new Error('Query 重写模型未配置');
+  if (!ep.model) throw new EmbedError('向量记忆还没有填写 Query 重写模型，请到设置 → 向量记忆里补全。');
   const endpoint = chatCompletionsEndpoint(ep.url);
-  if (!endpoint) throw new Error('Query 重写地址未配置');
+  if (!endpoint) throw new EmbedError('向量记忆还没有填写 Query 重写地址（或 Embedding 地址），请到设置 → 向量记忆里补全。');
 
   const ctx = getContext();
   const chat = ctx?.chat ?? [];
@@ -244,16 +245,17 @@ export async function rewriteQuery(signal?: AbortSignal): Promise<RewriteResult>
     },
     { timeoutSec: ep.timeoutSec, retries: ep.retries, label: 'Query 重写', externalSignal: signal },
   );
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => '');
-    throw new Error(`Query 重写 API ${resp.status}: ${t.slice(0, 200)}`);
-  }
+  if (!resp.ok) throw await vectorHttpFailure('Query 重写', resp);
   const json = await resp.json();
   const content = json?.choices?.[0]?.message?.content;
   const raw = typeof content === 'string' ? content : '';
-  if (!raw.trim()) throw new Error('Query 重写返回空内容');
+  if (!raw.trim()) {
+    // 输出上限太小时,思考型模型常常整段都花在思考上,正文为空。
+    const meta = { finishReason: json?.choices?.[0]?.finish_reason, maxTokens: apiSettings.vector.queryRewriteMaxTokens };
+    throw vectorFailure('Query 重写', finishKind(meta.finishReason) === 'truncated' ? truncatedReply(meta, '') : emptyReply(meta));
+  }
 
   const parsed = parseResponse(raw);
-  if (!parsed.queries.length) throw new Error('Query 重写未解析出任何检索 query');
+  if (!parsed.queries.length) throw new EmbedError('Query 重写的回复里没有可用的检索语句（需要 Q: 开头的行），可以换个模型或检查提示词。');
   return parsed;
 }

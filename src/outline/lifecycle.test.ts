@@ -5,6 +5,7 @@ import type { OutlineContent, OutlineData, OutlineDraft } from './types';
 import * as host from '@/st/context';
 import * as api from '@/api/settings';
 import { requestCompletion } from '@/api/client';
+import { classifyHttpFailure, truncatedReply } from '@/api/errors';
 import { memory } from '@/memory/store';
 import { cleanBody, writeItemLogTag, writeVarLogTag } from '@/memory/timeTag';
 import { hydrateNotesSettings, notesSettings } from '@/notes/settings';
@@ -236,7 +237,7 @@ describe('大纲双向讨论与显式修订', () => {
     await clearOutlineDiscussion(discussionState.revision);
     wait.resolve(reply('过期草稿')); await task;
     expect(saved()).toEqual(before);
-    expect(outlineRun.status).toContain('旧生成结果未采用');
+    expect(outlineRun.status).toContain('这次生成的结果没有采用');
   });
   it('讨论历史仅携带完整问答对和正确角色，不把旧讨论升为系统指令', () => {
     const messages = Array.from({ length: 6 }, () => [
@@ -689,5 +690,48 @@ describe('真实 service：取消、迟到响应、错误边界与生命周期',
     expect(outlineState.revision).toBe(revision); pending.resolve(reply()); await pending.task;
     expect(ctx.saveMetadata).not.toHaveBeenCalled();
     bindOutlineLifecycle(); expect(ctx.eventSource.on).toHaveBeenCalledTimes(count * 2);
+  });
+});
+
+describe('截断与失败说明', () => {
+  it('复用札记 API 时被截断：说明去札记设置调大最大输出或减少阶段数，旧大纲不变', async () => {
+    await active(); const before = copy(saved());
+    completion.mockRejectedValueOnce(truncatedReply({ finishReason: 'length', maxTokens: 3000 }, reply().slice(0, 120)));
+    await generateOutline('重新生成', 2);
+    expect(outlineRun.error).toContain('回复被截断');
+    expect(outlineRun.error).toContain('札记 → 独立 API 设置（大纲目前复用札记的 API）');
+    expect(outlineRun.error).toContain('减少规划阶段数');
+    expect(outlineRun.error).toContain('现有大纲没有被替换');
+    expect(outlineRun.errorDetail).toContain('finish_reason=length');
+    expect(saved()).toEqual(before); expect(completion).toHaveBeenCalledTimes(1);
+  });
+  it('专用 API 模式指向规划 API 设置；拿不到结束原因时按半截 JSON 判断截断', async () => {
+    Object.assign(outlineSettings, { apiMode: 'independent' });
+    Object.assign(outlineSettings.channel, { url: 'https://outline.example.invalid/v1', model: 'outline-model' });
+    completion.mockResolvedValueOnce(reply().slice(0, 150));
+    await generateOutline('生成', 2);
+    expect(outlineRun.error).toContain('大纲回复不完整（JSON 写到一半就结束了）');
+    expect(outlineRun.error).toContain('计划 → 规划 API 设置');
+  });
+  it('大纲只接受完整单个 JSON：即使截断前 JSON 已闭合也按截断说明，不拼凑草稿', async () => {
+    completion.mockRejectedValueOnce(truncatedReply({ finishReason: 'length', maxTokens: 3000 }, reply('截断后仍完整') + '\n补充说明写到'));
+    await generateOutline('生成', 2);
+    expect(outlineRun.error).toContain('回复被截断'); expect(outlineState.draft).toBeNull();
+  });
+  it('讨论回复被截断时保存已写出的部分并标注；只有思考时报错不保存', async () => {
+    completion.mockRejectedValueOnce(truncatedReply({ finishReason: 'length', maxTokens: 3000 }, '可以先让角色迟疑，再'));
+    expect(await sendOutlineDiscussion('节奏怎么调？', 'none')).toBe(true);
+    expect(discussionState.messages.at(-1)?.content).toContain('可以先让角色迟疑，再');
+    expect(discussionState.messages.at(-1)?.content).toContain('被截断');
+    completion.mockRejectedValueOnce(truncatedReply({ finishReason: 'length', maxTokens: 3000 }, '<think>还在想'));
+    expect(await sendOutlineDiscussion('那冲突呢？', 'none')).toBe(false);
+    expect(discussionRun.error).toContain('思考阶段');
+    expect(discussionState.messages).toHaveLength(2);
+  });
+  it('讨论遇到分类后的 API 错误给出原因，不回显上游原文', async () => {
+    completion.mockRejectedValueOnce(classifyHttpFailure({ status: 429, body: '{"error":{"message":"PRIVATE rate limited"}}' }));
+    expect(await sendOutlineDiscussion('问题', 'none')).toBe(false);
+    expect(discussionRun.error).toContain('请求太频繁');
+    expect(discussionRun.error).not.toContain('PRIVATE');
   });
 });

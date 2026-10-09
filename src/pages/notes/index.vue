@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue';
+import { computed, nextTick, reactive, ref, watch } from 'vue';
 import Icon from '@/components/Icon.vue';
 import PageHeader from '@/components/PageHeader.vue';
 import { notesSettings, saveNotesSettings, settingsIssue } from '@/notes/settings';
@@ -15,6 +15,8 @@ import { getContext } from '@/st/context';
 
 const actionError = ref('');
 const notice = ref('');
+// 提示显示在触发它的那一块旁边：设置在页面底部、确认按钮在札记里，提示不该跑到看不见的顶部。
+const feedbackAt = ref('panel');
 const importResult = ref<number | null>(null);
 const pendingAction = ref(false);
 const startingRun = ref(false);
@@ -36,6 +38,11 @@ function chooseModel(event: Event) {
 }
 const apiDirty = ref(false);
 const apiOpen = ref(false);
+const apiPanel = ref<HTMLDetailsElement>();
+function openApi() {
+  apiOpen.value = true;
+  void nextTick(() => apiPanel.value?.scrollIntoView?.({ block: 'start', behavior: 'smooth' }));
+}
 const page = ref(1);
 const PAGE_SIZE = 5;
 const orderedRecords = computed(() => [...notesState.records].sort((a, b) => b.createdAt - a.createdAt));
@@ -76,9 +83,15 @@ const statusLabels: Record<NoteDecision['status'], string> = {
 const decisionActions = [
   { status: 'pending', label: '待兑现' },
   { status: 'in_progress', label: '进行中' },
-  { status: 'completed', label: '完成' },
-  { status: 'cancelled', label: '取消' },
+  { status: 'completed', label: '已完成' },
+  { status: 'cancelled', label: '已取消' },
 ] as const;
+const injecting = computed(() => notesSettings.enabled && notesSettings.injectConfirmed);
+const injectionNote = computed(() => !notesSettings.enabled
+  ? '双子札记没有启用，这些安排暂时不会交给正文模型。'
+  : !notesSettings.injectConfirmed
+    ? '「注入已确认安排」没有打开（在页面底部的「自动生成与注入」里），这些安排暂时只是记录。'
+    : '待兑现和进行中的安排会交给正文模型；标成已完成或已取消后就不再交。');
 
 function questionKey(noteId: string, questionId: string): string {
   return JSON.stringify([noteId, questionId]);
@@ -99,10 +112,16 @@ function decisionIsCurrent(decision: NoteDecision): boolean {
 }
 function formatDate(timestamp: number): string {
   const date = new Date(timestamp);
-  return Number.isNaN(date.getTime()) ? '时间未知' : date.toLocaleString('zh-CN', { hour12: false });
+  return Number.isNaN(date.getTime()) ? '时间未知'
+    : date.toLocaleString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
 }
 function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error || '操作失败，请重试。');
+  return error instanceof Error ? error.message : String(error || '操作没有完成，请重试。');
+}
+function report(where: string) {
+  feedbackAt.value = where;
+  actionError.value = '';
+  notice.value = '';
 }
 
 watch(pageCount, count => { page.value = Math.min(page.value, count); });
@@ -122,22 +141,22 @@ watch(visibleRecords, records => {
 }, { deep: true, immediate: true });
 
 function channelIssue(channel: typeof apiDraft): string {
-  if (!channel.url.trim() || !channel.model.trim()) return '尚未配置独立 API：请填写地址和模型并保存，不会跟随正文 API。';
+  if (!channel.url.trim() || !channel.model.trim()) return '札记要用单独的 API，还没填写地址和模型名。';
   try {
     const url = new URL(channel.url.trim());
-    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return 'API 地址须为不含账号、查询参数或片段的 HTTP / HTTPS 地址。';
-  } catch { return '请输入完整的 HTTP / HTTPS API 地址。'; }
-  if (!Number.isFinite(channel.temperature) || channel.temperature < 0 || channel.temperature > 2) return '温度须为 0–2 之间的数值。';
-  if (!Number.isSafeInteger(channel.maxTokens) || channel.maxTokens < 256 || channel.maxTokens > 16000) return '最大输出须为 256–16000 之间的整数。';
-  if (!Number.isSafeInteger(channel.timeoutSec) || channel.timeoutSec < 10 || channel.timeoutSec > 600) return '超时须为 10–600 之间的整数秒。';
+    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return 'API 地址要写完整的 http(s) 地址，不能带账号、? 参数或 #。';
+  } catch { return 'API 地址不是有效的网址，要以 http:// 或 https:// 开头。'; }
+  if (!Number.isFinite(channel.temperature) || channel.temperature < 0 || channel.temperature > 2) return '温度要在 0–2 之间。';
+  if (!Number.isSafeInteger(channel.maxTokens) || channel.maxTokens < 256 || channel.maxTokens > 65535) return '最大输出要是 256–65535 之间的整数。';
+  if (!Number.isSafeInteger(channel.timeoutSec) || channel.timeoutSec < 10 || channel.timeoutSec > 600) return '超时要是 10–600 之间的整数（秒）。';
   return '';
 }
 const configurationIssue = computed(() => channelIssue(notesSettings.channel));
 const canGenerate = computed(() => notesSettings.enabled && !configurationIssue.value && !locked.value);
+const prefsSummary = computed(() => `自动生成${notesSettings.autoGenerate ? '开' : '关'} · 注入${notesSettings.injectConfirmed ? '开' : '关'}`);
 
 function saveApi() {
-  actionError.value = '';
-  notice.value = '';
+  report('api');
   const issue = channelIssue(apiDraft);
   if (issue) { actionError.value = issue; return; }
   const previous = { ...notesSettings.channel };
@@ -147,22 +166,26 @@ function saveApi() {
     if (settingsIssue.value) throw new Error(settingsIssue.value);
     apiDirty.value = false;
     Object.assign(apiDraft, notesSettings.channel);
-    notice.value = '独立 API 设置已保存；未发送模型请求。';
+    notice.value = '札记 API 已保存。';
   } catch (error) {
     Object.assign(notesSettings.channel, previous);
     actionError.value = errorText(error);
   }
 }
+const flagNotices = {
+  enabled: ['双子札记已启用。', '双子札记已关闭。'],
+  autoGenerate: ['已打开自动生成。', '已关闭自动生成。'],
+  injectConfirmed: ['已确认的安排会交给正文模型。', '已确认的安排不再交给正文模型。'],
+} as const;
 function changeFlag(key: 'enabled' | 'autoGenerate' | 'injectConfirmed', event: Event) {
   const input = event.target as HTMLInputElement;
   const previous = notesSettings[key];
-  actionError.value = '';
-  notice.value = '';
+  report(key === 'enabled' ? 'panel' : 'prefs');
   try {
     notesSettings[key] = input.checked;
     saveNotesSettings();
     if (settingsIssue.value) throw new Error(settingsIssue.value);
-    notice.value = '札记偏好已保存。';
+    notice.value = flagNotices[key][input.checked ? 0 : 1];
   } catch (error) {
     notesSettings[key] = previous;
     input.checked = previous;
@@ -173,11 +196,10 @@ function changeLimit(key: 'recentFloors' | 'memoryChars', event: Event) {
   const input = event.target as HTMLInputElement;
   const value = Number(input.value);
   const previous = notesSettings[key];
-  actionError.value = '';
-  notice.value = '';
+  report('prefs');
   const [min, max] = key === 'recentFloors' ? [1, 40] : [1000, 40000];
   if (!input.value.trim() || !Number.isSafeInteger(value) || value < min || value > max) {
-    actionError.value = key === 'recentFloors' ? '最近楼层数须为 1–40 之间的整数。' : '记忆字数须为 1000–40000 之间的整数。';
+    actionError.value = key === 'recentFloors' ? '参考楼层数要是 1–40 之间的整数。' : '字数上限要是 1000–40000 之间的整数。';
     input.value = String(previous);
     return;
   }
@@ -185,7 +207,7 @@ function changeLimit(key: 'recentFloors' | 'memoryChars', event: Event) {
     notesSettings[key] = value;
     saveNotesSettings();
     if (settingsIssue.value) throw new Error(settingsIssue.value);
-    notice.value = '札记偏好已保存。';
+    notice.value = '已保存。';
   } catch (error) {
     notesSettings[key] = previous;
     input.value = String(previous);
@@ -195,53 +217,52 @@ function changeLimit(key: 'recentFloors' | 'memoryChars', event: Event) {
 async function startGeneration(force = false) {
   if (!canGenerate.value) return;
   startingRun.value = true;
-  actionError.value = '';
-  notice.value = '';
+  report('panel');
   try { await generateNotes(force); page.value = 1; }
   catch (error) { actionError.value = errorText(error); }
   finally { startingRun.value = false; }
 }
 function stopGeneration() {
-  try { cancelNotes(); notice.value = '已请求取消，正在等待生成停止。'; }
+  report('panel');
+  try { cancelNotes(); }
   catch (error) { actionError.value = errorText(error); }
 }
-async function runAction(action: () => Promise<void>) {
+async function runAction(where: string, action: () => Promise<void>) {
   if (locked.value) return;
   pendingAction.value = true;
-  actionError.value = '';
-  notice.value = '';
+  report(where);
   try { await action(); }
   catch (error) { actionError.value = errorText(error); }
   finally { pendingAction.value = false; }
 }
 function confirm(record: NoteRecord, questionId: string) {
-  return runAction(async () => {
+  return runAction('q:' + questionKey(record.id, questionId), async () => {
     const current = notesState.records.find(item => item.id === record.id);
-    if (!current || !isCurrent(current)) throw new Error('这份札记关联的正文已失效，请根据当前正文重新生成后确认。');
-    if (!current.questions.some(question => question.id === questionId)) throw new Error('问题已变化，请重新打开这份札记。');
+    if (!current || !isCurrent(current)) throw new Error('这份札记对应的正文已经变了，不能再确认。请为当前正文重新生成札记。');
+    if (!current.questions.some(question => question.id === questionId)) throw new Error('这个问题已经不在了，请重新打开这份札记。');
     const text = edits[questionKey(record.id, questionId)]?.trim();
-    if (!text || text.length > 4000) throw new Error('请填写 1–4000 字的采用方案。');
+    if (!text || text.length > 4000) throw new Error('采用方案要写 1–4000 字。');
     await confirmQuestion(record.id, questionId, text);
-    notice.value = '安排已确认，可在下方已确认清单中跟进。';
+    notice.value = '已确认，加进了下面的「已确认的安排」。';
   });
 }
 function reject(noteId: string, questionId: string) {
-  return runAction(async () => {
+  return runAction('q:' + questionKey(noteId, questionId), async () => {
     await rejectQuestion(noteId, questionId);
-    notice.value = '这个问题已搁置，不会作为已确认安排注入。';
+    notice.value = '已搁置，不会交给正文模型。';
   });
 }
 function updateDecision(decision: NoteDecision, status: typeof decisionActions[number]['status']) {
-  return runAction(async () => {
+  return runAction('d:' + decision.id, async () => {
     if ((status === 'pending' || status === 'in_progress') && !decisionIsCurrent(decision)) {
-      throw new Error('正文关联已失效，不能重新激活这条安排；仍可完成或取消。');
+      throw new Error('这条安排对应的正文已经变了，不能再设为待兑现或进行中；可以标成已完成或已取消。');
     }
     await setDecisionStatus(decision.id, status);
-    notice.value = `安排已更新为「${statusLabels[status]}」。`;
+    notice.value = `已标成「${statusLabels[status]}」。`;
   });
 }
 function importNotes() {
-  return runAction(async () => {
+  return runAction('import', async () => {
     importResult.value = null;
     importResult.value = await importLegacyNotes();
     page.value = 1;
@@ -251,121 +272,90 @@ function importNotes() {
 
 <template>
   <div class="notes-page">
-    <PageHeader title="双子札记" description="戏外商量，故事里慢慢兑现。" icon="notes" eyebrow="PRISM / NOTES" />
+    <PageHeader title="双子札记" icon="notes" description="模型读完最近的剧情，在故事外提几个问题跟你商量。你确认过的方案才算「安排」，可以交给正文模型慢慢写进故事。" />
 
-    <section class="notes-card notes-controls" aria-label="札记生成">
+    <section class="notes-panel" aria-label="札记生成">
       <div class="notes-toolbar">
-        <label class="notes-toggle">
-          <input type="checkbox" :checked="notesSettings.enabled" :disabled="locked" aria-label="启用双子札记" @change="changeFlag('enabled', $event)" />
+        <label class="notes-switch">
+          <input type="checkbox" class="bbs-switch" :checked="notesSettings.enabled" :disabled="locked" aria-label="启用双子札记" @change="changeFlag('enabled', $event)" />
           <span>启用双子札记</span>
         </label>
         <div class="notes-actions">
-          <button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canGenerate" @click="startGeneration()"><Icon name="edit" />生成札记</button>
-          <button v-if="orderedRecords.length" type="button" class="bbs-btn" :disabled="!canGenerate" @click="startGeneration(true)"><Icon name="refresh" />重新生成</button>
           <button v-if="notesRun.busy || startingRun" type="button" class="bbs-btn" @click="stopGeneration">取消生成</button>
+          <button v-if="orderedRecords.length" type="button" class="bbs-btn" :disabled="!canGenerate" @click="startGeneration(true)"><Icon name="refresh" />重新生成</button>
+          <button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canGenerate" @click="startGeneration()"><Icon name="edit" />生成札记</button>
         </div>
       </div>
-      <p class="notes-hint">独立 API，戏外讨论。使用前请关闭原札记触发，避免重复生成；具体说明见下方设置。</p>
-      <p v-if="!notesSettings.enabled" class="notes-hint">当前未启用；仍可查看历史、整理安排和导入已有札记。</p>
-      <p v-if="configurationIssue" class="notes-warning">{{ configurationIssue }} <button type="button" class="notes-link" @click="apiOpen = true">配置独立 API</button></p>
-      <p v-if="apiDirty" class="notes-hint">API 表单有未保存修改；生成仅使用已保存配置。</p>
+      <p v-if="!notesSettings.enabled" class="bbs-field-hint">没有启用：不会生成新札记，已有的札记和安排照样可以查看、整理。</p>
+      <div v-if="configurationIssue" class="bbs-callout is-warning notes-setup">
+        <span>{{ configurationIssue }}</span>
+        <button type="button" class="bbs-btn" @click="openApi">去填写</button>
+      </div>
+      <p v-if="apiDirty" class="bbs-field-hint">API 设置还没保存，生成会用上次保存的设置。</p>
+      <p v-if="notesSettings.enabled && !orderedRecords.length" class="bbs-field-hint">预设或悬浮球里如果也在生成札记（aftertalk），先关掉那边，免得一轮出两份。</p>
     </section>
 
     <div class="notes-feedback" aria-live="polite" aria-atomic="true">
-      <p v-if="notesRun.status" class="notes-status" role="status">{{ notesRun.status }}</p>
-      <p v-else-if="notesRun.busy || startingRun" class="notes-status" role="status">正在生成札记…</p>
-      <p v-if="notice" class="notes-status" role="status">{{ notice }}</p>
-      <p v-if="importResult !== null" class="notes-status" role="status">本次已导入 {{ importResult }} 份已有 aftertalk 札记，未修改正文。</p>
-    </div>
-    <div v-if="actionError || notesRun.error || settingsIssue || notesState.issue" class="notes-error" role="alert">
-      <p v-if="actionError">{{ actionError }}</p>
-      <p v-if="notesRun.error">生成：{{ notesRun.error }}</p>
-      <p v-if="settingsIssue">设置：{{ settingsIssue }}</p>
-      <p v-if="notesState.issue">札记存储：{{ notesState.issue }}</p>
-    </div>
-
-    <details class="notes-card" :open="apiOpen" @toggle="apiOpen = ($event.target as HTMLDetailsElement).open">
-      <summary>独立 API 设置 <span class="notes-summary-hint">{{ configurationIssue ? '未就绪' : '已配置' }}</span></summary>
-      <p class="notes-hint">独立 API 支持 OpenAI 兼容接口，仅用于双子札记，不跟随正文或摘要 API，也不修改正文渠道。请填写完整基础地址及模型；是否需要密钥以服务商要求为准。</p>
-      <p class="notes-warning">API key 保存在酒馆扩展设置中，请勿分享带有 key 的设置备份。</p>
-      <form class="notes-form" @submit.prevent="saveApi" @input="apiDirty = true">
-        <fieldset :disabled="locked">
-          <div class="notes-grid">
-            <label class="notes-field notes-full">API 地址<input v-model="apiDraft.url" class="bbs-input" type="url" required autocomplete="off" spellcheck="false" aria-label="札记独立 API 地址" placeholder="https://your-api.example/v1" /></label>
-            <label class="notes-field notes-full">API 密钥<input v-model="apiDraft.key" class="bbs-input" type="password" autocomplete="new-password" spellcheck="false" aria-label="札记独立 API 密钥" placeholder="按服务商要求填写" /></label>
-            <div class="notes-field notes-full notes-model-picker">
-              <div class="notes-model-heading">
-                <span>模型</span>
-                <div class="notes-actions">
-                  <button type="button" class="bbs-btn" :disabled="modelsLoading || !apiDraft.url.trim()" @click="pullModels"><Icon name="refresh" />{{ modelsLoading ? '拉取中…' : '拉取模型列表' }}</button>
-                  <button v-if="modelsLoading" type="button" class="bbs-btn" @click="cancelModels">取消拉取</button>
-                </div>
-              </div>
-              <label v-if="models.length" class="notes-field">搜索列表<input v-model="modelSearch" class="bbs-input" type="search" autocomplete="off" aria-label="搜索札记模型" placeholder="输入关键词筛选模型" @input.stop /></label>
-              <label class="notes-field">下拉选择
-                <select class="bbs-input" :value="visibleModels.includes(apiDraft.model) ? apiDraft.model : ''" :disabled="!visibleModels.length || modelsLoading" aria-label="札记模型下拉选择" @change="chooseModel">
-                  <option value="" disabled>{{ models.length ? (matchingModels.length ? '请选择模型' : '没有匹配模型，可手动填写') : '先填写地址并拉取模型列表' }}</option>
-                  <option v-for="model in visibleModels" :key="model" :value="model">{{ model }}</option>
-                </select>
-              </label>
-              <p v-if="matchingModels.length > 200" class="notes-hint">匹配 {{ matchingModels.length }} 个模型，仅显示前 200 个；请搜索缩小范围。</p>
-              <label class="notes-field">当前模型 / 手动输入<input v-model="apiDraft.model" class="bbs-input" type="text" required autocomplete="off" spellcheck="false" aria-label="札记独立 API 模型" placeholder="也可填写服务商提供的模型 ID" /></label>
-              <p class="notes-hint">使用上方尚未保存的地址和密钥拉取，不需要先填模型；不会调用生成接口，也不会自动保存或替换当前模型。</p>
-              <p v-if="modelsMessage" class="notes-hint" role="status">{{ modelsMessage }}</p>
-              <p v-if="modelsError" class="notes-warning" role="alert">{{ modelsError }}</p>
-            </div>
-            <label class="notes-field">温度<input v-model.number="apiDraft.temperature" class="bbs-input" type="number" required min="0" max="2" step="0.1" inputmode="decimal" aria-label="札记独立 API 温度" /></label>
-            <label class="notes-field">最大输出 tokens<input v-model.number="apiDraft.maxTokens" class="bbs-input" type="number" required min="256" max="16000" step="1" inputmode="numeric" aria-label="札记独立 API 最大输出 tokens" /></label>
-            <label class="notes-field">超时（秒）<input v-model.number="apiDraft.timeoutSec" class="bbs-input" type="number" required min="10" max="600" step="1" inputmode="numeric" aria-label="札记独立 API 超时秒数" /></label>
-            <label class="notes-toggle"><input v-model="apiDraft.stream" type="checkbox" aria-label="札记独立 API 流式输出" />流式输出</label>
-          </div>
-          <button type="submit" class="bbs-btn bbs-btn-primary"><Icon name="check" />保存独立 API</button>
-        </fieldset>
-      </form>
-    </details>
-
-    <details class="notes-card">
-      <summary>自动生成与安排注入 <span class="notes-summary-hint">{{ notesSettings.autoGenerate || notesSettings.injectConfirmed ? '已自定义' : '默认关闭' }}</span></summary>
-      <p class="notes-hint">开启自动生成前，请关闭原悬浮球的札记自动生成；若预设还要求正文输出 aftertalk，请同时关闭那条正文触发，完整规则仍保留在本页。仅已确认且处于「待兑现 / 进行中」的有效安排可参与注入，完成、取消或搁置后不再注入。</p>
-      <div class="notes-preferences">
-        <label class="notes-toggle"><input type="checkbox" :checked="notesSettings.autoGenerate" :disabled="locked || (!notesSettings.autoGenerate && (!notesSettings.enabled || !!configurationIssue))" aria-label="自动生成札记" @change="changeFlag('autoGenerate', $event)" />自动生成札记</label>
-        <label class="notes-toggle"><input type="checkbox" :checked="notesSettings.injectConfirmed" :disabled="locked || (!notesSettings.injectConfirmed && !notesSettings.enabled)" aria-label="注入已确认的有效安排" @change="changeFlag('injectConfirmed', $event)" />注入已确认安排</label>
-        <div class="notes-grid">
-          <label class="notes-field">最近正文楼层数<input :value="notesSettings.recentFloors" class="bbs-input" type="number" min="1" max="40" step="1" inputmode="numeric" :disabled="locked" aria-label="札记参考最近正文楼层数" @change="changeLimit('recentFloors', $event)" /></label>
-          <label class="notes-field">记忆字数上限<input :value="notesSettings.memoryChars" class="bbs-input" type="number" min="1000" max="40000" step="1" inputmode="numeric" :disabled="locked" aria-label="札记参考记忆字数上限" @change="changeLimit('memoryChars', $event)" /></label>
-        </div>
+      <div v-if="notesRun.status && notesRun.errorDetail && !notesRun.error" class="bbs-callout is-warning" role="status">
+        <p>{{ notesRun.status }}</p>
+        <details><summary>技术细节</summary><p>{{ notesRun.errorDetail }}</p></details>
       </div>
-    </details>
+      <p v-else-if="notesRun.status" class="notes-status" role="status">{{ notesRun.status }}</p>
+      <p v-else-if="notesRun.busy || startingRun" class="notes-status" role="status">正在生成札记…</p>
+      <p v-if="feedbackAt === 'panel' && notice" class="notes-status" role="status">{{ notice }}</p>
+    </div>
+    <div v-if="(feedbackAt === 'panel' && actionError) || notesRun.error || settingsIssue || notesState.issue" class="bbs-callout is-danger notes-error" role="alert">
+      <p v-if="feedbackAt === 'panel' && actionError">{{ actionError }}</p>
+      <template v-if="notesRun.error">
+        <p>{{ notesRun.error }}</p>
+        <details v-if="notesRun.errorDetail"><summary>技术细节</summary><p>{{ notesRun.errorDetail }}</p></details>
+      </template>
+      <p v-if="settingsIssue">{{ settingsIssue }}</p>
+      <p v-if="notesState.issue">{{ notesState.issue }}</p>
+    </div>
 
-    <section v-if="notesRun.draft" class="notes-card" aria-label="生成中的札记草稿" :aria-busy="notesRun.busy">
-      <h2>札记草稿 <span class="notes-summary-hint">尚未作为安排确认</span></h2>
+    <section v-if="notesRun.draft" class="notes-draft" aria-label="生成中的札记草稿" :aria-busy="notesRun.busy">
+      <div class="notes-section-head"><h2 class="notes-heading">正在写</h2><span class="notes-count">写完才会保存</span></div>
       <pre class="notes-text">{{ notesRun.draft }}</pre>
     </section>
 
     <section class="notes-section" aria-label="最近札记与历史">
-      <div class="notes-section-heading"><h2>最近札记</h2><span class="notes-hint">共 {{ orderedRecords.length }} 份 · 每页最多 5 份</span></div>
-      <div v-if="!orderedRecords.length" class="notes-empty"><Icon name="notes" :size="28" /><p>先在戏外聊聊下一步。</p><p class="notes-hint">启用并配置独立 API 后生成，或在下方导入已有 aftertalk。</p></div>
-      <details v-for="(record, index) in visibleRecords" :key="JSON.stringify([recordExpansionScope, record.id])" class="notes-card notes-record" :data-expansion-scope="recordExpansionScope" :open="expandedRecords.has(record.id)" @toggle="toggleRecord(record.id, $event)">
+      <div class="notes-section-head">
+        <h2 class="notes-heading">札记</h2>
+        <span v-if="orderedRecords.length" class="notes-count">共 {{ orderedRecords.length }} 份</span>
+      </div>
+      <div v-if="!orderedRecords.length" class="notes-empty">
+        <p>还没有札记。</p>
+        <p class="bbs-field-hint">启用并填好 API 后点「生成札记」。正文里以前写过的 aftertalk，可以在页面底部导入。</p>
+      </div>
+      <details v-for="(record, index) in visibleRecords" :key="JSON.stringify([recordExpansionScope, record.id])" class="bbs-disclosure is-card notes-record" :class="{ 'is-stale': !isCurrent(record) }" :data-expansion-scope="recordExpansionScope" :open="expandedRecords.has(record.id)" @toggle="toggleRecord(record.id, $event)">
         <summary>
-          <span>{{ page === 1 && index === 0 ? '最新札记' : '历史札记' }} · 第 {{ record.floor }} 楼</span>
-          <span v-if="!isCurrent(record)" class="notes-invalid">已失效</span>
-          <span class="notes-record-date">{{ formatDate(record.createdAt) }} · 分支 {{ record.swipe }}</span>
+          <span class="notes-record-head">
+            <span class="notes-record-title">第 {{ record.floor }} 楼<span v-if="page === 1 && index === 0 && isCurrent(record)" class="notes-tag is-new">最新</span><span v-if="!isCurrent(record)" class="notes-tag is-stale">已失效</span></span>
+            <span class="notes-record-meta">{{ formatDate(record.createdAt) }}<template v-if="record.swipe"> · 分支 {{ record.swipe }}</template><template v-if="record.questions.length"> · {{ record.questions.length }} 个问题</template></span>
+          </span>
         </summary>
-        <p v-if="!isCurrent(record)" class="notes-warning">这份札记已失效（正文变化或已有更新版本）：仅保留查阅，不可确认安排，请使用当前正文的最新札记。</p>
+        <p v-if="!isCurrent(record)" class="bbs-callout is-warning notes-stale-note">这份札记已失效：对应的正文改过了，或者后来又生成了新的一份。只能查看，里面的方案不能再确认。</p>
         <pre class="notes-text">{{ record.text }}</pre>
         <div v-for="question in record.questions" :key="questionKey(record.id, question.id)" class="notes-question">
-          <h3>{{ question.label }}</h3>
-          <p class="notes-question-prompt">{{ question.prompt }}</p>
+          <div class="notes-question-head">
+            <span class="notes-question-id">{{ question.label }}</span>
+            <p class="notes-question-prompt">{{ question.prompt }}</p>
+          </div>
           <label class="notes-field">采用方案
-            <textarea v-model="edits[questionKey(record.id, question.id)]" class="bbs-input" rows="3" maxlength="4000" :disabled="locked || !isCurrent(record)" :aria-label="`第 ${record.floor} 楼 ${question.label} 采用方案`" placeholder="编辑你希望在故事里逐步兑现的安排" />
+            <textarea v-model="edits[questionKey(record.id, question.id)]" class="bbs-input" rows="3" maxlength="4000" :disabled="locked || !isCurrent(record)" :aria-label="`第 ${record.floor} 楼 ${question.label} 采用方案`" placeholder="想让故事怎么兑现这一条，写在这里；可以直接改模型给的暂定写法。" />
           </label>
-          <p v-if="questionDecision(record.id, question.id)" class="notes-hint">当前：{{ statusLabels[questionDecision(record.id, question.id)!.status] }}。编辑后需再次确认才会更新安排。</p>
+          <p v-if="questionDecision(record.id, question.id)" class="bbs-field-hint">现在是「{{ statusLabels[questionDecision(record.id, question.id)!.status] }}」。改了方案要再点「确认安排」才会更新。</p>
           <div class="notes-actions">
             <button type="button" class="bbs-btn bbs-btn-primary" :disabled="locked || !isCurrent(record) || !edits[questionKey(record.id, question.id)]?.trim()" @click="confirm(record, question.id)">确认安排</button>
             <button type="button" class="bbs-btn" :disabled="locked || !isCurrent(record) || questionDecision(record.id, question.id)?.status === 'rejected'" @click="reject(record.id, question.id)">搁置</button>
           </div>
+          <div v-if="feedbackAt === 'q:' + questionKey(record.id, question.id) && (notice || actionError)" class="notes-inline">
+            <p v-if="notice" class="notes-status" role="status">{{ notice }}</p>
+            <p v-if="actionError" class="bbs-callout is-danger" role="alert">{{ actionError }}</p>
+          </div>
         </div>
-        <p v-if="!record.questions.length" class="notes-hint">这份札记未提取到可确认的 Q 问题，原文已完整保留。</p>
+        <p v-if="!record.questions.length" class="bbs-field-hint">这份札记里没有 Q1–Q4 这样的编号问题，所以没有可以确认的方案；原文都在上面。</p>
       </details>
       <nav v-if="pageCount > 1" class="notes-pagination" aria-label="札记历史分页">
         <button type="button" class="bbs-btn" :disabled="page <= 1" aria-label="上一页札记" @click="page--">上一页</button>
@@ -375,96 +365,218 @@ function importNotes() {
     </section>
 
     <section class="notes-section" aria-label="已确认安排清单">
-      <div class="notes-section-heading"><h2>已确认清单</h2><span class="notes-hint">{{ decisions.length }} 项</span></div>
-      <p class="notes-hint">只有点击「确认安排」才会将方案加入清单。聊天中带 Q 编号的用户原话会提供给札记阅读，但不会自动确认方案或修改安排状态；请在本页手动确认和更新。</p>
-      <p class="notes-hint">{{ notesSettings.enabled && notesSettings.injectConfirmed ? '安排注入已开启。' : '安排注入未启用。' }}完成、取消的安排仅留档，不再注入。</p>
-      <p v-if="!decisions.length" class="notes-empty">还没有已确认的安排。上面的讨论不会自动变成故事指令。</p>
-      <article v-for="decision in visibleDecisions" :key="decision.id" class="notes-card notes-decision">
-        <div class="notes-section-heading"><h3>{{ statusLabels[decision.status] }}</h3><span v-if="!decisionIsCurrent(decision)" class="notes-invalid">正文关联已失效</span></div>
-        <p class="notes-hint">{{ formatDate(decision.createdAt) }}</p>
+      <div class="notes-section-head">
+        <h2 class="notes-heading">已确认的安排</h2>
+        <span class="notes-inject" :class="{ 'is-on': injecting }">{{ injecting ? '注入中' : '未注入' }}</span>
+      </div>
+      <p class="bbs-field-hint">{{ injectionNote }}在聊天里回复「Q1：……」只会让下一份札记读到，确认还是要在这里点。</p>
+      <p v-if="!decisions.length" class="notes-empty">还没有确认过安排。札记里的方案不会自动变成剧情。</p>
+      <article v-for="decision in visibleDecisions" :key="decision.id" class="notes-decision" :class="`is-${decision.status}`">
+        <header class="notes-decision-head">
+          <span class="notes-chip">{{ statusLabels[decision.status] }}</span>
+          <span v-if="!decisionIsCurrent(decision)" class="notes-tag is-stale">对应正文已变</span>
+          <span class="notes-decision-date">{{ formatDate(decision.createdAt) }}</span>
+        </header>
         <p class="notes-decision-text">{{ decision.text }}</p>
-        <div class="notes-actions" role="group" aria-label="安排状态">
+        <div class="notes-segment" role="group" aria-label="安排状态">
           <button v-for="action in decisionActions" :key="action.status" type="button" class="bbs-btn" :class="{ 'is-selected': decision.status === action.status }" :aria-pressed="decision.status === action.status" :disabled="locked || decision.status === action.status || ((!decisionIsCurrent(decision)) && (action.status === 'pending' || action.status === 'in_progress'))" @click="updateDecision(decision, action.status)">{{ action.label }}</button>
+        </div>
+        <div v-if="feedbackAt === 'd:' + decision.id && (notice || actionError)" class="notes-inline">
+          <p v-if="notice" class="notes-status" role="status">{{ notice }}</p>
+          <p v-if="actionError" class="bbs-callout is-danger" role="alert">{{ actionError }}</p>
         </div>
       </article>
       <nav v-if="decisionPageCount > 1" class="notes-pagination" aria-label="安排分页">
         <button type="button" class="bbs-btn" :disabled="decisionPage <= 1" aria-label="上一页安排" @click="decisionPage--">上一页</button>
-        <span>{{ decisionPage }} / {{ decisionPageCount }} · 每页 10 项</span>
+        <span>{{ decisionPage }} / {{ decisionPageCount }}</span>
         <button type="button" class="bbs-btn" :disabled="decisionPage >= decisionPageCount" aria-label="下一页安排" @click="decisionPage++">下一页</button>
       </nav>
     </section>
 
-    <details class="notes-card">
-      <summary>原始完整提示词 <span class="notes-summary-hint">只读</span></summary>
-      <pre class="notes-text" aria-label="原始完整札记提示词，只读">{{ ORIGINAL_NOTES_PROMPT }}</pre>
-    </details>
-    <details class="notes-card">
-      <summary>导入已有札记</summary>
-      <p class="notes-hint">显式读取已有 aftertalk 为独立札记，不改写或删除聊天正文，不会自动确认其中的安排。</p>
-      <button type="button" class="bbs-btn" :disabled="locked" @click="importNotes"><Icon name="download" />导入已有 aftertalk</button>
-      <p v-if="importResult !== null" class="notes-hint">本次导入 {{ importResult }} 份。</p>
-    </details>
+    <footer class="notes-footer" aria-label="札记设置">
+      <details ref="apiPanel" class="bbs-disclosure" :open="apiOpen" @toggle="apiOpen = ($event.target as HTMLDetailsElement).open">
+        <summary>独立 API 设置 <span class="bbs-disclosure-meta">{{ configurationIssue ? '还没填好' : notesSettings.channel.model }}</span></summary>
+        <p class="bbs-field-hint">札记只用这里填的 API（OpenAI 兼容接口），不会借用正文或摘要的；创作规划默认也用它。密钥存在酒馆的扩展设置里，分享设置备份前记得删掉。</p>
+        <form class="notes-form" @submit.prevent="saveApi" @input="apiDirty = true">
+          <fieldset :disabled="locked">
+            <label class="notes-field">API 地址<input v-model="apiDraft.url" class="bbs-input" type="url" required autocomplete="off" spellcheck="false" aria-label="札记独立 API 地址" placeholder="https://your-api.example/v1" /></label>
+            <label class="notes-field">API 密钥<input v-model="apiDraft.key" class="bbs-input" type="password" autocomplete="new-password" spellcheck="false" aria-label="札记独立 API 密钥" placeholder="不需要密钥的服务可以留空" /></label>
+            <div class="notes-model">
+              <div class="notes-model-head">
+                <span class="notes-model-label">模型</span>
+                <div class="notes-actions">
+                  <button type="button" class="bbs-btn" :disabled="modelsLoading || !apiDraft.url.trim()" @click="pullModels"><Icon name="refresh" />{{ modelsLoading ? '拉取中…' : '拉取模型列表' }}</button>
+                  <button v-if="modelsLoading" type="button" class="bbs-btn" @click="cancelModels">取消</button>
+                </div>
+              </div>
+              <label v-if="models.length" class="notes-field">搜索<input v-model="modelSearch" class="bbs-input" type="search" autocomplete="off" aria-label="搜索札记模型" placeholder="输入关键词筛选" @input.stop /></label>
+              <label class="notes-field">从列表选择
+                <select class="bbs-input" :value="visibleModels.includes(apiDraft.model) ? apiDraft.model : ''" :disabled="!visibleModels.length || modelsLoading" aria-label="札记模型下拉选择" @change="chooseModel">
+                  <option value="" disabled>{{ models.length ? (matchingModels.length ? '选择一个模型' : '没有匹配的模型，可以在下面手动填写') : '先填地址，再拉取模型列表' }}</option>
+                  <option v-for="model in visibleModels" :key="model" :value="model">{{ model }}</option>
+                </select>
+              </label>
+              <p v-if="matchingModels.length > 200" class="bbs-field-hint">匹配到 {{ matchingModels.length }} 个，只显示前 200 个，可以搜索缩小范围。</p>
+              <label class="notes-field">模型名<input v-model="apiDraft.model" class="bbs-input" type="text" required autocomplete="off" spellcheck="false" aria-label="札记独立 API 模型" placeholder="也可以直接填写服务商给的模型名" /></label>
+              <p v-if="modelsMessage" class="bbs-field-hint" role="status">{{ modelsMessage }}</p>
+              <p v-else-if="!modelsError" class="bbs-field-hint">拉取用的是上面填的地址和密钥，不用先保存。</p>
+              <p v-if="modelsError" class="bbs-callout is-warning" role="alert">{{ modelsError }}</p>
+            </div>
+            <div class="notes-grid">
+              <label class="notes-field">温度<input v-model.number="apiDraft.temperature" class="bbs-input" type="number" required min="0" max="2" step="0.1" inputmode="decimal" aria-label="札记独立 API 温度" /></label>
+              <label class="notes-field">最大输出（tokens）<input v-model.number="apiDraft.maxTokens" class="bbs-input" type="number" required min="256" max="65535" step="1" inputmode="numeric" aria-label="札记独立 API 最大输出 tokens" /></label>
+              <label class="notes-field">超时（秒）<input v-model.number="apiDraft.timeoutSec" class="bbs-input" type="number" required min="10" max="600" step="1" inputmode="numeric" aria-label="札记独立 API 超时秒数" /></label>
+            </div>
+            <p class="bbs-field-hint">最大输出是模型一次最多写多少，默认 8000，思考型模型的思考过程也算在里面。札记总被截断就调大；超过模型自己的上限时服务商会报错，按提示调小就行。</p>
+            <label class="notes-switch-row"><span><strong>流式输出</strong><small>边写边显示；接口不支持时关掉。</small></span><input v-model="apiDraft.stream" type="checkbox" class="bbs-switch" aria-label="札记独立 API 流式输出" /></label>
+            <button type="submit" class="bbs-btn bbs-btn-primary notes-save"><Icon name="check" />保存</button>
+          </fieldset>
+        </form>
+        <div v-if="feedbackAt === 'api' && (notice || actionError)" class="notes-inline">
+          <p v-if="notice" class="notes-status" role="status">{{ notice }}</p>
+          <p v-if="actionError" class="bbs-callout is-danger" role="alert">{{ actionError }}</p>
+        </div>
+      </details>
+
+      <details class="bbs-disclosure">
+        <summary>自动生成与注入 <span class="bbs-disclosure-meta">{{ prefsSummary }}</span></summary>
+        <label class="notes-switch-row">
+          <span><strong>自动生成札记</strong><small>{{ !notesSettings.autoGenerate && (!notesSettings.enabled || configurationIssue) ? '要先启用双子札记并填好 API。' : '每次正文写完后自动写一份。' }}</small></span>
+          <input type="checkbox" class="bbs-switch" :checked="notesSettings.autoGenerate" :disabled="locked || (!notesSettings.autoGenerate && (!notesSettings.enabled || !!configurationIssue))" aria-label="自动生成札记" @change="changeFlag('autoGenerate', $event)" />
+        </label>
+        <label class="notes-switch-row">
+          <span><strong>注入已确认安排</strong><small>{{ !notesSettings.injectConfirmed && !notesSettings.enabled ? '要先启用双子札记。' : '把待兑现、进行中的安排交给正文模型。' }}</small></span>
+          <input type="checkbox" class="bbs-switch" :checked="notesSettings.injectConfirmed" :disabled="locked || (!notesSettings.injectConfirmed && !notesSettings.enabled)" aria-label="注入已确认的有效安排" @change="changeFlag('injectConfirmed', $event)" />
+        </label>
+        <p class="bbs-field-hint">以前用过原版札记的话，先关掉悬浮球里的札记自动生成，以及预设里让正文输出 aftertalk 的那一条，免得重复。</p>
+        <div class="notes-grid">
+          <label class="notes-field">参考最近几层（1–40）<input :value="notesSettings.recentFloors" class="bbs-input" type="number" min="1" max="40" step="1" inputmode="numeric" :disabled="locked" aria-label="札记参考最近正文楼层数" @change="changeLimit('recentFloors', $event)" /></label>
+          <label class="notes-field">摘要和状态最多读多少字（1000–40000）<input :value="notesSettings.memoryChars" class="bbs-input" type="number" min="1000" max="40000" step="1" inputmode="numeric" :disabled="locked" aria-label="札记参考记忆字数上限" @change="changeLimit('memoryChars', $event)" /></label>
+        </div>
+        <div v-if="feedbackAt === 'prefs' && (notice || actionError)" class="notes-inline">
+          <p v-if="notice" class="notes-status" role="status">{{ notice }}</p>
+          <p v-if="actionError" class="bbs-callout is-danger" role="alert">{{ actionError }}</p>
+        </div>
+      </details>
+
+      <details class="bbs-disclosure">
+        <summary>原版提示词 <span class="bbs-disclosure-meta">只读</span></summary>
+        <pre class="notes-prompt" aria-label="原始完整札记提示词，只读">{{ ORIGINAL_NOTES_PROMPT }}</pre>
+      </details>
+
+      <details class="bbs-disclosure">
+        <summary>导入正文里的札记</summary>
+        <p class="bbs-field-hint">把聊天正文里已有的 aftertalk 读成札记，方便在这里确认。正文不会被修改或删除，里面说过的安排也不会自动确认。</p>
+        <button type="button" class="bbs-btn" :disabled="locked" @click="importNotes"><Icon name="download" />导入</button>
+        <div v-if="feedbackAt === 'import' && (importResult !== null || actionError)" class="notes-inline">
+          <p v-if="importResult !== null" class="notes-status" role="status">{{ importResult ? `导入了 ${importResult} 份札记，聊天正文没有改动。` : '正文里没有新的 aftertalk 可以导入。' }}</p>
+          <p v-if="actionError" class="bbs-callout is-danger" role="alert">{{ actionError }}</p>
+        </div>
+      </details>
+    </footer>
   </div>
 </template>
 
 <style scoped>
 .notes-page { width:100%; min-width:0; max-width:100%; color:var(--bbs-ink); overflow-wrap:anywhere; }
 .notes-page :where(section, article, details, div, form, fieldset, label) { min-width:0; }
-.notes-card { margin:0 0 14px; padding:18px; border:1px solid var(--bbs-line); border-radius:var(--bbs-radius); background:var(--bbs-surface); }
-.notes-controls { border-top:2px solid var(--bbs-accent); }
-.notes-toolbar, .notes-actions, .notes-section-heading, .notes-pagination { display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
-.notes-toolbar, .notes-section-heading { justify-content:space-between; }
-.notes-toggle { display:flex; align-items:center; gap:9px; font-size:13px; cursor:pointer; }
-.notes-toggle input { flex:0 0 auto; width:18px; height:18px; margin:0; accent-color:var(--bbs-accent); }
-.notes-hint, .notes-summary-hint, .notes-record-date { color:var(--bbs-ink-muted); font-size:12px; line-height:1.8; }
-.notes-hint { margin:10px 0 0; }
-.notes-summary-hint { margin-left:8px; font-weight:400; }
-.notes-warning, .notes-error { padding:10px 12px; border-radius:var(--bbs-radius-sm); font-size:13px; }
-.notes-warning { color:var(--bbs-warning); background:var(--bbs-warning-soft); }
-.notes-error { margin:0 0 14px; color:var(--bbs-danger); background:var(--bbs-danger-soft); }
-.notes-error p { margin:4px 0; }
-.notes-status { margin:0 0 12px; font-size:13px; color:var(--bbs-ink-soft); }
-.notes-link { padding:2px 0; border:0; background:none; color:inherit; font:inherit; text-decoration:underline; cursor:pointer; }
-.notes-page summary { cursor:pointer; font-size:14px; font-weight:600; line-height:1.8; }
-.notes-page summary:focus-visible, .notes-link:focus-visible, .notes-toggle input:focus-visible { outline:2px solid var(--bbs-accent); outline-offset:3px; }
-.notes-page h2 { margin:0; font:600 19px/1.6 var(--bbs-font-reading); }
-.notes-page h3 { margin:0; font-size:14px; line-height:1.8; }
-.notes-form { margin-top:14px; }
-.notes-form fieldset { margin:0; padding:0; border:0; }
-.notes-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-bottom:16px; }
-.notes-full { grid-column:1 / -1; }
-.notes-field { display:flex; flex-direction:column; gap:6px; font-size:12px; color:var(--bbs-ink-soft); }
-.notes-model-picker { gap:10px; }
-.notes-model-heading { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; }
-.notes-model-picker select { width:100%; text-overflow:ellipsis; color:var(--bbs-ink); background:var(--bbs-surface); }
-.notes-model-picker option { color:var(--bbs-ink); background:var(--bbs-surface); }
-.notes-model-picker .notes-hint { margin-top:0; }
+
+/* 生成面板 */
+.notes-panel { margin:0 0 16px; padding:14px 18px; border:1px solid var(--bbs-line); border-radius:14px; background:var(--bbs-surface); }
+.notes-toolbar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px 16px; }
+.notes-switch { display:inline-flex; align-items:center; gap:10px; min-height:40px; font-size:14px; font-weight:600; cursor:pointer; }
+.notes-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.notes-panel > .bbs-field-hint { margin:8px 0 0; }
+.notes-setup { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px 12px; margin:12px 0 0; }
+
+/* 状态与报错 */
+.notes-status { margin:0 0 12px; padding:1px 0 1px 12px; border-left:2px solid var(--bbs-accent); font-size:13px; line-height:1.7; color:var(--bbs-ink-soft); }
+.notes-error { margin:0 0 16px; }
+.notes-inline { margin-top:12px; }
+.notes-inline > :last-child { margin-bottom:0; }
+
+/* 区块 */
+.notes-section { margin:28px 0; }
+.notes-section-head { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:6px 12px; margin:0 0 10px; }
+.notes-heading { margin:0; font:600 20px/1.5 var(--bbs-font-reading); letter-spacing:.04em; color:var(--bbs-ink); }
+.notes-count { font-size:12.5px; color:var(--bbs-ink-muted); }
+.notes-section > .bbs-field-hint { margin:0 0 12px; }
+.notes-empty { margin:0; padding:20px 18px; border:1px dashed var(--bbs-line-strong); border-radius:12px; text-align:center; font-size:13.5px; color:var(--bbs-ink-soft); }
+.notes-empty p { margin:0; }
+.notes-empty .bbs-field-hint { max-width:42ch; margin:6px auto 0; }
+.notes-draft { margin:0 0 20px; padding:12px 18px 16px; border:1px dashed var(--bbs-accent); border-radius:12px; }
+.notes-draft .notes-text { max-height:320px; overflow:auto; border-top:0; padding-top:0; }
+
+/* 札记 */
+.notes-record { margin:0 0 10px; }
+.notes-record-head { display:flex; flex-direction:column; gap:1px; flex:1 1 auto; min-width:0; }
+.notes-record-title { display:flex; flex-wrap:wrap; align-items:center; gap:4px 8px; font-size:14.5px; font-weight:600; }
+.notes-record-meta { font-size:12px; font-weight:400; color:var(--bbs-ink-muted); }
+.notes-record.is-stale .notes-record-title { color:var(--bbs-ink-soft); }
+.notes-tag { display:inline-block; padding:0 8px; border-radius:var(--bbs-radius-pill); font-size:11.5px; font-weight:500; line-height:1.8; }
+.notes-tag.is-new { background:var(--bbs-accent-soft); color:var(--bbs-accent); }
+.notes-tag.is-stale { background:var(--bbs-warning-soft); color:var(--bbs-warning); }
+.notes-stale-note { margin:4px 0 12px; }
+.notes-text { margin:0; padding:12px 0 0; max-width:100%; border-top:1px solid var(--bbs-line); white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; font:400 14px/1.95 var(--bbs-font-reading); color:var(--bbs-ink); background:none; }
+.notes-question { margin:14px 0 0; padding:14px 16px; border-radius:10px; background:var(--bbs-surface-2); }
+.notes-question-head { display:flex; align-items:flex-start; gap:10px; }
+.notes-question-id { flex:0 0 auto; min-width:30px; padding:0 7px; border-radius:6px; background:var(--bbs-accent-soft); color:var(--bbs-accent); font:600 12px/24px var(--bbs-font-mono); text-align:center; }
+.notes-question-prompt { flex:1 1 auto; min-width:0; margin:0; font-size:13.5px; line-height:1.8; white-space:pre-wrap; }
+.notes-field { display:flex; flex-direction:column; gap:6px; margin:12px 0 0; font-size:12.5px; color:var(--bbs-ink-soft); }
 .notes-page .bbs-input { box-sizing:border-box; min-width:0; max-width:100%; }
-.notes-page textarea { resize:vertical; min-height:90px; }
-.notes-page .bbs-btn { min-height:40px; max-width:100%; justify-content:center; white-space:normal; overflow-wrap:anywhere; }
-.notes-preferences { display:grid; gap:16px; margin-top:16px; }
-.notes-preferences .notes-grid { margin-bottom:0; }
-.notes-section { margin:26px 0; }
-.notes-section-heading { margin-bottom:12px; }
-.notes-section-heading .notes-hint { margin:0; }
-.notes-empty { padding:24px 16px; text-align:center; background:var(--bbs-surface-2); border-radius:var(--bbs-radius); color:var(--bbs-ink-soft); font-size:13px; }
-.notes-empty p { margin:8px 0 0; }
-.notes-record-date { display:block; margin:5px 0 0; font-weight:400; }
-.notes-invalid { display:inline-block; padding:2px 7px; border-radius:4px; background:var(--bbs-warning-soft); color:var(--bbs-warning); font-size:11px; font-weight:500; }
-.notes-text { margin:16px 0 0; max-width:100%; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; font:400 14px/1.95 var(--bbs-font-reading); }
-.notes-question { margin-top:20px; padding-top:18px; border-top:1px solid var(--bbs-line); }
-.notes-question-prompt, .notes-decision-text { white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; line-height:1.9; }
-.notes-question .notes-actions { margin-top:12px; }
-.notes-pagination { justify-content:center; font-size:12px; }
-.notes-decision .notes-section-heading { margin-bottom:0; }
-.notes-decision .notes-hint { margin-top:4px; }
-.notes-decision .is-selected { border-color:var(--bbs-accent); background:var(--bbs-accent-soft); color:var(--bbs-accent); opacity:1; }
+.notes-page textarea { resize:vertical; min-height:84px; line-height:1.7; }
+.notes-question .notes-field + .bbs-field-hint { margin:6px 0 0; }
+.notes-question .notes-actions { margin-top:10px; }
+.notes-pagination { display:flex; align-items:center; justify-content:center; gap:12px; margin-top:12px; font-size:12.5px; color:var(--bbs-ink-muted); }
+
+/* 安排 */
+.notes-inject { padding:1px 10px; border-radius:var(--bbs-radius-pill); background:var(--bbs-surface-2); font-size:12px; line-height:1.8; color:var(--bbs-ink-muted); }
+.notes-inject.is-on { background:var(--bbs-accent-soft); color:var(--bbs-accent); }
+.notes-decision { margin:0 0 10px; padding:12px 16px 14px; border:1px solid var(--bbs-line); border-radius:12px; background:var(--bbs-surface); }
+.notes-decision.is-pending, .notes-decision.is-in_progress { border-left:3px solid var(--bbs-accent); }
+.notes-decision-head { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; }
+.notes-chip { display:inline-flex; padding:0 10px; border-radius:var(--bbs-radius-pill); background:var(--bbs-surface-2); color:var(--bbs-ink-soft); font-size:12px; font-weight:600; line-height:1.9; }
+.is-pending .notes-chip, .is-in_progress .notes-chip { background:var(--bbs-accent-soft); color:var(--bbs-accent); }
+.notes-decision-date { margin-left:auto; font-size:12px; color:var(--bbs-ink-muted); }
+.notes-decision-text { margin:8px 0 12px; font-size:14px; line-height:1.85; white-space:pre-wrap; overflow-wrap:anywhere; }
+.is-completed .notes-decision-text, .is-cancelled .notes-decision-text { color:var(--bbs-ink-muted); }
+.notes-segment { display:inline-flex; flex-wrap:wrap; gap:2px; max-width:100%; padding:2px; border:1px solid var(--bbs-line); border-radius:10px; background:var(--bbs-surface-2); }
+.notes-segment .bbs-btn { min-height:32px; padding:4px 12px; border:0; border-radius:8px; background:transparent; color:var(--bbs-ink-soft); font-weight:500; }
+.notes-segment .bbs-btn:hover:not(:disabled) { background:var(--bbs-surface); color:var(--bbs-accent); }
+.notes-segment .bbs-btn.is-selected { background:var(--bbs-surface); color:var(--bbs-accent); font-weight:650; opacity:1; outline:1px solid var(--bbs-line-strong); outline-offset:-1px; }
+.notes-segment .bbs-btn:disabled:not(.is-selected) { opacity:.4; }
+
+/* 设置 */
+.notes-footer { margin-top:32px; border-top:1px solid var(--bbs-line); }
+.notes-footer > details { border-bottom:1px solid var(--bbs-line); }
+.notes-footer > details > summary { font-size:13.5px; }
+.notes-footer > details[open] { padding-bottom:16px; }
+.notes-footer .bbs-disclosure-meta { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.notes-footer > details > .bbs-field-hint:first-of-type { margin-top:0; }
+.notes-form fieldset { min-width:0; margin:0; padding:0; border:0; }
+.notes-model { margin:14px 0 0; padding:4px 14px 12px; border-radius:10px; background:var(--bbs-surface-2); }
+.notes-model-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; }
+.notes-model-label { font-size:12.5px; color:var(--bbs-ink-soft); }
+.notes-model select { width:100%; text-overflow:ellipsis; }
+.notes-model .bbs-field-hint { margin:8px 0 0; }
+.notes-model .bbs-callout { margin:8px 0 0; }
+.notes-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr)); gap:0 12px; }
+.notes-grid + .bbs-field-hint { margin-top:8px; }
+.notes-switch-row { display:flex; align-items:center; justify-content:space-between; gap:16px; min-height:48px; padding:8px 0; cursor:pointer; }
+.notes-switch-row + .notes-switch-row { border-top:1px solid var(--bbs-line); }
+.notes-switch-row strong { display:block; font-size:13.5px; font-weight:600; color:var(--bbs-ink); }
+.notes-switch-row small { display:block; margin-top:1px; font-size:12.5px; color:var(--bbs-ink-muted); }
+.notes-save { margin-top:6px; }
+.notes-prompt { max-height:360px; margin:0; padding:12px 14px; overflow:auto; border-radius:10px; background:var(--bbs-surface-2); white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.75 var(--bbs-font-mono); color:var(--bbs-ink-soft); }
+
 @media (max-width:640px) {
-  .notes-card { padding:14px; }
-  .notes-toolbar { align-items:flex-start; flex-direction:column; gap:14px; }
-  .notes-page .bbs-btn { min-height:44px; padding:8px 11px; }
-  .notes-actions { gap:8px; }
-  .notes-grid { grid-template-columns:minmax(0,1fr); }
-  .notes-section { margin:22px 0; }
+  .notes-panel { padding:12px 14px; }
+  .notes-toolbar { flex-direction:column; align-items:stretch; }
+  .notes-actions .bbs-btn { flex:1 1 auto; }
+  .notes-heading { font-size:18px; }
+  .notes-question { padding:12px; }
+  .notes-decision { padding:12px 14px; }
+  .notes-segment { display:flex; }
+  .notes-segment .bbs-btn { flex:1 1 0; min-height:40px; padding:4px 6px; }
 }
 </style>

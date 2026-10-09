@@ -104,7 +104,7 @@ describe('独立大纲设置与渠道边界', () => {
     configure(); notesIssue.value = '设置版本未知';
     expect(() => resolveOutlineChannel()).toThrow('札记设置');
     notesIssue.value = ''; notesSettings.channel.url = '';
-    expect(() => resolveOutlineChannel()).toThrow('不会回退');
+    expect(() => resolveOutlineChannel()).toThrow('不会改用正文或摘要');
     outlineSettings.apiMode = 'independent'; outlineSettings.channel.model = ' ';
     expect(() => resolveOutlineChannel()).toThrow('模型');
   });

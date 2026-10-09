@@ -68,7 +68,7 @@ describe('札记模型列表：草稿隔离与只读行为', () => {
     );
     expect(fetchModelsMock.mock.calls[0][0]).not.toBe(source);
     expect(catalog.models.value).toEqual(['a-model', 'z-model']);
-    expect(catalog.message.value).toBe('已获取 2 个模型，请下拉选择后保存；不会自动更换当前模型。');
+    expect(catalog.message.value).toBe('拉到 2 个模型，从列表里选一个，再点保存。');
     expect(catalog.error.value).toBe('');
     expect(catalog.loading.value).toBe(false);
     expect(source).toEqual(before);
@@ -112,7 +112,7 @@ describe('札记模型列表：草稿隔离与只读行为', () => {
     const { source, catalog } = setup({ url });
     await catalog.pull();
     expect(fetchModelsMock).not.toHaveBeenCalled();
-    expect(catalog.error.value).toBe('请先填写不含账号、查询参数或片段的完整 HTTP / HTTPS API 地址。');
+    expect(catalog.error.value).toBe('先填好 API 地址：要写完整的 http(s) 地址，不能带账号、? 参数或 #。');
     expect(catalog.loading.value).toBe(false);
     expect(source.model).toBe('keep-current-model');
   });
@@ -123,23 +123,23 @@ describe('札记模型列表：草稿隔离与只读行为', () => {
     await catalog.pull();
     expect(state(catalog)).toEqual({
       models: [], loading: false, error: '',
-      message: '接口未返回可用模型，可以手动填写模型 ID 后保存。',
+      message: '接口没有返回任何模型，可以直接手动填写模型名。',
     });
     expect(source.model).toBe('keep-current-model');
   });
 
   it.each([
-    [401, '请检查札记 API 密钥和访问权限。'],
-    [403, '请检查札记 API 密钥和访问权限。'],
-    [404, '接口可能未提供模型列表。'],
-    [405, '接口可能未提供模型列表。'],
-    [429, '接口请求过于频繁，请稍后重试。'],
-    [500, '请检查地址、网络或超时设置后重试。'],
+    [401, '密钥无效或没有权限，请检查 API 密钥。'],
+    [403, '密钥无效或没有权限，请检查 API 密钥。'],
+    [404, '这个地址没有提供模型列表。'],
+    [405, '这个地址没有提供模型列表。'],
+    [429, '请求太频繁，被限流了，稍后再试。'],
+    [500, '检查地址、网络或超时设置后再试。'],
   ] as const)('HTTP %s 只显示状态码和固定恢复提示，不回显上游内容', async (status, reason) => {
     fetchModelsMock.mockRejectedValue(new ApiError(upstream, status));
     const { source, catalog } = setup();
     await catalog.pull();
-    expect(catalog.error.value).toBe(`拉取模型失败（HTTP ${status}）。${reason}仍可手动填写模型 ID。`);
+    expect(catalog.error.value).toBe(`拉取模型列表失败（HTTP ${status}）：${reason}也可以直接手动填写模型名。`);
     expect(catalog.models.value).toEqual([]);
     expect(catalog.message.value).toBe('');
     expect(catalog.loading.value).toBe(false);
@@ -155,7 +155,7 @@ describe('札记模型列表：草稿隔离与只读行为', () => {
     await catalog.pull();
     expect(state(catalog)).toEqual({
       models: [], loading: false, message: '',
-      error: '拉取模型失败。请检查地址、网络或超时设置后重试。仍可手动填写模型 ID。',
+      error: '拉取模型列表失败：检查地址、网络或超时设置后再试。也可以直接手动填写模型名。',
     });
     expect(source.model).toBe('keep-current-model');
   });

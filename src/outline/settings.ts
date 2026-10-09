@@ -48,7 +48,7 @@ function normalize(value: OutlineSettings | Record<string, unknown>): OutlineSet
 
 function protect(): never {
   protectedSettings = true;
-  outlineSettingsIssue.value = '大纲设置格式或版本无法识别，已只读保护，未覆盖原设置；请刷新后检查。';
+  outlineSettingsIssue.value = '大纲设置的格式或版本认不出来，已经只读保护，原设置没有被覆盖；请刷新后检查。';
   throw new Error(outlineSettingsIssue.value);
 }
 
@@ -70,7 +70,7 @@ export function hydrateOutlineSettings(): void {
 export function saveOutlineSettings(): void {
   if (protectedSettings) throw new Error(outlineSettingsIssue.value);
   const ctx = getContext();
-  if (!ctx?.extensionSettings || !ctx.saveSettingsDebounced) throw new Error('酒馆设置接口尚未就绪，大纲配置未保存。');
+  if (!ctx?.extensionSettings || !ctx.saveSettingsDebounced) throw new Error('酒馆设置接口未就绪，大纲设置没有保存。');
   const settings = ctx.extensionSettings;
   const previous = settings[OUTLINE_SETTINGS_KEY];
   if (previous != null && !recognized(previous)) protect();
@@ -83,7 +83,7 @@ export function saveOutlineSettings(): void {
     if (hadKey) settings[OUTLINE_SETTINGS_KEY] = previous;
     else delete settings[OUTLINE_SETTINGS_KEY];
     Object.assign(outlineSettings, copy(committed));
-    outlineSettingsIssue.value = '大纲设置保存失败，已回滚，请稍后重试。';
+    outlineSettingsIssue.value = '大纲设置保存失败，已回滚，请稍后再试。';
     throw new Error(outlineSettingsIssue.value);
   }
   committed = copy(next);
@@ -95,16 +95,20 @@ export function saveOutlineSettings(): void {
 export function resolveOutlineChannel(): ApiChannel {
   if (protectedSettings) throw new Error(outlineSettingsIssue.value);
   if (outlineSettings.apiMode !== 'notes' && outlineSettings.apiMode !== 'independent') throw new Error('大纲 API 模式无效。');
-  if (outlineSettings.apiMode === 'notes' && notesSettingsIssue.value) throw new Error('札记设置处于保护或异常状态，请先检查札记设置。');
+  if (outlineSettings.apiMode === 'notes' && notesSettingsIssue.value) throw new Error('大纲用的是札记的 API，但札记设置现在处于保护或异常状态，请先检查札记设置。');
   const channel = outlineSettings.apiMode === 'notes' ? notesSettings.channel : outlineSettings.channel;
   const urlText = typeof channel.url === 'string' ? channel.url.trim() : '';
   const model = typeof channel.model === 'string' ? channel.model.trim() : '';
-  if (!urlText || !model) throw new Error('请先填写所选大纲渠道的 API 地址和模型；不会回退到正文或摘要 API。');
+  if (!urlText || !model) {
+    throw new Error(outlineSettings.apiMode === 'notes'
+      ? '大纲默认用札记的 API，但札记还没填好地址和模型。请到「札记 → 独立 API 设置」里填写，或在下方「规划 API 设置」改用专用 API（不会改用正文或摘要的 API）。'
+      : '请在下方「规划 API 设置」里填写专用 API 的地址和模型（不会改用正文或摘要的 API）。');
+  }
   let url: URL;
-  try { url = new URL(urlText); } catch { throw new Error('大纲 API 地址无效。'); }
+  try { url = new URL(urlText); } catch { throw new Error('规划用的 API 地址不是有效的网址。'); }
   if (!/^https?:\/\//i.test(urlText) || !['http:', 'https:'].includes(url.protocol) || !url.hostname ||
       url.username || url.password || /[?#\\\s]/.test(urlText) || /^https?:\/\/[^/]*@/i.test(urlText)) {
-    throw new Error('请填写不含凭据、查询参数或片段的有效 HTTP(S) API 地址。');
+    throw new Error('API 地址要写完整的 http(s) 地址，不能带账号、? 参数或 #。');
   }
   return { ...channel, url: urlText, model, excludeParams: [...channel.excludeParams] };
 }

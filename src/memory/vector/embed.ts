@@ -11,8 +11,21 @@
 
 import type { VectorEndpoint } from '@/api/settings';
 import { resolveVectorModel } from '@/api/settings';
+import { classifyHttpFailure, describeFailure, networkFailure, timeoutFailure, type ApiError } from '@/api/errors';
 
 export class EmbedError extends Error {}
+
+/** 向量接口由浏览器直连,出错时写成一句完整说明,附上脱敏后的细节,供召回详情和索引提示直接显示。 */
+export function vectorFailure(label: string, error: ApiError): EmbedError {
+  const view = describeFailure(error, '', '设置 → 向量记忆');
+  return new EmbedError(`${label}：${view.message}${view.detail ? `（${view.detail}）` : ''}`);
+}
+
+/** 读取失败响应并分类;向量接口是浏览器直连,网络类错误要提示跨域。 */
+export async function vectorHttpFailure(label: string, resp: Response): Promise<EmbedError> {
+  const body = await resp.text().catch(() => '');
+  return vectorFailure(label, classifyHttpFailure({ status: resp.status, statusText: resp.statusText, body, direct: true }));
+}
 
 /* ============ 超时 + 自动重试 ============ */
 
@@ -54,7 +67,7 @@ export async function fetchWithTimeoutRetry(
       const resp = await fetch(url, { ...init, signal: ctrl.signal });
       // 5xx / 429 且还有重试机会 → 重试;其余(含 4xx)交调用方处理
       if ((resp.status >= 500 || resp.status === 429) && attempt < maxAttempts - 1) {
-        lastErr = new EmbedError(`${label} API ${resp.status}`);
+        lastErr = vectorFailure(label, classifyHttpFailure({ status: resp.status, statusText: resp.statusText, direct: true }));
       } else {
         return resp;
       }
@@ -62,8 +75,8 @@ export async function fetchWithTimeoutRetry(
       // 外部取消触发的 abort:立即抛,不重试
       if (externalSignal?.aborted && !timedOut) throw new EmbedError(`${label}已取消`);
       lastErr = timedOut
-        ? new EmbedError(`${label}超时(>${timeoutSec}s)`)
-        : new EmbedError(`${label}网络异常:${e instanceof Error ? e.message : String(e)}`);
+        ? vectorFailure(label, timeoutFailure('请求', timeoutSec))
+        : vectorFailure(label, networkFailure(e instanceof Error ? e.message : String(e), { direct: true }));
     } finally {
       clearTimeout(timer);
       externalSignal?.removeEventListener('abort', onExternalAbort);
@@ -136,7 +149,7 @@ function buildEmbeddingRequest(ep: VectorEndpoint, model: string, texts: string[
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
       body: JSON.stringify({ model, input: texts }),
       parse: (json) => {
-        if (!json?.data || !Array.isArray(json.data)) throw new EmbedError('embedding 返回缺少 data 数组');
+        if (!json?.data || !Array.isArray(json.data)) throw new EmbedError('Embedding 接口返回的数据里没有向量（缺少 data），请确认地址和模型是 embedding 接口。');
         return json.data.slice().sort((a: any, b: any) => a.index - b.index).map((d: any) => d.embedding);
       },
     };
@@ -154,7 +167,7 @@ function buildEmbeddingRequest(ep: VectorEndpoint, model: string, texts: string[
     headers,
     body: JSON.stringify({ requests: texts.map((text) => ({ model: modelName, content: { parts: [{ text }] } })) }),
     parse: (json) => {
-      if (!json?.embeddings || !Array.isArray(json.embeddings)) throw new EmbedError('Gemini embedding 返回缺少 embeddings 数组');
+      if (!json?.embeddings || !Array.isArray(json.embeddings)) throw new EmbedError('Gemini Embedding 接口返回的数据里没有向量（缺少 embeddings），请确认地址和模型。');
       return json.embeddings.map((e: any) => e.values);
     },
   };
@@ -171,16 +184,15 @@ async function embedBatch(ep: VectorEndpoint, model: string, texts: string[], si
   const resp = await fetchWithTimeoutRetry(
     req.endpoint,
     { method: 'POST', headers: req.headers, body: req.body },
-    { timeoutSec: ep.timeoutSec, retries: ep.retries, label: 'embedding', externalSignal: signal },
+    { timeoutSec: ep.timeoutSec, retries: ep.retries, label: 'Embedding', externalSignal: signal },
   );
   if (!resp.ok) {
-    const t = await resp.text().catch(() => '');
-    throw new EmbedError(`embedding API ${resp.status}: ${t.slice(0, 200)}`);
+    throw await vectorHttpFailure('Embedding', resp);
   }
   const json = await resp.json();
   const vectors = req.parse(json);
   if (!Array.isArray(vectors) || vectors.some((v) => !Array.isArray(v))) {
-    throw new EmbedError('embedding 返回的向量数据无效');
+    throw new EmbedError('Embedding 接口返回的向量格式不对，请确认地址和模型是 embedding 接口。');
   }
   return vectors.map((v) => Float32Array.from(v));
 }
@@ -192,8 +204,8 @@ async function embedBatch(ep: VectorEndpoint, model: string, texts: string[], si
 export async function embedTexts(texts: string[], signal?: AbortSignal): Promise<Float32Array[]> {
   if (!texts.length) return [];
   const ep = resolveVectorModel('embedding');
-  if (!ep.url) throw new EmbedError('向量记忆:Embedding 地址未配置');
-  if (!ep.model) throw new EmbedError('向量记忆:Embedding 模型未配置');
+  if (!ep.url) throw new EmbedError('向量记忆还没有填写 Embedding 地址，请到设置 → 向量记忆里补全。');
+  if (!ep.model) throw new EmbedError('向量记忆还没有填写 Embedding 模型，请到设置 → 向量记忆里补全。');
 
   if (texts.length <= EMBED_BATCH) return embedBatch(ep, ep.model, texts, signal);
 
@@ -208,7 +220,7 @@ export async function embedTexts(texts: string[], signal?: AbortSignal): Promise
 /** 向量化单条文本 → base64,索引/检索时用。 */
 export async function embedToBase64(text: string, signal?: AbortSignal): Promise<string> {
   const [v] = await embedTexts([text], signal);
-  if (!v) throw new EmbedError('embedding 返回为空');
+  if (!v) throw new EmbedError('Embedding 接口没有返回向量。');
   return encodeFloat32Base64(v);
 }
 
@@ -305,15 +317,14 @@ async function rerankBatch(
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
       body: JSON.stringify({ model, query, documents, top_n: documents.length }),
     },
-    { timeoutSec, retries, label: 'rerank', externalSignal: signal },
+    { timeoutSec, retries, label: 'Rerank', externalSignal: signal },
   );
   if (!resp.ok) {
-    const t = await resp.text().catch(() => '');
-    throw new EmbedError(`rerank API ${resp.status}: ${t.slice(0, 200)}`);
+    throw await vectorHttpFailure('Rerank', resp);
   }
   const json = await resp.json();
   const results = json?.results ?? json?.data;
-  if (!Array.isArray(results)) throw new EmbedError('rerank 返回缺少 results 数组');
+  if (!Array.isArray(results)) throw new EmbedError('Rerank 接口返回的数据里没有打分结果（缺少 results），请确认地址和模型是 rerank 接口。');
   return results.map((r: any) => ({ index: r.index, score: r.relevance_score ?? r.score ?? 0 }));
 }
 
@@ -331,8 +342,8 @@ export async function rerankDocuments(
 ): Promise<RerankResult[]> {
   if (!documents.length) return [];
   const ep = resolveVectorModel('rerank');
-  if (!ep.url) throw new EmbedError('向量记忆:Rerank 地址未配置');
-  if (!ep.model) throw new EmbedError('向量记忆:Rerank 模型未配置');
+  if (!ep.url) throw new EmbedError('向量记忆还没有填写 Rerank 地址，请到设置 → 向量记忆里补全。');
+  if (!ep.model) throw new EmbedError('向量记忆还没有填写 Rerank 模型，请到设置 → 向量记忆里补全。');
 
   const endpoint = `${embeddingBase(ep.url)}/rerank`;
   const batches = buildRerankBatches(query, documents);

@@ -306,7 +306,7 @@ function confirmTravel() {
   const target = traveling.value;
   if (!target) return;
   if (!appendChatInput(buildTravelDraft(target))) {
-    toast('无法写入 ST 输入框', 'error');
+    toast('没能写入酒馆的输入框。', 'error');
     return;
   }
   traveling.value = null;
@@ -317,7 +317,7 @@ function confirmTravel() {
 
 <template>
   <section class="bbs-page">
-    <PageHeader icon="scenes" title="场景" eyebrow="世界足迹" description="沿着地点层级，回看故事走过的每一处。">
+    <PageHeader icon="scenes" title="场景" description="故事里出现过的地点，按上下级排好；标着「所在」的是现在的位置。">
       <template #actions>
         <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!hasLeaf"
           :title="hasLeaf ? '手动添加地点' : '需先有摘要才能手动添加'" @click="openComposer"><Icon name="plus" />添加地点</button>
@@ -335,7 +335,7 @@ function confirmTravel() {
         <button class="bbs-filter-tab" type="button" @click="setAllCollapsed(true)">收起层级</button>
       </div>
     </div>
-    <p v-if="!hasLeaf" class="bbs-scene-hint">先生成一条有效摘要，才能手动添加地点。</p>
+    <p v-if="!hasLeaf" class="bbs-scene-hint">有了第一条摘要后才能手动添加地点。</p>
 
     <TransitionGroup v-if="rows.length" tag="div" name="scene" class="bbs-scene-tree">
       <div
@@ -388,8 +388,8 @@ function confirmTravel() {
 
     <div v-else class="bbs-empty">
       <span class="bbs-empty-icon"><Icon name="scenes" /></span>
-      <h3>世界地图，始于一处足迹</h3>
-      <p>摘要会记录走过的场景，并整理上下级地点。{{ hasLeaf ? '也可以手动添加一处地点，为它写下描述。' : '生成第一条有效摘要后，即可手动添加。' }}</p>
+      <h3>还没有地点</h3>
+      <p>摘要会记下去过的地方，并按上下级整理。{{ hasLeaf ? '也可以手动添加。' : '有了第一条摘要后就能手动添加。' }}</p>
       <button v-if="hasLeaf" class="bbs-btn" type="button" @click="openComposer"><Icon name="plus" />添加第一处地点</button>
     </div>
 
@@ -401,7 +401,7 @@ function confirmTravel() {
           <button class="bbs-item-act" type="button" title="关闭" @click="closeComposer"><Icon name="close" /></button>
         </header>
         <div class="bbs-modal-field">
-          <span class="bbs-modal-label">上级地点(从已有地点里选,或设为顶级)</span>
+          <span class="bbs-modal-label">上级地点（从已有地点里选，或设为顶级）</span>
           <BbsSelect v-model="newParentId" :options="parentOptions(sceneOptions)" aria-label="上级地点" />
         </div>
         <label class="bbs-modal-field">
@@ -409,7 +409,7 @@ function confirmTravel() {
           <input ref="nameInput" v-model="newName" class="bbs-input" type="text" placeholder="新地点名" @keydown.enter="addScene" />
         </label>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">描述(必填)</span>
+          <span class="bbs-modal-label">描述（必填）</span>
           <textarea v-model="newDesc" class="bbs-input bbs-modal-textarea" rows="3" placeholder="这地方是什么、有何特征"></textarea>
         </label>
         <footer class="bbs-modal-foot">
@@ -432,11 +432,11 @@ function confirmTravel() {
           <input v-model="editing.name" class="bbs-input" type="text" placeholder="地点名" />
         </label>
         <div class="bbs-modal-field">
-          <span class="bbs-modal-label">上级地点(改这里会连同下属一起移动)</span>
+          <span class="bbs-modal-label">上级地点（改这里会连同下属一起移动）</span>
           <BbsSelect v-model="editing.parentId" :options="parentOptions(editParentOptions)" aria-label="上级地点" />
         </div>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">描述(必填)</span>
+          <span class="bbs-modal-label">描述（必填）</span>
           <textarea v-model="editing.desc" class="bbs-input bbs-modal-textarea" rows="3" placeholder="这地方是什么、有何特征"></textarea>
         </label>
         <footer class="bbs-modal-foot">
@@ -455,7 +455,7 @@ function confirmTravel() {
       @confirm="confirmTravel"
       @cancel="traveling = null"
     >
-      确定前往「{{ traveling?.path.join(' › ') }}」？将按抵达后的地点状态生成草稿；不会自动发送，也不会提前修改记忆。输入框已有内容时会追加在末尾。
+      前往「{{ traveling?.path.join(' › ') }}」？会把一段去那里的草稿填进输入框，不会自动发送，也不会提前改动记忆；输入框里已有内容的话，草稿接在后面。
     </ConfirmDialog>
 
     <ConfirmDialog
@@ -468,7 +468,7 @@ function confirmTravel() {
       @confirm="confirmRemove"
       @cancel="removing = null"
     >
-      删除「{{ removing?.name }}」<template v-if="removeChildCount">,及其下属 {{ removeChildCount }} 个地点</template>。此操作写入最新摘要,删除楼层可回退。
+      删除「{{ removing?.name }}」<template v-if="removeChildCount">和它下面的 {{ removeChildCount }} 个地点</template>？删除会记在最新一条摘要上，删掉那一楼就能恢复。
     </ConfirmDialog>
   </section>
 </template>
@@ -490,7 +490,7 @@ function confirmTravel() {
 .bbs-search > .bbs-input { flex: 1; width: 100%; }
 .bbs-filterbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 18px; }
 .bbs-filter-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
-.bbs-filter-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
+.bbs-filter-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface-2); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
 .bbs-filter-tab[aria-pressed='true'] { background: var(--bbs-accent-soft); border-color: var(--bbs-accent); color: var(--bbs-accent); }
 .bbs-filter-tab span { font-variant-numeric: tabular-nums; font-size: 11px; }
 .bbs-item-act { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--bbs-ink-soft); cursor: pointer; font-size: 15px; }

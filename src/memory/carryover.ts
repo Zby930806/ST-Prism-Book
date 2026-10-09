@@ -250,11 +250,11 @@ export function computeCarryoverPlan(): CarryoverPlan {
 export async function createNewChatWithCarryover(): Promise<boolean> {
   const ctx = getContext();
   if (!ctx) {
-    toast('SillyTavern 上下文不可用', 'error');
+    toast('酒馆上下文不可用，请刷新页面后再试。', 'error');
     return false;
   }
   if (ctx.groupId) {
-    toast('群聊暂不支持带数据建新对话', 'warning');
+    toast('群聊暂时不支持带数据创建新对话。', 'warning');
     return false;
   }
   const sourceChat = ctx.chat;
@@ -278,7 +278,7 @@ export async function createNewChatWithCarryover(): Promise<boolean> {
     requireSource(); // 在加载宿主接口、读取派生/森林或向量外发前阻断。
     if (!sourceChatId || !sourceMeta) throw new Error('请先进入一个聊天再携带数据');
     if (!sourceChat?.length) {
-      toast('当前对话没有可携带的数据', 'warning');
+      toast('这个聊天没有可以带过去的数据。', 'warning');
       return false;
     }
     if (typeof ctx.saveChat !== 'function') throw new Error('宿主缺少聊天保存接口');
@@ -313,7 +313,7 @@ export async function createNewChatWithCarryover(): Promise<boolean> {
     }
 
     if (!mergedSummary && !carryMessages.length && !deltaHasData(seedDelta)) {
-      toast('当前对话没有可携带的数据', 'warning');
+      toast('这个聊天没有可以带过去的数据。', 'warning');
       return false;
     }
 
@@ -444,13 +444,13 @@ export async function createNewChatWithCarryover(): Promise<boolean> {
       assertMemoryWritable();
     } else requireTarget();
     refreshInjection();
-    toast('已创建新对话:携带 AI ' + carryMessages.filter(m => !m.is_user).length + ' 条,旧剧情摘要 ' + (mergedSummary ? '1' : '0') + ' 条', 'success');
+    toast('已创建新对话：带上 AI 回复 ' + carryMessages.filter(m => !m.is_user).length + ' 条、旧剧情摘要 ' + (mergedSummary ? '1' : '0') + ' 条。', 'success');
     return true;
   } catch (e) {
     try { rollback?.(); } catch (restoreError) { console.error('[棱镜宝书] 恢复携带内存失败:', restoreError); }
     const warning = persistenceStarted ? '；保存可能已部分完成，请核对源/目标聊天，未执行磁盘回滚'
       : creatingChat ? '；新聊天可能已创建，源历史未被本入口改写，请核对' : '';
-    toast('带数据创建新对话失败:' + (e instanceof Error ? e.message : String(e)) + warning, 'error');
+    toast('带数据创建新对话失败：' + (e instanceof Error ? e.message : String(e)) + warning, 'error');
     return false;
   }
 }

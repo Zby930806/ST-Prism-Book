@@ -101,6 +101,8 @@ const orbStyle = computed(() => {
 });
 
 const orbImage = computed(() => ui.orbImage.trim());
+// 小狐狸在不同形状里的大小：书签按宽度，圆和方按边长留出边距，免得耳朵被裁掉。
+const foxSize = computed(() => Math.round(ui.orbShape === 'bookmark' ? orbW.value * 0.86 : ui.orbSize * (ui.orbShape === 'circle' ? 0.7 : 0.76)));
 
 // —— 拖动 ——
 function onDown(e: PointerEvent) {
@@ -194,7 +196,7 @@ onUnmounted(() => window.removeEventListener('resize', onResize));
     @keydown="onKey"
   >
     <img v-if="orbImage" :src="orbImage" class="bbs-orb-img" alt="" draggable="false" />
-    <BrandMark v-else :size="Math.round(orbW * 0.94)" class="bbs-orb-brand" />
+    <BrandMark v-else :size="foxSize" class="bbs-orb-brand" />
   </div>
 </template>
 
@@ -269,5 +271,5 @@ onUnmounted(() => window.removeEventListener('resize', onResize));
     transition: none;
   }
 }
-.bbs-orb-brand{pointer-events:none}.bbs-orb.shape-bookmark .bbs-orb-brand{margin-bottom:12px}
+.bbs-orb-brand{pointer-events:none}.bbs-orb.shape-bookmark .bbs-orb-brand{margin-bottom:calc(var(--orb-icon-size, 22px) * .5)}
 </style>

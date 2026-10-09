@@ -124,7 +124,7 @@ const windowStyle = computed(() => {
 
             <!-- 题首 -->
             <header class="bbs-head">
-              <div class="bbs-brand"><BrandMark :size="32" /><div class="bbs-brand-copy"><span class="bbs-brand-name">棱镜宝书</span><span class="bbs-brand-tagline">PRISM BOOK</span></div></div>
+              <div class="bbs-brand"><BrandMark :size="30" /><div class="bbs-brand-copy"><span class="bbs-brand-name">棱镜宝书</span><span class="bbs-brand-tagline">PRISM BOOK</span></div></div>
               <div class="bbs-head-actions">
                 <span class="bbs-version">{{ PLUGIN_VERSION }}</span>
                 <button class="bbs-icon-btn" type="button" :title="`切换主题:${nextTheme.label}`" :aria-label="`切换主题:${nextTheme.label}`" @click="cycleTheme">
@@ -292,18 +292,18 @@ const windowStyle = computed(() => {
 }
 /* 轻量书脊式题首：品牌退后，让当前阅读内容成为视觉重心。 */
 .bbs-head { padding: 16px 28px; background: var(--bbs-bg); border-bottom: 1px solid var(--bbs-line); }
-.bbs-brand { gap: 9px; }
+.bbs-brand { gap: 10px; }
 .bbs-brand-copy { flex-direction: row; align-items: baseline; gap: 12px; }
-.bbs-brand-name { font-size: 16px; font-weight: 650; letter-spacing: .04em; }
-.bbs-brand-tagline { font-size: 9px; letter-spacing: .16em; }
+.bbs-brand-name { font-family: var(--bbs-font-reading); font-size: 17px; font-weight: 600; letter-spacing: .08em; }
+.bbs-brand-tagline { font-size: 9px; letter-spacing: .2em; }
 .bbs-icon-btn { background: transparent; border-radius: 50%; width: 40px; height: 40px; font-size: 17px; }
 .bbs-icon-btn:hover { background: var(--bbs-surface-2); }
 .bbs-version { border: 0; }
 @media(max-width:640px) {
   .bbs-head { padding: 0 16px 9px; border-bottom: 0; }
   .bbs-brand-copy { gap: 9px; }
-  .bbs-brand-name { font-size: 15px; }
-  .bbs-brand-tagline { font-size: 8px; letter-spacing: .13em; }
+  .bbs-brand-name { font-size: 16px; }
+  .bbs-brand-tagline { font-size: 8px; letter-spacing: .16em; }
   .bbs-grabber { height: 18px; }
   .bbs-grabber-bar { width: 30px; height: 3px; opacity: .65; }
 }
