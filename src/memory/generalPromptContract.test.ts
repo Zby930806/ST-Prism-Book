@@ -28,8 +28,12 @@ describe('v0.10 共享事实边界与冲突消除', () => {
   });
   it('检索重写也不扩大方位与目标的确定性', () => {
     expect(p.QUERY_REWRITE_SYSTEM).toContain('【空间事实边界】');
+    expect(p.QUERY_REWRITE_SYSTEM).toContain('目的地不等于已到达');
     expect(p.QUERY_REWRITE_SYSTEM).toContain('问题中也不得预设未经证实的归属、因果或已完成状态');
     expect(p.QUERY_REWRITE_TAIL).toContain('不将移动目的地当作已到达');
+    // 检索只用跟提问有关的几句，不再整段带摘要专用的空间规则。
+    expect(p.QUERY_REWRITE_SYSTEM).not.toContain(p.RULE_SPATIAL_EVIDENCE);
+    expect(p.QUERY_REWRITE_SYSTEM).not.toContain('摘要末尾');
   });
   it('地点建档不再允许以短期现场状态凑描述', () => {
     for (const rule of ['临时现场状态即使加了日期也不作为地点特征入档', '空间结构、用途或稳定特征',

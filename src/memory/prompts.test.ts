@@ -271,6 +271,15 @@ describe('relationship retention and departure protocol', () => {
     expect(MEMORY_BRIEFING_END).toContain('继续发展或转折');
     expect(MEMORY_BRIEFING_END).toContain('不要模仿压缩记录的句式');
   });
+
+  it('keeps the briefing end short while retaining each reminder', () => {
+    // 每次生成正文都会发并占注入预算:只留结论,但位置、计划、伤势、知情范围的提醒都要在。
+    expect(Array.from(MEMORY_BRIEFING_END).length).toBeLessThan(260);
+    for (const reminder of ['自然续写', '不要复述简报', '最后确认的位置可能已变', '不等于马上执行', '遵守其中的暂缓和前提',
+      '离场和时间流逝不是康复或恶化的证据', '人物只知道自己经历或得知的事', '文风跟随角色卡']) {
+      expect(MEMORY_BRIEFING_END).toContain(reminder);
+    }
+  });
 });
 
 describe.each(['detailed', 'concise'] as const)('prompt assembly (%s)', verbosity => {
@@ -637,5 +646,13 @@ describe('每楼摘要字数要求', () => {
       expect(buildResummaryPrompt({ ...args, level: 1 }).system).toContain(words);
       expect(buildResummaryPrompt({ ...args, content: 'x'.repeat(1000), level: 2 }).system).toContain(`summary 不得超过 ${max} 字`);
     }
+  });
+
+  it('不再要求「宁可明显短于上限」，调大摘要字数后可以写得更详细，仍不为凑字数填充', () => {
+    for (const text of [RULE_SUMMARY_COMPOSITION, buildSummaryPrompt(args).system]) {
+      expect(text).not.toContain('宁可明显短于上限');
+      expect(text).toContain('篇幅是上限而非填满任务');
+    }
+    expect(RULE_SUMMARY_WRITE).toContain('没有最低篇幅任务');
   });
 });

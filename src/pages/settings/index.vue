@@ -1012,7 +1012,7 @@ function goToSettingsGroup(id: string) {
           <span class="bbs-field-label">摘要字数</span>
           <input v-model.number="apiSettings.summaryMaxChars" class="bbs-input bbs-num" type="number" :min="SUMMARY_MAX_CHARS_MIN" :max="SUMMARY_MAX_CHARS_MAX" @change="onSummaryMaxCharsChange" />
         </label>
-        <p class="bbs-field-hint">要求每楼摘要不超过这么多字（含标点），信息少时模型会写得更短。这只是写给模型的要求：写超了照常保存，不会因此失败。默认 300，可填 {{ SUMMARY_MAX_CHARS_MIN }}–{{ SUMMARY_MAX_CHARS_MAX }}。只对内置的摘要提示词生效。</p>
+        <p class="bbs-field-hint">写进摘要提示词，要求模型生成每楼摘要时不超过这么多字（含标点），信息少时会写得更短。它只管模型怎么写，不限制保存：模型写超了、你手动改长了都照常保存。默认 300，可填 {{ SUMMARY_MAX_CHARS_MIN }}–{{ SUMMARY_MAX_CHARS_MAX }}。只对内置的摘要提示词生效。</p>
         <div class="bbs-num-row">
           <span class="bbs-field-label">字数档位</span>
           <BbsSelect v-model="apiSettings.verbosity" :options="VERBOSITY_OPTIONS" class="bbs-select-narrow" aria-label="字数档位" />

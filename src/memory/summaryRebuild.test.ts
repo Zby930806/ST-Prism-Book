@@ -103,6 +103,24 @@ describe('逐楼完整重建的生产入口', () => {
     expect(system).toContain('summary 不超过 520 字（含标点）');
     expect(system).not.toContain('最多 300 字符');
   });
+  it('请求顺序：任务说明和规则在前，角色卡、主角设定、世界书在后，方便服务商复用缓存', async () => {
+    const chat = [msg('原文', true)];
+    Object.assign(useChat(chat) as unknown as Record<string, unknown>, {
+      characters: [{ description: '角色卡描述' }], characterId: 0,
+      substituteParams: (s: string) => (s === '{{persona}}' ? '主角设定文本' : s),
+      getWorldInfoPrompt: async () => ({ worldInfoBefore: '世界书条目：雾港的规矩' }),
+    });
+    await batchBackfill({ regenerate: true });
+    const sent = vi.mocked(client.requestViaMainApi).mock.calls[0][0];
+    const at = (needle: string) => sent.findIndex(m => m.content.includes(needle));
+    expect(sent[0].content).toContain('【记忆整理任务说明】');
+    expect(at('【记录分工】')).toBe(1);
+    expect(at('【角色设定(角色卡设定')).toBeGreaterThan(1);
+    expect(at('【主角设定(用户操控')).toBeGreaterThan(at('【角色设定(角色卡设定'));
+    expect(at('【世界设定(世界书激活')).toBeGreaterThan(at('【主角设定(用户操控'));
+    expect(sent.findIndex(m => m.role === 'user')).toBeGreaterThan(at('【世界设定(世界书激活'));
+    expect(sent.at(-1)?.role).toBe('assistant');
+  });
   it('失败保留旧叶子和旧上层总结，停止后续楼层', async () => {
     const chat = [msg('一', true), msg('二', true)]; useChat(chat);
     memory.summaries.push({ id: 'old-l1', text: '旧上层总结', level: 1, auto: false, childIds: ['一', '二'], createdAt: 0 });

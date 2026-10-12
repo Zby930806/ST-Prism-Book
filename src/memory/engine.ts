@@ -1306,14 +1306,16 @@ async function summarizeFloorWork(
   const builtin = usesBuiltinSummary();
   const conditionBlock = builtin ? buildConditionPatchContext(stateBefore) : '';
   const { checklist, prefill } = buildSummaryThinking(ctx.name1);
+  // 越稳定的越靠前:任务说明、规则、角色卡、主角设定在同一个聊天里基本不变;世界书按本楼内容激活、每楼不同,
+  // 排在它们后面。这样支持前缀缓存的服务商能复用前面那段两三万字的规则,批量补摘省钱也更快。
   const messages: ChatMsg[] = [];
   const jb = taskContextPrompt();
   if (jb) messages.push({ role: 'system', content: jb });
+  messages.push({ role: 'system', content: prompt.system });
   if (charCard) messages.push({ role: 'system', content: buildCharCardSystem(charCard) });
   if (persona) messages.push({ role: 'system', content: buildPersonaSystem(persona) });
   if (worldInfo) messages.push({ role: 'system', content: buildWorldInfoSystem(worldInfo) });
   messages.push(
-    { role: 'system', content: prompt.system },
     ...(conditionBlock ? [{ role: 'system' as const, content: conditionBlock }] : []),
     { role: 'user', content: prompt.user },
     { role: 'system', content: checklist },

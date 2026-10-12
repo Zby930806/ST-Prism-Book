@@ -9,7 +9,6 @@ import { addSummary, appendOpToLatestLeaf, deleteLeafAt, deleteSummary, deleteSu
 import { apiSettings } from '@/api/settings';
 import { batchBackfill, batchState, cancelBatchBackfill, engineState, floorBackfillState, isAiFloor, resummarizeNow, summarizeFloor, summarizeSelected, syncHiddenNow } from '@/memory/engine';
 import { estimateInjectionTokenBreakdown, refreshInjection, type ViewNode } from '@/memory/inject';
-import { summaryMaxChars, usesBuiltinSummary } from '@/memory/prompts';
 import { compactTimeLabel, formatRange, splitTimeLabel } from '@/memory/timeTag';
 import { relativeTimeLabel, weekdayLabel } from '@/memory/timeRel';
 import { compatibilityState, convertLegacyMemory, derivedMeta, memory, memoryWriteIssue, recomputeDerived } from '@/memory/store';
@@ -862,19 +861,10 @@ type Editing =
 const editing = ref<Editing | null>(null);
 
 /**
- * 编辑框下的字数:逐楼摘要对照设置里的「摘要字数」(只是写给模型的要求,超出照样能保存);
- * 总结和自定义摘要模板只显示字数。按字符计,和提示词里「含标点」的算法一致。
+ * 编辑框下只显示字数,按字符计(含标点)。设置里的「摘要字数」是写给模型的提示词,不限制手动编辑,
+ * 所以这里不拿它比较、也不变色。
  */
-const editingCount = computed(() => {
-  const e = editing.value;
-  if (!e) return { text: '', over: false };
-  const n = Array.from(e.text.trim()).length;
-  if (e.kind !== 'leaf' || !usesBuiltinSummary()) return { text: `${n} 字`, over: false };
-  const target = summaryMaxChars();
-  return n > target
-    ? { text: `${n} 字，比「摘要字数」${target} 多 ${n - target} 字，照样能保存`, over: true }
-    : { text: `${n} 字 / 摘要字数 ${target}`, over: false };
-});
+const editingCount = computed(() => (editing.value ? `${Array.from(editing.value.text.trim()).length} 字` : ''));
 
 /** 该 id 是否已被任何总结的 childIds 收纳(= 展开视图里的深层行) */
 function isNested(id: string): boolean {
@@ -1623,7 +1613,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           <span class="bbs-modal-label">{{ editing.kind === 'comp' ? (editing.imported ? '旧总结内容' : '总结内容') : '摘要内容' }}</span>
           <textarea v-model="editing.text" class="bbs-input bbs-modal-textarea" rows="8"></textarea>
         </label>
-        <p class="bbs-field-hint bbs-edit-count" :class="{ 'is-over': editingCount.over }" aria-live="polite">{{ editingCount.text }}</p>
+        <p class="bbs-field-hint bbs-edit-count" aria-live="polite">{{ editingCount }}</p>
         <footer class="bbs-modal-foot">
           <button class="bbs-btn" type="button" @click="cancelEdit">取消</button>
           <button class="bbs-btn bbs-btn-primary" type="button" @click="saveEdit">保存</button>
@@ -2407,14 +2397,11 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
   line-height: 1.6;
   font-family: var(--bbs-font-sans);
 }
-/* 编辑框下的字数:右对齐、贴着输入框(抵掉弹窗的 14px 间距);超出摘要字数时换成提醒色,但不拦保存 */
+/* 编辑框下的字数:右对齐、贴着输入框(抵掉弹窗的 14px 间距),只是提示,不变色 */
 .bbs-modal .bbs-edit-count {
   margin: -10px 0 0;
   text-align: right;
   font-variant-numeric: tabular-nums;
-}
-.bbs-modal .bbs-edit-count.is-over {
-  color: var(--bbs-warning);
 }
 
 /* ============ 触屏:悬念簿动作键常显但低调(摘要卡片动作键在 base.css 处理) ============ */
