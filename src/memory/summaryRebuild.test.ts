@@ -84,28 +84,36 @@ describe('逐楼完整重建的生产入口', () => {
     expect(chat[0].extra?.bbs_leaf).toMatchObject({ id: '借图与约定', createdAt: 1 });
     expect(chat.every(m => m.extra?.bbs_leaf?.text !== '旧摘要')).toBe(true);
   });
-  it('超长首答带纠错重试，保持 assistant 预填最后，不截断存储', async () => {
+  it('超出摘要字数的回复直接保存：不重试、不截断，也不留旧摘要', async () => {
     settings.apiSettings.summaryMaxRetries = 1;
+    settings.apiSettings.summaryMaxChars = 300;
     const chat = [msg('原文', true)]; useChat(chat);
-    vi.mocked(client.requestViaMainApi).mockResolvedValueOnce(response('长'.repeat(301))).mockResolvedValueOnce(response('压缩后的完整短句。'));
+    const long = '长'.repeat(301) + '，句子写完。';
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(response(long));
     expect(await batchBackfill({ regenerate: true })).toMatchObject({ done: 1 });
-    const retry = vi.mocked(client.requestViaMainApi).mock.calls[1][0];
-    expect(retry.at(-1)?.role).toBe('assistant');
-    expect(retry.at(-2)?.content).toContain('超过 300 字符');
-    expect(retry.some(m => m.content.includes('长'.repeat(301)))).toBe(false);
-    expect(chat[0].extra?.bbs_leaf?.text).toBe('压缩后的完整短句。');
+    expect(client.requestViaMainApi).toHaveBeenCalledTimes(1);
+    expect(chat[0].extra?.bbs_leaf?.text).toBe(long);
+    expect(engineState.lastError).toBe('');
+  });
+  it('摘要字数写进请求，改设置后下一次请求跟着变', async () => {
+    const chat = [msg('原文', true)]; useChat(chat);
+    settings.apiSettings.summaryMaxChars = 520;
+    await batchBackfill({ regenerate: true });
+    const system = vi.mocked(client.requestViaMainApi).mock.calls[0][0].filter(m => m.role === 'system').map(m => m.content).join('\n');
+    expect(system).toContain('summary 不超过 520 字（含标点）');
+    expect(system).not.toContain('最多 300 字符');
   });
   it('失败保留旧叶子和旧上层总结，停止后续楼层', async () => {
     const chat = [msg('一', true), msg('二', true)]; useChat(chat);
     memory.summaries.push({ id: 'old-l1', text: '旧上层总结', level: 1, auto: false, childIds: ['一', '二'], createdAt: 0 });
     const oldSummaries = JSON.stringify(memory.summaries);
     const before = JSON.stringify(chat);
-    vi.mocked(client.requestViaMainApi).mockResolvedValue(response('长'.repeat(301)));
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(JSON.stringify({ summary: '漏了状态清单的回复。' }));
     expect(await batchBackfill({ regenerate: true })).toEqual({ done: 0, total: 2, cancelled: false });
     expect(client.requestViaMainApi).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(chat)).toBe(before);
     expect(JSON.stringify(memory.summaries)).toBe(oldSummaries);
-    expect(engineState.lastError).toContain('超过 300');
+    expect(engineState.lastError).toContain('stateChanges');
   });
   it('取消在楼层边界生效，保留已成功结果和未处理旧叶子', async () => {
     const chat = [msg('一', true), msg('二', true)]; useChat(chat);

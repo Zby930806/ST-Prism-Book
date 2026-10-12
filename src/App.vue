@@ -124,7 +124,7 @@ const windowStyle = computed(() => {
 
             <!-- 题首 -->
             <header class="bbs-head">
-              <div class="bbs-brand"><BrandMark :size="30" /><div class="bbs-brand-copy"><span class="bbs-brand-name">棱镜宝书</span><span class="bbs-brand-tagline">PRISM BOOK</span></div></div>
+              <div class="bbs-brand"><BrandMark :size="36" /><div class="bbs-brand-copy"><span class="bbs-brand-name">棱镜宝书</span><span class="bbs-brand-tagline">PRISM BOOK</span></div></div>
               <div class="bbs-head-actions">
                 <span class="bbs-version">{{ PLUGIN_VERSION }}</span>
                 <button class="bbs-icon-btn" type="button" :title="`切换主题:${nextTheme.label}`" :aria-label="`切换主题:${nextTheme.label}`" @click="cycleTheme">
@@ -268,7 +268,7 @@ const windowStyle = computed(() => {
 }
 
 .bbs-brand{display:flex;align-items:center;gap:12px;min-width:0}.bbs-brand-copy{display:flex;flex-direction:column;gap:2px;min-width:0}.bbs-brand-tagline{font-size:10px;letter-spacing:.06em;color:var(--bbs-ink-muted)}.bbs-brand-tagline span{margin:0 4px;color:var(--bbs-ink-muted)}.bbs-head-actions{align-items:center}.bbs-version{font-family:var(--bbs-font-mono);font-size:10px;color:var(--bbs-ink-muted);border:1px solid var(--bbs-line);border-radius:var(--bbs-radius-pill);padding:3px 8px;margin-right:6px}
-@media(max-width:640px){.bbs-brand{gap:7px}.bbs-brand :deep(img){width:40px;height:40px}.bbs-brand-name{font-size:17px}.bbs-brand-tagline{font-size:9px;letter-spacing:0}.bbs-version{display:none}.bbs-head-actions{gap:5px}.bbs-icon-btn{width:38px;height:38px}.bbs-head{background:var(--bbs-bg);padding:0 14px 10px;}.bbs-grabber{height:20px}}
+@media(max-width:640px){.bbs-brand{gap:7px}.bbs-brand-name{font-size:17px}.bbs-brand-tagline{font-size:9px;letter-spacing:0}.bbs-version{display:none}.bbs-head-actions{gap:5px}.bbs-icon-btn{width:38px;height:38px}.bbs-head{background:var(--bbs-bg);padding:0 14px 10px;}.bbs-grabber{height:20px}}
 /* 移动端不再滑动整张长内容页或延迟退场；不覆盖 windowStyle 的拖动位移。
    桌面减少动效同样直接到终态，避免 0.001ms 的循环/延迟仍被调度。 */
 @media (max-width: 640px), (hover: none) and (pointer: coarse), (prefers-reduced-motion: reduce) {

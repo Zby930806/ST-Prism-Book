@@ -160,8 +160,22 @@ export interface UiPrefs {
   orbSize: number;
 }
 
-/** 字数详尽档位:detailed=详细(默认),concise=精简(摘要/总结/二次总结字数一并降低)。仅影响内置模板。 */
+/** 字数详尽档位:detailed=详细(默认),concise=精简(总结/二次总结字数一并降低)。仅影响内置模板。 */
 export type Verbosity = 'detailed' | 'concise';
+
+/** 每楼摘要字数要求(含标点)的默认值与可设范围。 */
+export const SUMMARY_MAX_CHARS_DEFAULT = 300;
+export const SUMMARY_MAX_CHARS_MIN = 50;
+export const SUMMARY_MAX_CHARS_MAX = 2000;
+
+/**
+ * 规整每楼摘要字数要求:钳到可设范围内的整数。
+ * 缺失或非法时按档位推导(精简 150,其余 300),与旧版内置上限一致,老用户升级后篇幅不变。
+ */
+export function normalizeSummaryMaxChars(value: unknown, verbosity: Verbosity = 'detailed'): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return verbosity === 'concise' ? 150 : SUMMARY_MAX_CHARS_DEFAULT;
+  return Math.min(SUMMARY_MAX_CHARS_MAX, Math.max(SUMMARY_MAX_CHARS_MIN, Math.round(value)));
+}
 
 /**
  * 注入设置:各状态块是否注入**主模型**(生成正文的请求)。
@@ -198,7 +212,7 @@ export interface ApiSettings {
   taskContextMode: 'default' | 'custom' | 'disabled';
   /** 主对话四类记忆槽的总估算token预算,0=不限;不是模型精确token数。 */
   memoryBudgetTokens: number;
-  /** 内置模板的字数详尽档位:详细/精简。自定义模板不受影响。 */
+  /** 内置模板的字数详尽档位:详细/精简,管总结与二次总结的篇幅。自定义模板不受影响。 */
   verbosity: Verbosity;
   /** 向量记忆配置 */
   vector: VectorSettings;
@@ -250,6 +264,8 @@ export interface ApiSettings {
   recentResolvedPlansCount: number;
   /** 摘要/总结失败(请求报错或 JSON 解析失败)的最大重试次数。0=不重试;默认 1(最多再试一次)。 */
   summaryMaxRetries: number;
+  /** 每楼摘要字数要求(含标点),写进内置摘要提示词。只是给模型的要求:写超了照常保存,不因此判失败。 */
+  summaryMaxChars: number;
   /** @deprecated 仅兼容旧设置，完整记忆批处理已不再合并多楼请求。 */
   batchMaxChars: number;
   /** @deprecated 仅兼容旧设置，完整记忆批处理已不再合并多楼请求。 */
@@ -373,6 +389,7 @@ function defaults(): ApiSettings {
     higherResummaryThreshold: 3,
     recentResolvedPlansCount: 5,
     summaryMaxRetries: 1,
+    summaryMaxChars: SUMMARY_MAX_CHARS_DEFAULT,
     batchMaxChars: 30000,
     batchMaxFloors: 10,
     customStripTags: [],
@@ -476,6 +493,8 @@ function normalize(raw: unknown): ApiSettings {
   merged.channels = (Array.isArray(merged.channels) ? merged.channels : []).map(normalizeChannel);
   // 字数档位:仅两个合法值,旧数据缺失/非法回退详细(= 老用户行为不变)
   merged.verbosity = merged.verbosity === 'concise' ? 'concise' : 'detailed';
+  // 每楼摘要字数要求:旧数据没有这个字段时按原档位推导(精简 150,其余 300),升级后篇幅不变
+  merged.summaryMaxChars = normalizeSummaryMaxChars((raw as Partial<ApiSettings>).summaryMaxChars, merged.verbosity);
   // 叶子层保留条数:非负整数,缺失/非法回退默认 3(0=旧行为攒够即全压)
   merged.leafKeepRecent =
     Number.isFinite(merged.leafKeepRecent) && merged.leafKeepRecent >= 0
@@ -637,6 +656,7 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.higherResummaryThreshold = src.higherResummaryThreshold;
   target.recentResolvedPlansCount = src.recentResolvedPlansCount;
   target.summaryMaxRetries = src.summaryMaxRetries;
+  target.summaryMaxChars = src.summaryMaxChars;
   target.batchMaxChars = src.batchMaxChars;
   target.batchMaxFloors = src.batchMaxFloors;
   target.customStripTags = src.customStripTags;

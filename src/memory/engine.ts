@@ -1319,7 +1319,6 @@ async function summarizeFloorWork(
     { role: 'system', content: checklist },
     { role: 'assistant', content: prefill },
   );
-  const maxChars = builtin ? summaryMaxChars() : undefined;
   assertUnchanged();
   options.onRequestStart?.();
   const delta = await sendAndParse(request => { assertUnchanged(); return sender.send(request); }, messages, raw => {
@@ -1328,7 +1327,6 @@ async function summarizeFloorWork(
       if (unfinished) throw unfinished;
     }
     const d = parseSummaryResponse(raw, {
-      maxChars,
       requireStateChanges: builtin,
       sourceContent: content,
       sourceTexts: targets.map(i => cleanBody(chat[i].mes)),
@@ -1348,7 +1346,8 @@ async function summarizeFloorWork(
       d.timeStart = start || end || explicit || priorTime || initialStoryTime();
       d.timeEnd = end || start || explicit || priorTime || initialStoryTime();
     }
-    console.log('[棱镜宝书] 摘要校验通过:', { floor: aiFloor, chars: Array.from(d.summary).length, fields: Object.keys(d) });
+    // 字数要求只写在提示词里;写超了照常保存,这里只把字数记进日志方便排查。
+    console.log('[棱镜宝书] 摘要校验通过:', { floor: aiFloor, chars: Array.from(d.summary).length, ...(builtin ? { target: summaryMaxChars() } : {}), fields: Object.keys(d) });
     return d;
   }).catch((error: unknown) => {
     if (error instanceof SummaryResponseError) {

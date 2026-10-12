@@ -4,21 +4,20 @@ import { parseSummaryResponse, SummaryResponseError } from './summaryResponse';
 import type { MemPlan } from './types';
 
 const plans: MemPlan[] = [{ id: 'plan:stable', kind: 'plan', content: '还图', status: 'open', createdAt: 0 }];
-const parse = (data: unknown, maxChars = 300, requireStateChanges = true) => parseSummaryResponse(JSON.stringify(data), {
-  maxChars, requireStateChanges, finalize: d => finalizeDelta(d, plans),
+const parse = (data: unknown, requireStateChanges = true) => parseSummaryResponse(JSON.stringify(data), {
+  requireStateChanges, finalize: d => finalizeDelta(d, plans),
 });
 
 describe('摘要结果合同', () => {
-  it.each([150, 300])('按 Unicode 字符计数，边界 %i 不截句', limit => {
-    const summary = '字'.repeat(limit - 2) + '😀。';
-    expect(parse({ summary, stateChanges: [] }, limit).summary).toBe(summary);
-    expect(() => parse({ summary: summary + '。', stateChanges: [] }, limit)).toThrow('超过');
+  it.each([150, 300, 2000])('篇幅不是保存门槛：超出 %i 字的摘要原样返回，不截句', limit => {
+    const summary = '字'.repeat(limit) + '😀，后半句仍保留。';
+    expect(parse({ summary, stateChanges: [] }).summary).toBe(summary);
   });
   it('内置必须对账，自定义未采用新合同时保持兼容', () => {
     expect(() => parse({ summary: '原文。' })).toThrow(SummaryResponseError);
-    expect(parse({ summary: '原文。' }, 300, false).summary).toBe('原文。');
-    expect(parse({ summary: '原文。', npcs: { add: [{ title: '无名角色' }] } }, 300, false).summary).toBe('原文。');
-    expect(() => parse({ summary: '原文。', stateChanges: ['npcs'] }, 300, false)).toThrow('不一致');
+    expect(parse({ summary: '原文。' }, false).summary).toBe('原文。');
+    expect(parse({ summary: '原文。', npcs: { add: [{ title: '无名角色' }] } }, false).summary).toBe('原文。');
+    expect(() => parse({ summary: '原文。', stateChanges: ['npcs'] }, false)).toThrow('不一致');
   });
   it.each([
     { stateChanges: ['npcs'] },
@@ -48,17 +47,19 @@ describe('摘要结果合同', () => {
 
 
 describe('v0.4 篇幅与纠错边界', () => {
-  it.each([150, 300])('短于参考范围仍可落叶,保留完整状态更新: %i', limit => {
+  it('短摘要照常落叶，保留完整状态更新', () => {
     const d = parse({ summary: '小A已收回地图,还图约定完成。', stateChanges: ['items', 'plans'],
-      items: { remove: ['地图'] }, plans: { resolve: [{ id: 'p1', outcome: 'done' }] } }, limit);
+      items: { remove: ['地图'] }, plans: { resolve: [{ id: 'p1', outcome: 'done' }] } });
     expect(d.summary).toBe('小A已收回地图,还图约定完成。');
     expect(finalizeDelta(d, plans).items?.remove).toEqual(['地图']);
     expect(finalizeDelta(d, plans).plans?.resolve).toEqual([{ id: 'plan:stable', outcome: 'done' }]);
   });
-  it('超长纠错要求删细节而非挤电报,仍拒绝截句或删状态', () => {
-    const attempt = () => parse({ summary: '字'.repeat(301), stateChanges: [] });
-    for (const phrase of ['先删不影响后续的细节', '完整短句', '因果路径', '不截断句子或删掉状态更新']) {
-      expect(attempt).toThrow(phrase);
-    }
+  it('超长摘要同样保留状态更新，不因篇幅丢操作', () => {
+    const summary = '小A收回地图，还图约定完成。'.repeat(40);
+    const d = parse({ summary, stateChanges: ['items', 'plans'],
+      items: { remove: ['地图'] }, plans: { resolve: [{ id: 'p1', outcome: 'done' }] } });
+    expect(d.summary).toBe(summary);
+    expect(finalizeDelta(d, plans).items?.remove).toEqual(['地图']);
+    expect(finalizeDelta(d, plans).plans?.resolve).toEqual([{ id: 'plan:stable', outcome: 'done' }]);
   });
 });

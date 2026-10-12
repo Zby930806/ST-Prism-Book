@@ -144,7 +144,7 @@
 
 总上下文 = 插件注入 + 窗口内正文 + 用户预设(prompt)+ 激活的世界书 + 聊天模板包装。若插件注入占比很小而总 token 仍高,大头在预设/世界书/正文,应调整这些而非插件;反之才调插件。
 
-**插件侧可调项**:字数档位改「精简」(摘要/总结变短);向量召回关闭或调低条数;变量/状态模板精简;调低总结阈值使更早合并高层总结(一条总结代替多条叶子)。
+**插件侧可调项**:调小「摘要字数」(每楼摘要变短)、字数档位改「精简」(总结变短);向量召回关闭或调低条数;变量/状态模板精简;调低总结阈值使更早合并高层总结(一条总结代替多条叶子)。
 
 ---
 
@@ -469,7 +469,7 @@
 
 ### Q:自定义提示词有哪些宏?
 
-摘要模板支持 `{{user}}` `{{char}}` `{{history_block}}` `{{state_time}}` `{{state_location}}` `{{protagonist_block}}` `{{items_block}}` `{{itemlog_block}}` `{{scenes_block}}` `{{npcs_block}}` `{{plans_block}}` `{{resolved_plans_block}}` `{{content}}` `{{time_field}}` `{{time_rule}}` `{{summary_words}}` `{{vars_state_block}}` `{{vars_field}}` `{{vars_rule}}` `{{vars_block}}` `{{varlog_block}}` 等。总结模板有 `{{resummary_words}}`、`{{target}}`、`{{content}}`。字数档位(详细/精简)由设置切换。
+摘要模板支持 `{{user}}` `{{char}}` `{{history_block}}` `{{state_time}}` `{{state_location}}` `{{protagonist_block}}` `{{items_block}}` `{{itemlog_block}}` `{{scenes_block}}` `{{npcs_block}}` `{{plans_block}}` `{{resolved_plans_block}}` `{{content}}` `{{time_field}}` `{{time_rule}}` `{{summary_max_chars}}` `{{summary_words}}` `{{vars_state_block}}` `{{vars_field}}` `{{vars_rule}}` `{{vars_block}}` `{{varlog_block}}` 等。`{{summary_max_chars}}` 是设置里的「摘要字数」,`{{summary_words}}` 是它的一半到全额(如 150-300)。总结模板有 `{{resummary_words}}`、`{{target}}`、`{{content}}`,篇幅随字数档位(详细/精简)切换。
 
 ### Q:批量补摘用自定义模板吗?
 
@@ -618,7 +618,8 @@ window.addEventListener('st-baibai-book:ready', () => { ... }, { once: true });
 |---|---|---|
 | 自动摘要 autoSummaryEnabled | 开 | 一键开关:自动隐藏 + 正文时间标签 + 积压拦截(不再各自独立开关) |
 | 仅注入剧情摘要 summaryOnlyMode | 关 | 兼容角色卡自带变量系统:照常分析/保存/展示状态,但不注入主模型、不写正文旁注 |
-| 字数档位 verbosity | 详细 | 内置模板的详细/精简;自定义模板不受影响 |
+| 摘要字数 summaryMaxChars | 300 | 每楼摘要不超过多少字(含标点),写进内置摘要提示词;只是要求,写超了照常保存。旧设置里没有这一项时,原来选「精简」的按 150 |
+| 字数档位 verbosity | 详细 | 内置模板里总结与二次总结的篇幅(详细/精简);自定义模板不受影响 |
 | keepRecent | 3 | 保留最近 N 条 AI 消息发全文(滑动窗口);更早的自动摘要并隐藏 |
 | leafBatchThreshold | 12 | 叶子(L0)攒到 N 条压成一条 L1 总结(0=关闭) |
 | leafKeepRecent | 3 | L0→L1 时保留最近 N 条叶子不压,防注入断崖(0=攒够全压) |
@@ -667,7 +668,7 @@ window.addEventListener('st-baibai-book:ready', () => { ... }, { once: true });
 
 | 设置 | 默认 | 作用 |
 |---|---|---|
-| 摘要/总结/二次总结/破限/时间标签/向量重写 | 空=内置默认 | 覆盖对应内置模板;留空用内置。字数档位只影响内置模板 |
+| 摘要/总结/二次总结/破限/时间标签/向量重写 | 空=内置默认 | 覆盖对应内置模板;留空用内置。摘要字数和字数档位只影响内置模板(自定义模板里写了对应的宏也会填入) |
 
 ### 向量记忆
 

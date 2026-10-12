@@ -3,7 +3,10 @@ import { extractJsonObject } from './json';
 import { ConditionPatchError, materializeConditionPatches, type ConditionContext } from './conditionPatch';
 import type { StoredDelta, SummaryDelta } from './types';
 
-/** 只校验结果合同，不从摘要关键词反推人物/物品/计划变更。 */
+/**
+ * 只校验结果合同，不从摘要关键词反推人物/物品/计划变更。
+ * 篇幅不在这里拒收：字数要求写在提示词里，模型数不准字数，写超了照常保存，不因此让整楼失败。
+ */
 export class SummaryResponseError extends Error {}
 
 const stateKeys = ['location', 'locationPath', 'sceneFocus', 'protagonist', 'items', 'scenes', 'npcs', 'plans', 'lifeDetails', 'vars'] as const;
@@ -11,7 +14,6 @@ const groups = ['items', 'scenes', 'npcs', 'plans', 'lifeDetails'] as const;
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 
 export function parseSummaryResponse(raw: string, options: {
-  maxChars?: number;
   sourceContent?: string;
   /** 未附来源编号/提示的原消息，每条独立匹配，不允许跨消息拼接。 */
   sourceTexts?: readonly string[];
@@ -24,12 +26,6 @@ export function parseSummaryResponse(raw: string, options: {
     throw new SummaryResponseError('摘要结果必须是根对象，且包含非空字符串 summary。');
   }
   const summary = parsed.summary.trim();
-  const length = Array.from(summary).length;
-  if (options.maxChars && length > options.maxChars) {
-    throw new SummaryResponseError(
-      'summary 共 ' + length + ' 字符，超过 ' + options.maxChars + ' 字符上限（含标点）。请先删不影响后续的细节、合并重复约定，再用完整短句重写；保留关键条件、否定、说话人、因果路径与结果，不靠删虚词堆成电报。完整重写 JSON，不截断句子或删掉状态更新。',
-    );
-  }
   if ('delta' in parsed || 'updates' in parsed) {
     throw new SummaryResponseError('状态更新必须与 summary 并列放在根对象，不要包进 delta 或 updates。');
   }

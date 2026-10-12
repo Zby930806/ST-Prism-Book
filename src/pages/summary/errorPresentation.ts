@@ -24,8 +24,6 @@ function validationReason(error: string): string {
   if (error.includes('locationEvidence') || error.includes('定位')) {
     return error.includes('不匹配') ? '角色位置的引用与本楼正文不一致' : '角色位置缺少本楼正文依据';
   }
-  const length = error.match(/summary 共 (\d+) 字符，超过 (\d+) 字符上限/);
-  if (length) return `摘要超出字数上限（${length[1]} / ${length[2]} 字）`;
   if (error.includes('items.add.qty')) return '物品数量写得不明确';
   if (error.includes('摘要结果必须是根对象')) return '模型没有按要求输出摘要 JSON（可能是拒答，或只写了说明文字）';
   if (error.includes('stateChanges')) return '状态清单与实际写出的更新不一致';

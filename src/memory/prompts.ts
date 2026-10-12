@@ -15,7 +15,7 @@
  */
 
 import { NPC_LOCATION_EVIDENCE_PROTOCOL } from './npcLocationEvidence';
-import { apiSettings, type Verbosity } from '@/api/settings';
+import { apiSettings, normalizeSummaryMaxChars, type Verbosity } from '@/api/settings';
 import { fmtLifeDetail } from './lifeDetails';
 import { fmtNpcSummaryList, NPC_AFFINITY_FIELDS, type NpcSummaryView } from './npcRelations';
 import { RULE_COMPLETE_TIME_ANCHOR } from './timeTag';
@@ -44,8 +44,8 @@ export const SUMMARY_MACROS: PromptMacro[] = [
   { token: '{{vars_block}}', desc: '自定义变量当前状态(JSON)' },
   { token: '{{varlog_block}}', desc: '变量含义 + 变化规则(合并)' },
   { token: '{{content}}', desc: '本轮待摘要的对话正文' },
-  { token: '{{summary_max_chars}}', desc: '内置摘要字符上限（含标点）' },
-  { token: '{{summary_words}}', desc: '摘要目标字数范围(随详细/精简档位变化)' },
+  { token: '{{summary_max_chars}}', desc: '每楼摘要字数要求（设置里的「摘要字数」，含标点）' },
+  { token: '{{summary_words}}', desc: '摘要参考字数范围(「摘要字数」的一半到全额)' },
 ];
 
 /** 总结(压缩)提示词可用的宏 */
@@ -117,17 +117,17 @@ export const RULE_ITEMS = `═══ 【物品规则】(items 字段,严格筛�
   ✦ 物品状态只能因本回合明确描写的事件改变。
   ✦ 本回合未提及的物品 → 不写任何 items 指令,保持参考状态不变。
   ✦ 禁止脑补物品"恢复""补充""自动出现"。
-【严禁重复结算(重要)】上方【现有物品】是结算到此刻的当前快照,【近期物品变动】是已经应用过的历史记录。
+【严禁重复结算(重要)】材料中的【现有物品】是结算到此刻的当前快照,【近期物品变动】是已经应用过的历史记录。
   ✦ 这些变动都已生效、已反映在现有数量里,绝不能再补一次。本任务基准是目标楼之前的状态,重摘仍从同一基准计算本楼一次,不要把目标楼旧旁注当作已结算而漏记本楼真实事件。
   ✦ 历史旁注、复制的变动格式和对旧变动的复述都不是本轮新事件;只依据本轮叙事中的实际行为。正文AI偶尔仿写物品变动记录也不能据此改库存;不要在 summary 中附加物品变动记录或旁注标签。
   ✦ 只有本楼新事件使数量、归属、保管位置或可用状态确有变化才写 items;获取/转出/消耗与寄存/取回/修复都按对应操作处理。新增准入不妨碍更新已有条目。
   ✦ 典型陷阱:上一段已把"解药 3→2",本段正文若没有再次饮用的明文描写,就保持 2,禁止再 update 成 1。
   ✦ 对照【近期物品变动】核对事件而非只核对物品名:同一次旧消耗不再处理;本楼若明确再次使用同名物品,是新的消耗,按本楼之前的数量结算。
-【匹配】update/remove 必须用上方【现有物品】里的原名精确匹配。
+【匹配】update/remove 必须用【现有物品】里的原名精确匹配。
 【随身 / 存放地点(carried / location)】用于省 token:只有"随身"或"在当前所在地"的物品才会发给后续剧情,存在别处的暂不展开。
   ✦ 默认随身:角色拿在身上、随身携带的物品,carried 省略即可(等于随身),不必写 location。
   ✦ 明确寄存:物品被**明确留在某地点**(放回家中、存进宝库、藏在树洞、寄存柜台)→ 写 carried:false 且 location 填那个地点。
-  ✦ location 命名务必复用上方【当前地点】或正文里出现的地名原文(如当前在"城西客栈"就写"城西客栈"),不要另造叫法,否则系统无法判断物品是否在身边。
+  ✦ location 命名务必复用材料中的【当前地点】或正文里出现的地名原文(如当前在"城西客栈"就写"城西客栈"),不要另造叫法,否则系统无法判断物品是否在身边。
   ✦ 移动物品:角色把存放的东西取回随身 → update 该物品 carried:true;把随身的东西放下/寄存某处 → update carried:false + location。角色仅仅移动位置、没动具体物品时,不要改物品的 carried/location。
   ✦ 寄存物品转移(A→B):某件**已寄存**的物品被从一处挪到另一处(仍非随身,如宝箱从地窖搬上马车、解药从甲房移到乙房,或被他人带去别处)→ update 该物品 location 改成**新地点**(carried 仍为 false)。物品换了地方却不更新 location,系统会一直以为它在旧处——这是常见漏更新点,务必盘到。
   ✦ 新获且明确携带的物品可省略 carried(默认随身);不凭空安排寄存地。已有条目去向不明时省略 carried/location,保持最后记录,不能用默认随身覆盖旧存放状态。`;
@@ -149,8 +149,8 @@ export const RULE_SCENES = `═══ 【场景/地点规则】(scenes 字段,�
   ✦ locationPath 只表示当下所属的已知节点,不是出发地、目的地或经过路径。细处能确认归属才锚定已知上级;方向词不能用来猜父节点。
   ✦ 改了 location 同步 locationPath:能确认归属就给完整已知路径,无法对应已知节点则给 [],清除旧锚点。在途且无法确认所属节点时给 [],不能因为暂时没有新节点便沿用上一站。`;
 
-/** 主角与 NPC 共用:临时状态需要保留,但不固化到外貌。 */
-export const RULE_HEALTH_STATE = `【临时伤势与恢复证据】
+/** 主角与 NPC 共用:临时状态需要保留,但不固化到外貌。全文只在主角规则里出现一次,NPC 规则引用它。 */
+export const RULE_HEALTH_STATE = `【临时伤势与恢复证据】(主角与 NPC 通用)
 - 临时不等于不重要:受伤、治疗、活动限制及影响行动的症状记入 condition;与伤情相关的绷带、夹板一并写在 condition,不写固定外貌或普通着装。稳定体貌未知就省略,不要用伤势填空;只有明确永久或伤后遗留的特征才进入固定外貌。
 - 已记录的伤势在未提及、离场、重逢未谈伤情、时间跳跃或超过预计休养天数时均保留,没有新证据就省略 condition,不要清空、宣告康复或猜测恶化。记录是最后确认的伤情,不是断言离场期间一直如此;“自述还需休养几天”保留为估计,不是自动失效时间。闪回中的健康不能覆盖当前伤势。
 - 每次更新前,对照旧记录中的伤处、症状/固定措施、活动限制和休养估计;本轮只新增休养估计,不能挤掉尚无解除证据的活动限制。收到【伤情局部更新协议】时,已有伤情只用 conditionPatch:新估计用 add,旧估计或伤情有明确变化才 replace 对应编号,不重写全文。未指定旧片段由程序保留。
@@ -215,8 +215,7 @@ ${NPC_LOCATION_EVIDENCE_PROTOCOL}
 ${RULE_NPC_AFFINITY}
   ┃ 即时层(他现在怎么样,会变,覆盖型,鼓励跟剧情刷新):
   ✦ outfit:**当前着装**。与 desc 分离正是为了解决「角色一辈子不换衣服」——**门槛低**:正文一旦明确描写换装、更衣、衣物被弄脏/撕破/血染/打湿,就 update outfit 写出当前完整穿着。它是最新有证据的快照;若换装或受伤本身构成关键事件,summary 仍保留其因果,不重复堆列整套衣物。
-  ✦ condition:**当前状态/健康**(受伤、疲惫、中毒、醉酒、虚弱等);首次没有异常可省略,已有伤势按恢复证据更新,不可因本轮未提就清空。
-${RULE_HEALTH_STATE}
+  ✦ condition:**当前状态/健康**(受伤、疲惫、中毒、醉酒、虚弱等);首次没有异常可省略,已有伤势按恢复证据更新,不可因本轮未提就清空。伤势的记录、保留与局部更新按上方【临时伤势与恢复证据】,与主角同一标准。
 【外貌、着装与伤情分开】「黑色长发、左眉留有永久伤疤」→ desc;「今天穿红斗篷、佩长剑」→ outfit;「手臂受伤,夹板固定,暂不能提重物」→ condition。刀鞘、佩刀等当下装备不属于固定外貌。
 【纠正错填外貌】若既有 desc 混入绷带、临时伤势或当下装备,update desc 只保留有依据的稳定体貌;若没有稳定体貌可留,明确输出 desc:"" 清除错填。desc 省略=保持,空字符串=明确清空。清理 desc 不代表伤势康复,也不能仅凭旧 desc 把已痊愈伤势重新写回 condition;迁入即时层须与已有状态及本轮证据相容,不臆造状态。
 
@@ -226,7 +225,7 @@ ${RULE_HEALTH_STATE}
   ✦ 主要角色按完整档案候选进入后续记忆(不受在场与否影响,但仍受注入预算约束),所以对它们**重点维护即时层**(outfit/condition/location),title 给一句帮定位即可,desc/personality 可省。
   ✦ 不要滥标:绝大多数 NPC 是配角,important 省略即可;只有真正的核心主演才标。
 【随行 / 所在地(follow / location)—— 省 token 核心】只有「随行」或「在当前所在地」的 NPC 才会把完整信息发给后续剧情,其他地方的 NPC 只发名字+身份。
-  ✦ 定点(默认):NPC 待在某地点 → location 填那个地点(复用上方【当前地点】或正文地名原文),follow 省略即可。
+  ✦ 定点(默认):NPC 待在某地点 → location 填那个地点(复用材料中的【当前地点】或正文地名原文),follow 省略即可。
   ✦ 随行:NPC 作为同伴**跟随主角一起行动/赶路**(队友、随从、暂时同行者)→ follow:true(此时不必写 location,随主角移动;**也不要写 location:""**——空串只表示所在不明,不是“没有地点”)。
   ✦ 移动 NPC:某 NPC 加入队伍同行 → update follow:true;同伴离队留在某地 → update follow:false + location 填留下的地点;NPC 自己从一地去了另一地 → update location 改成新地点。
   ✦ 离场但去向未写明(正文只写告别/离开场景,没说要去哪)→ update follow:false + location 填空字符串 ""(表示所在不明,系统**不再**视为在场);绝不能保留旧地点冒充还在原处。**离队必须写 follow:false**:系统绝不会仅凭空 location 取消随行,只写 location:"" 仍按随行处理。之后正文说明去向时再 update location 填新地点;重新同行 → follow:true。
@@ -241,7 +240,7 @@ ${RULE_HEALTH_STATE}
 主要角色与配角使用同一事实标准:没有新证据时不得推演位置、换装、痊愈或恶化。旧快照是最后确认记录,不是保证持续到现在。
 跨场景、明确跳时后,未再次确认的位置只能作历史参考。再次被提及不等于再次在场;重逢只更新此次明写的状态,不得靠楼层数猜经过多久。
 【退场(remove)】NPC 永久退场(死亡、彻底离开剧情且不会再出现)才 remove;只是暂时分开、去了别处用 location/follow 表达,不要 remove。
-【复用已有,严禁重复】上方【已登场NPC】是已记录名册。同一角色务必复用既有名字,不要换个叫法再记一遍;已在名册里且无变化 → 不输出 npcs。`;
+【复用已有,严禁重复】材料中的【已登场NPC】是已记录名册。同一角色务必复用既有名字,不要换个叫法再记一遍;已在名册里且无变化 → 不输出 npcs。`;
 
 /** 互动局势卡规则(sceneFocus 字段)。 */
 export const RULE_SCENE_FOCUS = `═══ 【互动局势卡规则】(sceneFocus 字段,覆盖型单对象) ═══
@@ -262,9 +261,9 @@ export const RULE_LIFE_DETAILS = `═══ 【生活小档案规则】(lifeDeta
 记录**主角及主要角色**的偏好/习惯/近期个人状态,帮写作 AI 在相关时自然贴合;不扩展到路人或一次性配角。
 【所属人物必填】每条 add 必须带 subject:主角固定写字面值 "user"(不是主角姓名),主要角色写 NPC 名册中的确切名字(含本楼按 NPC 规则新增/标记 important 的主要角色)。一条只属于一个人,多人相同习惯分开记录。text 写该人物的具体细节,展示时系统会补上姓名;把“我/他/她”解析成明确所属人物,不把说话者、被谈论者或 user 混为一人。主语不明宁可不记。
 【铁律:只认本人明确陈述、或正文明确揭示的事实】禁止从行为/语气推断偏好与内心;一次吃了煎饼不等于爱吃煎饼。引语、转述、玩笑、反讽或猜测不能直接当成该人物的真实习惯;没有可靠明文依据不记。好感与态度估计不写这里。
-【默认不记】先对照上方【生活小档案】按“同一人物 + 同义内容”查重,已有条目不重复 add;不同人物即使文字相同也不合并。旧条目缺 subject 仅按旧协议视为主角,不要自行改判成某个 NPC。
+【默认不记】先对照材料中的【生活小档案】按“同一人物 + 同义内容”查重,已有条目不重复 add;不同人物即使文字相同也不合并。旧条目缺 subject 仅按旧协议视为主角,不要自行改判成某个 NPC。
 【add】topics 填 1-3 个主题标签(饮食/作息/工作…),anchors 填原文可检索的关键词(香菜/项目…),供系统按相关性投放;until 填故事内到期时间表示有时效(如项目结束日),长期稳定偏好 until 留空。
-【update/archive/remove】用编号 d1、d2… 指代上方列表,先核对所属人物:
+【update/archive/remove】用编号 d1、d2… 指代【生活小档案】列表,先核对所属人物:
   ✦ 条目被正文明确推翻/纠正 → update 改 text;只有明确记错归属时才改 subject,省略 subject=保持原人物;
   ✦ 时效已过/不再相关 → archive(沉降为仅触发,不是删除);
   ✦ 记错了 → remove。拿不准不动,不能用另一个人的偏好覆盖本人的条目。
@@ -309,13 +308,13 @@ content 更新时先逐条修改完整条款，再组合成 content。content �
 【禁止万能疑问】不得仅用"X会不会Y?""将如何收场?""未来会造成什么后果?"把已知状态改写成悬念——任何持续状态都能套这些句式,它们不能证明存在悬念。
 【content 写法】只写一两句客观的【已知关键事实 + 精确未决点】或【已启动事件 + 待定结果】;禁止抒情、剧情评论和"潜在威胁/矛盾持续"式收尾。
 ━━ 新增前查重:按未知答案/待决事件归一 ━━
-写任何 plans.add 前,逐条核对上方【未了结】与【近期已了结】条目:
+写任何 plans.add 前,逐条核对材料中【未了结】与【近期已了结】条目:
   · 把已有条目与候选 suspense 各自归一为"等待揭晓的答案是什么"或"等待结果的同一个外部事件是什么"。
   · 若答案会同时揭晓,或本质是同一个事件的结果 → 同一条,严禁 add。新线索、规则细节、阶段进展、佐证、人物反应与两难只写 summary,不另建悬念。
   · 仅仅根源相同不必强行合并:若未知答案不同、可各自独立揭晓,或确是两个独立外部事件,才可分别记录。
   · 已了结条目禁止换个说法重新 add。拿不准是否重复 → 视为重复,不写。
 【悬念核销预检】新增前先设想未来如何 resolve:必须能写成"未知答案揭晓为……"或"已启动事件的结果为……"。如果只能写"这种状态后来消失/改变/缓和了",它就不是悬念。
-【核销/了结】plans.resolve 每项都要写清**怎么了结的**,格式:{ "id":"p2", "outcome":"done|cancelled|failed", "reason":"一句话:关键事实+结果" }(id 用上方【未了结的计划/悬念】里的编号如 "p2")。
+【核销/了结】plans.resolve 每项都要写清**怎么了结的**,格式:{ "id":"p2", "outcome":"done|cancelled|failed", "reason":"一句话:关键事实+结果" }(id 用材料中【未了结的计划/悬念】里的编号如 "p2")。
 先问一句:"文本是否明确说明此事已解决/揭露/兑现/失败,或原方案已撤回、被替代而不再执行?"——是且有依据→resolve;只是同一事项的条件变化→update;否则保留。悬念不因时间流逝自动消失。
 outcome 三选一,务必分清:
   · done=计划真去做成/兑现了、悬念真揭晓了(结果/答案已明确);
@@ -332,7 +331,7 @@ reason 必填一句,写清「为什么了结 / 如何收场」,不为解释完�
  * 变量是一棵 JSON 状态树,AI 用 set/assign/remove/add 按路径自由增删改,可在【说明】约定下新建对象/字段。
  */
 export const RULE_VARS = `═══ 【自定义变量规则】(vars 字段,路径命令) ═══
-上方【自定义变量·当前状态】是一棵 JSON 状态树(结算到此刻);【变量含义】告诉你每个字段是什么;【变量变化规则】告诉你何时怎么变、可否新建。
+材料中的【自定义变量·当前状态】是一棵 JSON 状态树(结算到此刻);【变量含义】告诉你每个字段是什么;【变量变化规则】告诉你何时怎么变、可否新建。
 当本回合正文里发生了明确、具体的事件、导致状态该变时,在 vars 字段输出一个**命令数组**去修改它。每条命令是一个对象:
   · 赋值/覆盖:{ "op":"set", "path":"路径", "value":新值 }
   · 数字增减:{ "op":"add", "path":"路径", "delta":增量 }(delta 可负,如 -10)
@@ -448,9 +447,9 @@ export const RULE_RELATION_MOMENTUM = `═══ 【关系线保留】(摘要与
   ✓ 压缩跨时段时,同类互动若构成可观察的趋势,用「自X起……」概括保留并带代表性细节,不得作为“重复的亲密互动/调情”整段删除。相同含义可合并,但保留区别于旧互动的新动作、回应、拒绝或条件;不能要求每次互动都独立占一句而无限膨胀。
   ✗ 关键承诺、拒绝和带条件的话保留短原话或等义转述;“手放在手边”不能升级为牵手,“不会让你吃亏”不能升级为表白。不得只留“日常相处”“关系有所变化”等空泛概括;也不得把互动改写成“感情升温”“关系恶化”等心理或关系结论——只记可见事实,证据边界不变。`;
 
-/** 摘要撰写规则(summary 字段)。含 {{summary_words}} 宏,由 fill() 填字数。 */
+/** 摘要撰写规则(summary 字段)。含 {{summary_max_chars}} 宏,由 fill() 填入设置里的摘要字数。 */
 export const RULE_SUMMARY_WRITE = `═══ 【摘要撰写规则】(summary 字段,必填) ═══
-★ 核心目标:为未来的 AI 提供可靠的"前情提要",优先讲清关键变化。没有最低篇幅任务：{{summary_words}} 仅是信息密集时的参考，summary 最多 {{summary_max_chars}} 字符（含标点）；不按输入长度等比例缩写，关键事实写完即停，长原文也可能只需几句。
+★ 核心目标:为未来的 AI 提供可靠的"前情提要",优先讲清关键变化。summary 不超过 {{summary_max_chars}} 字（含标点）；没有最低篇幅任务，不按输入长度等比例缩写，关键事实写完即停，长原文也可能只需几句。
 ★ 压缩优先级:先留改变行动方向的决定、事件结果/未完约定与有效限制，再留解释它们的手段和必要情报，关系互动按其信息价值保留关键动作、回应或短台词,不要求每段装饰性地补一处,也不硬限为一处。同一履约期限、同一拒绝、反复确认持有等合并只写一次。光影、材质、走姿、展图折图扣钮、饮食器皿等若不改变局面则删除；不按原文逐句缩写，不把关键条件删成主题词。
 ★ 文风:这是前情提要，不是详写原文的缩小版。用自然完整的短句讲清变化及必要依据,不写审讯笔录、字段清单或阅读理解。客观指事实可靠,不等于删光语气与互动;不添加原文没有的修辞、心理或氛围。
 ★ 写作流程：先找本楼最后的关键变化，再回取解释变化的必要前因，最后补仍有用的限制与关键互动；按发生先后写成短段。即时决定即使不够资格新增长期计划，也须进入摘要；不能只写拒绝、收尾或物品交接而漏掉明确的新行动方向。若删掉某细节不影响结果、选择、限制或互动语义，就不写；省出的篇幅不必填满。
@@ -477,17 +476,17 @@ const SUMMARY_INPUT = `【主角】{{user}}  【角色】{{char}}
 【当前已知状态(该楼层之前的已知信息,只读参考,不要视为本轮新增事实)】
 - 当前时间:{{state_time}}
 - 当前地点:{{state_location}}
-- 当前互动局势(上一张局势卡,只读参考 —— 见下方【互动局势卡规则】):
+- 当前互动局势(上一张局势卡,只读参考 —— 见【互动局势卡规则】):
 {{scenefocus_block}}
 {{lifedetails_block}}- 主角当前档案(覆盖到该楼之前;只读参考):
 {{protagonist_block}}
 - 现有物品:
 {{items_block}}
-- 近期物品变动(已应用的记录,只读参考,严禁重复结算 —— 见下方【物品规则】):
+- 近期物品变动(已应用的记录,只读参考,严禁重复结算 —— 见【物品规则】):
 {{itemlog_block}}
-- 已知地点(已记录的场景,复用其命名、勿重复记录 —— 见下方【场景/地点规则】):
+- 已知地点(已记录的场景,复用其命名、勿重复记录 —— 见【场景/地点规则】):
 {{scenes_block}}
-- 已登场NPC(已记录的角色名册,复用其命名、勿重复记录;〔在场〕/〔同区域〕/〔不在场〕标记由系统按本楼之前的判定算出,用于离场/归场核对 —— 见下方【NPC 规则】):
+- 已登场NPC(已记录的角色名册,复用其命名、勿重复记录;〔在场〕/〔同区域〕/〔不在场〕标记由系统按本楼之前的判定算出,用于离场/归场核对 —— 见【NPC 规则】):
 {{npcs_block}}
 - 未了结的计划/悬念(用编号 p1、p2… 指代):
 {{plans_block}}
@@ -971,25 +970,23 @@ function fill(tpl: string, map: Record<string, string>): string {
 }
 
 /**
- * 字数档位配置:详细(默认)/ 精简。三处字数 + 二次总结的比例区间随档位一并切换。
- * 仅作用于内置模板的 {{summary_words}} / {{resummary_words}} / {{target_min}} / {{target_max}} 宏;
+ * 字数档位配置:详细(默认)/ 精简。总结字数 + 二次总结的比例区间随档位一并切换;
+ * 每楼摘要的字数由设置里的「摘要字数」单独决定(见 summaryMaxChars),不跟档位走。
+ * 仅作用于内置模板的 {{resummary_words}} / {{target_min}} / {{target_max}} 宏;
  * {{target}} 作为旧自定义模板的兼容宏,等同于 {{target_max}}。用户自填模板里若使用这些宏也会按档位填充。
  */
 interface VerbosityProfile {
-  summaryWords: string; // 摘要字数范围(填进 {{summary_words}})
   resummaryWords: string; // 普通总结字数范围(填进 {{resummary_words}})
   resummary2MinRatio: number; // 二次总结最低字数 = 输入总字数 × 最低比例
   resummary2MaxRatio: number; // 二次总结最高字数 = 输入总字数 × 最高比例
 }
 const VERBOSITY_PROFILES: Record<Verbosity, VerbosityProfile> = {
   detailed: {
-    summaryWords: '150-300',
     resummaryWords: '300-500',
     resummary2MinRatio: 0.4,
     resummary2MaxRatio: 0.5,
   },
   concise: {
-    summaryWords: '80-150',
     resummaryWords: '150-300',
     resummary2MinRatio: 0.3,
     resummary2MaxRatio: 0.4,
@@ -1006,7 +1003,7 @@ function currentVerbosity(): VerbosityProfile {
  * 这样老用户无需手动重置模板,也能开始产出 protagonist 增量。
  */
 const PROTAGONIST_PROTOCOL_SUPPLEMENT = `【棱镜宝书主角档案兼容协议】
-无论上方自定义模板是否提到本协议,最终 JSON 根对象都允许按需包含 protagonist:
+无论自定义模板是否提到本协议,最终 JSON 根对象都允许按需包含 protagonist:
 {
   "protagonist": {
     "gender": "性别/性别表现",
@@ -1022,7 +1019,7 @@ ${RULE_PROTAGONIST}`;
 
 /** 自定义摘要可能没用 {{time_field}}/{{time_rule}},无标签楼仍须强制产出锚点字段。 */
 const TIME_ANCHOR_PROTOCOL_SUPPLEMENT = `【棱镜宝书时间锚点兼容协议】
-本轮正文缺少完整的有据时间标签。无论上方自定义模板是否提到时间,最终 JSON 根对象使用以下协议:
+本轮正文缺少完整的有据时间标签。无论自定义模板是否提到时间,最终 JSON 根对象使用以下协议:
 {
   "timeStart": "本段开始时的主线时间",
   "timeEnd": "本段结束时的主线时间"
@@ -1056,8 +1053,13 @@ const LIFE_DETAILS_PROTOCOL_SUPPLEMENT = `【棱镜宝书生活小档案兼容�
 
 ${RULE_LIFE_DETAILS}`;
 
-/** 字符预算与请求提示词/响应校验同源，不按 token 猜长度。 */
-export function summaryMaxChars(): number { return apiSettings.verbosity === 'concise' ? 150 : 300; }
+/** 每楼摘要字数要求(含标点):只写进提示词,不作为保存门槛。字符数而非 token,与提示词里的说法一致。 */
+export function summaryMaxChars(): number { return normalizeSummaryMaxChars(apiSettings.summaryMaxChars, apiSettings.verbosity); }
+/** 旧宏 {{summary_words}} 的参考范围:摘要字数要求的一半到全额(300 → 150-300)。 */
+function summaryWordsRange(): string {
+  const max = summaryMaxChars();
+  return `${Math.round(max / 2)}-${max}`;
+}
 export function usesBuiltinSummary(): boolean {
   const custom = apiSettings.prompts.summary.trim();
   return !custom || custom === SUMMARY_PROMPT.trim();
@@ -1080,13 +1082,13 @@ export function buildSummaryPrompt(a: BuildArgs): { system: string; user: string
     plans_block: fmtPlans(a.openPlans),
     resolved_plans_block: fmtResolvedPlans(a.resolvedPlans),
     scenefocus_block: fmtSceneFocus(a.sceneFocus),
-    lifedetails_block: `- 生活小档案(已记录,用编号 d1/d2… 指代;只读参考,勿重复记录 —— 见下方【生活小档案规则】):\n${fmtLifeDetails(a.lifeDetails, a.user || '主角')}\n`,
+    lifedetails_block: `- 生活小档案(已记录,用编号 d1/d2… 指代;只读参考,勿重复记录 —— 见【生活小档案规则】):\n${fmtLifeDetails(a.lifeDetails, a.user || '主角')}\n`,
     lifedetails_field: LIFE_DETAILS_FIELD_TMPL,
     lifedetails_rule: `\n${RULE_LIFE_DETAILS}\n`,
     content: a.content,
     time_field: a.hasTimeTags ? TIME_FIELD_WITH_TAGS : TIME_FIELD_NO_TAGS,
     time_rule: a.hasTimeTags ? TIME_RULE_WITH_TAGS : TIME_RULE_NO_TAGS,
-    summary_words: currentVerbosity().summaryWords,
+    summary_words: summaryWordsRange(),
     summary_max_chars: String(summaryMaxChars()),
     // 自定义变量三处:未配置变量(空状态 + 空说明)时全为空串(零 token 开销,老用户行为不变)
     vars_state_block: hasVars(a)

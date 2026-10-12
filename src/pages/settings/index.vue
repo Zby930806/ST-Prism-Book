@@ -10,7 +10,17 @@ import PageHeader from '@/components/PageHeader.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { ApiError, fetchModels, testChannel } from '@/api/client';
 import { describeFailure } from '@/api/errors';
-import { apiSettings, newChannel, resolveVectorModel, sanitizeTagName, type ApiChannel, type Verbosity } from '@/api/settings';
+import {
+  apiSettings,
+  newChannel,
+  normalizeSummaryMaxChars,
+  resolveVectorModel,
+  sanitizeTagName,
+  SUMMARY_MAX_CHARS_MAX,
+  SUMMARY_MAX_CHARS_MIN,
+  type ApiChannel,
+  type Verbosity,
+} from '@/api/settings';
 import { getContext } from '@/st/context';
 import {
   JAILBREAK_PROMPT,
@@ -60,6 +70,11 @@ const VERBOSITY_OPTIONS: { value: Verbosity; label: string }[] = [
   { value: 'detailed', label: '详细' },
   { value: 'concise', label: '精简' },
 ];
+
+/** 摘要字数输完(失焦/回车)再规整:清空或填了范围外的数,回到有效值,输入过程中不打断。 */
+function onSummaryMaxCharsChange() {
+  apiSettings.summaryMaxChars = normalizeSummaryMaxChars(apiSettings.summaryMaxChars, apiSettings.verbosity);
+}
 
 /** 任务指派下拉:空串 = 跟随主 API,其余为副渠道 id(未命名渠道给个占位名,免空白选项) */
 const channelOptions = computed(() => [
@@ -271,7 +286,7 @@ const PROMPT_METAS: PromptMeta[] = [
   {
     key: 'summary',
     label: '摘要提示词',
-    hint: '把一楼的对话整理成记忆：摘要正文，加上时间、地点、物品、计划等变化。',
+    hint: '把一楼的对话整理成记忆：摘要正文，加上时间、地点、物品、计划等变化。摘要字数在「摘要设置」里调。',
     builtin: SUMMARY_PROMPT,
     macros: SUMMARY_MACROS,
   },
@@ -987,17 +1002,22 @@ function goToSettingsGroup(id: string) {
       </Collapsible>
 
       <Collapsible class="prism-settings-card prism-card-wide" title="摘要设置" :open="true">
-        <p class="prism-card-intro">保留多少全文、多久合并一次总结、失败后重试几次。</p>
+        <p class="prism-card-intro">摘要写多长、保留多少全文、多久合并一次总结、失败后重试几次。</p>
         <label class="bbs-switch-row">
           <span class="bbs-field-label">启用自动摘要</span>
           <input v-model="apiSettings.autoSummaryEnabled" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
         <p class="bbs-field-hint">打开后会自动摘要并隐藏旧楼，同时启用正文时间标签（剧情时间的锚点）和积压拦截（有楼层漏摘时先拦下发送，提示你补摘）。</p>
+        <label class="bbs-num-row">
+          <span class="bbs-field-label">摘要字数</span>
+          <input v-model.number="apiSettings.summaryMaxChars" class="bbs-input bbs-num" type="number" :min="SUMMARY_MAX_CHARS_MIN" :max="SUMMARY_MAX_CHARS_MAX" @change="onSummaryMaxCharsChange" />
+        </label>
+        <p class="bbs-field-hint">要求每楼摘要不超过这么多字（含标点），信息少时模型会写得更短。这只是写给模型的要求：写超了照常保存，不会因此失败。默认 300，可填 {{ SUMMARY_MAX_CHARS_MIN }}–{{ SUMMARY_MAX_CHARS_MAX }}。只对内置的摘要提示词生效。</p>
         <div class="bbs-num-row">
           <span class="bbs-field-label">字数档位</span>
           <BbsSelect v-model="apiSettings.verbosity" :options="VERBOSITY_OPTIONS" class="bbs-select-narrow" aria-label="字数档位" />
         </div>
-        <p class="bbs-field-hint">调整摘要、总结和二次总结的目标字数。详细：信息全（摘要 150–300 字，总结 300–500 字）；精简：省 token（摘要 80–150 字，总结 150–300 字）。只影响内置提示词，自定义的不受影响。</p>
+        <p class="bbs-field-hint">调整总结和二次总结的篇幅。详细：总结 300–500 字，二次总结约为输入的 40%–50%；精简：总结 150–300 字，二次总结约 30%–40%。每楼摘要的字数看上面的「摘要字数」。只影响内置提示词，自定义的不受影响。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">保留最近 AI 消息数</span>
           <input v-model.number="apiSettings.keepRecent" class="bbs-input bbs-num" type="number" min="0" />
@@ -1017,7 +1037,7 @@ function goToSettingsGroup(id: string) {
           <span class="bbs-field-label">二次总结</span>
           <input v-model.number="apiSettings.resummaryThreshold" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">L1 总结攒够多少条，再合并成一条 L2。填 0 关闭，默认 7。</p>
+        <p class="bbs-field-hint">L1 总结攒够多少条，再合并成一条 L2。填 0 关闭，默认 6。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">高层总结</span>
           <input v-model.number="apiSettings.higherResummaryThreshold" class="bbs-input bbs-num" type="number" min="0" />
@@ -1033,7 +1053,7 @@ function goToSettingsGroup(id: string) {
           <input v-model.number="apiSettings.summaryMaxRetries" class="bbs-input bbs-num" type="number" min="0" />
         </label>
         <p class="bbs-field-hint">摘要或总结失败（报错，或返回的内容解析不了）时最多再试几次。密钥错误、额度不足、输出被截断这类重试也没用的错误不会重试。填 0 不重试，默认 1。</p>
-        <p class="bbs-field-hint">批量补摘按楼层顺序一楼一楼来，每楼的人物、物品、计划存好才处理下一楼；遇到失败就停，取消会在当前这楼完成后生效。内置摘要的长度上限：详细 300 字，精简 150 字（含标点）；超长会按上面的次数重试，还不行就保留旧摘要。</p>
+        <p class="bbs-field-hint">批量补摘按楼层顺序一楼一楼来，每楼的人物、物品、计划存好才处理下一楼；遇到失败就停，取消会在当前这楼完成后生效。</p>
       </Collapsible>
           </div>
         </section>

@@ -31,14 +31,17 @@ import {
 
 const originalPrompts = { ...apiSettings.prompts };
 const originalVerbosity = apiSettings.verbosity;
+const originalSummaryChars = apiSettings.summaryMaxChars;
 
 beforeEach(() => {
   Object.assign(apiSettings.prompts, { summary: '', resummary: '', resummary2: '' });
+  apiSettings.summaryMaxChars = 300;
 });
 
 afterEach(() => {
   Object.assign(apiSettings.prompts, originalPrompts);
   apiSettings.verbosity = originalVerbosity;
+  apiSettings.summaryMaxChars = originalSummaryChars;
 });
 
 const args: Parameters<typeof buildSummaryPrompt>[0] = {
@@ -280,7 +283,8 @@ describe.each(['detailed', 'concise'] as const)('prompt assembly (%s)', verbosit
     const parts = buildSummaryPrompt(args);
     const prompt = combined(parts);
     expect(prompt).toContain(args.content);
-    expect(prompt).toContain(verbosity === 'detailed' ? '150-300' : '80-150');
+    // 每楼摘要字数取「摘要字数」设置(默认 300),不随档位变化;旧宏 summary_words 为一半到全额。
+    expect(prompt).toContain(custom ? '150-300' : 'summary 不超过 300 字（含标点）');
     expect(prompt).toContain(RULE_ABSOLUTE_TIME_LANGUAGE);
     expect(prompt).not.toContain(SUMMARY_OUTPUT_PROTOCOL);
     expect(THINKING_CHECKLIST).toContain(SUMMARY_OUTPUT_PROTOCOL);
@@ -301,7 +305,7 @@ describe.each(['detailed', 'concise'] as const)('prompt assembly (%s)', verbosit
     const parts = buildSummaryPrompt(args);
     expect(parts.system).toContain('stateChanges');
     expect(parts.system).toContain('【状态核对】');
-    expect(parts.system).toContain(apiSettings.verbosity === 'concise' ? '150 字符' : '300 字符');
+    expect(parts.system).toContain('summary 不超过 300 字（含标点）');
     expect(parts.system).not.toMatch(/\{\{\w+\}\}/);
   });
 
@@ -475,7 +479,7 @@ describe('v0.4 事件取舍与因果保真', () => {
       expect(system).toContain('篇幅是上限而非填满任务');
       expect(system).not.toMatch(/语言冷峻|厚实段落|信息密度极高/);
     }
-    expect(systems[0]).toContain(verbosity === 'concise' ? '最多 150 字符' : '最多 300 字符');
+    expect(systems[0]).toContain('summary 不超过 300 字（含标点）');
   });
 
   it('压缩保留路径、条件、对象及证据强度,不绑定这次测试剧情', () => {
@@ -530,7 +534,16 @@ describe('v0.4 事件取舍与因果保真', () => {
 
 describe('v0.5 伤势保留及通用压缩示范', () => {
   it('主角与NPC共用恢复证据规则,不把临时理解成可随意删除', () => {
-    for (const template of [RULE_PROTAGONIST, RULE_NPCS]) expect(template).toContain(RULE_HEALTH_STATE);
+    // 全文只在主角规则里出现一次,NPC 规则引用它,内置请求和自定义模板的兼容协议都不重复发送。
+    expect(RULE_PROTAGONIST).toContain(RULE_HEALTH_STATE);
+    expect(RULE_NPCS).not.toContain(RULE_HEALTH_STATE);
+    expect(RULE_NPCS).toContain('按上方【临时伤势与恢复证据】,与主角同一标准');
+    expect(RULE_HEALTH_STATE).toContain('主角与 NPC 通用');
+    const system = buildSummaryPrompt(args).system;
+    expect(system.split(RULE_HEALTH_STATE)).toHaveLength(2);
+    expect(system.indexOf(RULE_HEALTH_STATE)).toBeLessThan(system.indexOf('【NPC 规则】'));
+    apiSettings.prompts.summary = 'CUSTOM {{content}}';
+    expect(buildSummaryPrompt(args).system.split(RULE_HEALTH_STATE)).toHaveLength(2);
     for (const clause of ['临时不等于不重要', '超过预计休养天数时均保留', '没有新证据就省略 condition',
       '不是自动失效时间', '闪回中的健康不能覆盖当前伤势', '保留其他尚未解除的伤情和限制',
       '不等于所有伤势痊愈', '历史受伤与当前已恢复可以并存']) expect(RULE_HEALTH_STATE).toContain(clause);
@@ -594,5 +607,35 @@ describe('v0.9 通用交易、来源和地理规则', () => {
     expect(rendered.system + rendered.user).toContain('不以默认1、支出量或欠款冒充余额');
     expect(rendered.system + rendered.user).toContain('先后到访');
     expect(rendered.system + rendered.user).toContain('所见写所见');
+  });
+});
+
+// 字数只是写给模型的要求;是否保存不看字数(见 summaryResponse.test / summaryRebuild.test)。
+describe('每楼摘要字数要求', () => {
+  it.each(['detailed', 'concise'] as const)('字数来自「摘要字数」设置，不跟档位走: %s', verbosity => {
+    apiSettings.verbosity = verbosity;
+    apiSettings.summaryMaxChars = 450;
+    const system = buildSummaryPrompt(args).system;
+    expect(system).toContain('summary 不超过 450 字（含标点）');
+    expect(system).toContain('没有最低篇幅任务');
+    expect(system).not.toMatch(/\{\{\w+\}\}/);
+    apiSettings.prompts.summary = 'CUSTOM {{content}} {{summary_max_chars}} {{summary_words}}';
+    expect(buildSummaryPrompt(args).user).toContain(`CUSTOM ${args.content} 450 225-450`);
+  });
+
+  it('输入框暂时为空或超出范围时，请求里仍是有效字数', () => {
+    for (const [value, expected] of [[Number.NaN, 300], ['' as unknown as number, 300], [5, 50], [99999, 2000], [333.4, 333]] as const) {
+      apiSettings.summaryMaxChars = value;
+      expect(buildSummaryPrompt(args).system).toContain(`summary 不超过 ${expected} 字（含标点）`);
+    }
+  });
+
+  it('总结和二次总结的篇幅仍随字数档位切换，不受摘要字数影响', () => {
+    apiSettings.summaryMaxChars = 800;
+    for (const [verbosity, words, max] of [['detailed', '300-500', '500'], ['concise', '150-300', '400']] as const) {
+      apiSettings.verbosity = verbosity;
+      expect(buildResummaryPrompt({ ...args, level: 1 }).system).toContain(words);
+      expect(buildResummaryPrompt({ ...args, content: 'x'.repeat(1000), level: 2 }).system).toContain(`summary 不得超过 ${max} 字`);
+    }
   });
 });
