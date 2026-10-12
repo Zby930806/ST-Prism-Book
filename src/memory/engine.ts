@@ -17,7 +17,7 @@ import { clampToTimeTags, cleanBody, explicitOpeningTime, hasStoryBody, INITIAL_
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import { memory, memoryWriteIssue, checkCompatibility, recomputeDerived, scheduleLeafFlush } from './store';
 import { legacyLeafIssue } from './compatibility';
-import type { LeafExtra, SummaryDelta } from './types';
+import type { LeafExtra, StoredDelta, SummaryDelta } from './types';
 import { scheduleVectorIndex } from './vector';
 import { invalidateRecallCache } from './vector/cache';
 import { clearRecallInjection } from './vector/recall';
@@ -80,6 +80,11 @@ export const batchState = reactive({
   done: 0,
   total: 0,
   cancelRequested: false, // 用户已点取消、等楼层边界生效
+  /** 补摘(只补没有摘要的楼)还是重建(所有楼重摘),界面据此换说法 */
+  mode: 'backfill' as 'backfill' | 'rebuild',
+  /** 开始时间与最近一楼完成的时间(毫秒),界面按已完成楼层的平均耗时估算剩余时间 */
+  startedAt: 0,
+  lastDoneAt: 0,
 });
 
 /** 请求取消正在进行的批量补摘(楼层边界生效,不打断进行中的请求)。 */
@@ -759,6 +764,78 @@ export async function regenerateFloor(floor: number): Promise<boolean> {
   }
 }
 
+/** 重新摘要的预览:新结果先不写入,交给界面和现在的摘要并排对比。 */
+export interface FloorPreview {
+  floor: number;
+  /** 生成时这一楼的摘要(对比里「现在的」) */
+  current: LeafExtra;
+  /** 新结果按落叶口径整理后的样子(对比里「新生成的」),还没写入 */
+  next: { text: string; delta: StoredDelta; timeStart?: string; timeEnd?: string };
+}
+// 预览只放在内存里;提交时凭同一个对象找回请求时的上下文。
+const pendingPreviews = new WeakMap<FloorPreview, PendingFloorSummary>();
+
+/**
+ * 重新摘要但先不替换:请求、校验和 regenerateFloor 一样,结果交给用户对比,选「用新的」才调用 applyFloorPreview。
+ * 失败或被跳过时返回 null,原因写在 engineState.lastError。
+ */
+export async function previewRegenerateFloor(floor: number): Promise<FloorPreview | null> {
+  if (!engineActiveHere() || busy) return null;
+  const ctx = getContext();
+  if (!ctx) return null;
+  const chat = ctx.chat ?? [];
+  if (!isAiFloor(chat[floor]) || !leafValid(chat[floor])) return null;
+  const current = getLeaf(chat[floor]);
+  if (!current) return null;
+  const box: { pending?: PendingFloorSummary } = {};
+  await runSummary(floor, { replaceLeaf: current, checkResummary: false, onPrepared: p => { box.pending = p; } });
+  const pending = box.pending;
+  if (!pending || engineState.lastError) return null;
+  const preview: FloorPreview = { floor, current, next: buildLeafParts(chat, floor, pending.delta, pending.stateBefore) };
+  pendingPreviews.set(preview, pending);
+  return preview;
+}
+
+/**
+ * 用户选了「用新的」:核对生成之后聊天、这层正文、原摘要和这一楼之前的记忆都没变,再替换。
+ * 有一项变了就不替换(新结果是按变化前的状态写的),让用户重新生成。返回是否已替换。
+ */
+export async function applyFloorPreview(preview: FloorPreview): Promise<boolean> {
+  const pending = pendingPreviews.get(preview);
+  if (!pending) return false;
+  pendingPreviews.delete(preview);
+  if (busy) {
+    engineState.lastError = '现在有摘要正在进行，等它结束后再替换。';
+    engineState.lastFailure = null;
+    return false;
+  }
+  const issue = memoryWriteIssue();
+  if (issue) {
+    engineState.lastError = issue;
+    engineState.lastFailure = null;
+    return false;
+  }
+  try {
+    if (JSON.stringify(deriveMemory(pending.chat, pending.beforeIndex)) !== pending.stateKey) {
+      throw new Error(`楼层 #${preview.floor} 之前的记忆在生成之后有改动，新结果是按改动前的状态写的，所以没有替换。请重新生成一次。`);
+    }
+    commitFloorSummary(pending);
+    engineState.lastError = '';
+    engineState.lastFailure = null;
+    return true;
+  } catch (e) {
+    recordFailure(e);
+    return false;
+  } finally {
+    await afterSummaryHideAndInject(pending.chat);
+  }
+}
+
+/** 用户选了「保留现在的」或关掉了对比:丢掉预览,什么都不改。 */
+export function discardFloorPreview(preview: FloorPreview): void {
+  pendingPreviews.delete(preview);
+}
+
 /**
  * 标记 / 取消标记某楼为「番外」(小剧场/番外篇,与主线剧情无关)。
  * 番外楼对引擎**彻底不存在**:不摘、不总结、不重放派生、不注入——由 isAiFloor 等处的 bbs_omit 守卫实现。
@@ -1102,6 +1179,23 @@ interface RunSummaryOptions {
   checkResummary?: boolean;
   /** 内部启动屏障:摘要上下文准备完毕、即将调用 API 时触发。 */
   onRequestStart?: () => void;
+  /** 预览模式(重新摘要先对比):结果解析校验通过后交给它,不落叶;由 applyFloorPreview 提交。 */
+  onPrepared?: (pending: PendingFloorSummary) => void;
+}
+
+/** 一次单楼摘要解析好、还没落叶的结果,以及提交前用来核对上下文的信息。 */
+interface PendingFloorSummary {
+  chat: STMessage[];
+  aiFloor: number;
+  delta: SummaryDelta & { summary: string };
+  stateBefore: ReturnType<typeof deriveMemory>;
+  /** 本楼之前状态的起点下标,提交前重算并和 stateKey 比较 */
+  beforeIndex: number;
+  /** 生成时「本楼之前状态」的指纹;只在预览模式记录 */
+  stateKey: string;
+  replaceLeaf?: LeafExtra;
+  /** 聊天、来源正文、页码等没变才放行,否则抛错 */
+  assertUnchanged: () => void;
 }
 
 export function runSummary(aiFloor: number, options: RunSummaryOptions = {}): Promise<void> {
@@ -1152,6 +1246,34 @@ function coveredBeforeFloor(chat: STMessage[], floor: number): Set<number> {
 }
 
 /**
+ * 按落叶口径整理一份结果,不写入:落叶和「重新摘要先对比」的预览共用,两边看到的是同一份东西。
+ *  - 时间:优先读该楼正文 <bbs_start>/<bbs_end> 标签(权威锚点);缺的那端用 AI 补的兜底。
+ *  - plans.update/resolve、lifeDetails 短序号 → 稳定 id:用传入的 stateBefore(本楼之前状态)的顺序翻译。
+ */
+function buildLeafParts(
+  chat: STMessage[],
+  aiFloor: number,
+  delta: SummaryDelta,
+  stateBefore: ReturnType<typeof deriveMemory>,
+): { text: string; delta: StoredDelta; timeStart?: string; timeEnd?: string } {
+  // 时间锚点:从该楼正文标签读起止(先裁剪到正文段,跳过思维链/状态栏里混入的同名标签)
+  const tag = parseTimeRange(clampToTimeTags(chat[aiFloor].mes));
+
+  // 未了结计划的有序列表:顺序即提示词里的 p1/p2…,用于把 update/resolve 短序号翻译成稳定 id
+  const openPlansOrdered = stateBefore.plans.filter(p => p.status === 'open');
+  // 生活小档案当前列表:顺序即提示词里的 d1/d2…,用于把 update/archive/remove 短序号翻译成稳定 id
+  const storedDelta = finalizeDelta(delta, openPlansOrdered, stateBefore.lifeDetails);
+
+  // 时间起止:标签优先(与新剧情同源不漂移);标签缺的那端用 AI 补的 timeStart/timeEnd 兜底。
+  const timeStart = tag.start || storyTimeValue(delta.timeStart);
+  const timeEnd = tag.end || storyTimeValue(delta.timeEnd) || storyTimeValue(delta.time);
+  // 状态当前时间(覆盖型):用结束时间(本段最后时刻);取不到则保留既有状态。
+  if (timeEnd) storedDelta.time = timeEnd;
+  else delete storedDelta.time; // 协议状态/空值不覆盖既有时钟。
+  return { text: llmString(delta.summary), delta: storedDelta, timeStart, timeEnd };
+}
+
+/**
  * 把一份 AI delta 固化成叶子并落到某 AI 楼(单楼与批量共用,保证两路径落叶口径一致)。
  *  - 时间:优先读该楼正文 <bbs_start>/<bbs_end> 标签(权威锚点);缺的那端用 AI 补的兜底。
  *  - plans.update/resolve 短序号 → 稳定 id:用传入的 stateBefore(本楼之前状态)的未了结计划顺序翻译。
@@ -1171,24 +1293,13 @@ function applyLeafForFloor(
   if (replaceLeaf && getLeaf(chat[aiFloor]) !== replaceLeaf) {
     throw new Error(`重新摘要没有保存：楼层 #${aiFloor} 的原摘要在请求期间被改动了。`);
   }
-  // 时间锚点:从该楼正文标签读起止(先裁剪到正文段,跳过思维链/状态栏里混入的同名标签)
-  const tag = parseTimeRange(clampToTimeTags(chat[aiFloor].mes));
-
-  // 未了结计划的有序列表:顺序即提示词里的 p1/p2…,用于把 update/resolve 短序号翻译成稳定 id
-  const openPlansOrdered = stateBefore.plans.filter(p => p.status === 'open');
-  // 生活小档案当前列表:顺序即提示词里的 d1/d2…,用于把 update/archive/remove 短序号翻译成稳定 id
-  const storedDelta = finalizeDelta(delta, openPlansOrdered, stateBefore.lifeDetails);
-
-  // 时间起止:标签优先(与新剧情同源不漂移);标签缺的那端用 AI 补的 timeStart/timeEnd 兜底。
-  const timeStart = tag.start || storyTimeValue(delta.timeStart);
-  const timeEnd = tag.end || storyTimeValue(delta.timeEnd) || storyTimeValue(delta.time);
-  // 状态当前时间(覆盖型):用结束时间(本段最后时刻);取不到则保留既有状态。
-  if (timeEnd) storedDelta.time = timeEnd;
-  else delete storedDelta.time; // 协议状态/空值不覆盖既有时钟。
+  const parts = buildLeafParts(chat, aiFloor, delta, stateBefore);
+  const storedDelta = parts.delta;
+  const { timeStart, timeEnd } = parts;
 
   const leaf: LeafExtra = {
     id: replaceLeaf?.id ?? makeLeafId(),
-    text: llmString(delta.summary),
+    text: parts.text,
     delta: storedDelta,
     timeStart,
     timeEnd,
@@ -1223,7 +1334,7 @@ async function summarizeFloorWork(
   chat: STMessage[],
   aiFloor: number,
   sender: Sender,
-  options: Pick<RunSummaryOptions, 'replaceLeaf' | 'onRequestStart' | 'initializeOpening'> = {},
+  options: Pick<RunSummaryOptions, 'replaceLeaf' | 'onRequestStart' | 'initializeOpening' | 'onPrepared'> = {},
 ): Promise<void> {
   const ctx = getContext();
   if (!ctx) throw new Error('酒馆上下文还没准备好。');
@@ -1360,7 +1471,21 @@ async function summarizeFloorWork(
   });
   assertUnchanged();
 
-  applyLeafForFloor(chat, aiFloor, delta, stateBefore, options.replaceLeaf);
+  const pending: PendingFloorSummary = {
+    chat, aiFloor, delta, stateBefore, beforeIndex,
+    stateKey: options.onPrepared ? JSON.stringify(stateBefore) : '',
+    replaceLeaf: options.replaceLeaf,
+    assertUnchanged,
+  };
+  // 预览模式:交出结果就停,不落叶;用户选「用新的」后由 applyFloorPreview 提交。
+  if (options.onPrepared) { options.onPrepared(pending); return; }
+  commitFloorSummary(pending);
+}
+
+/** 落叶并刷新派生/注入/落盘/向量;提交前再核对一次聊天和这层正文没变。 */
+function commitFloorSummary(p: PendingFloorSummary): void {
+  p.assertUnchanged();
+  applyLeafForFloor(p.chat, p.aiFloor, p.delta, p.stateBefore, p.replaceLeaf);
   engineState.lastRunAt = Date.now();
 
   // 立刻反映到派生与注入;落盘走防抖(隐藏由收尾的 syncWindowHiddenState 统一负责)
@@ -1472,6 +1597,9 @@ async function batchBackfillWork(opts: BatchBackfillOpts): Promise<BatchBackfill
   batchState.cancelRequested = false;
   batchState.done = 0;
   batchState.total = total;
+  batchState.mode = opts.regenerate ? 'rebuild' : 'backfill';
+  batchState.startedAt = Date.now();
+  batchState.lastDoneAt = 0;
   let done = 0;
   let cancelled = false;
   try {
@@ -1488,6 +1616,7 @@ async function batchBackfillWork(opts: BatchBackfillOpts): Promise<BatchBackfill
       await summarizeFloorWork(chat, f, sender, { replaceLeaf });
       done++;
       batchState.done = done;
+      batchState.lastDoneAt = Date.now();
     }
     // 连锁触发总结(可能跨多层),失败写 lastError 不影响已落叶子
     if (!cancelled) await checkResummary();

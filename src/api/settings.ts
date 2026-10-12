@@ -208,6 +208,11 @@ export interface ApiSettings {
   ui: UiPrefs;
   /** 自定义提示词模板(空=用内置) */
   prompts: CustomPrompts;
+  /**
+   * 每份自定义提示词是照着哪一版内置改的:保存自定义时记下当时的内置全文。
+   * 内置更新后,设置页据此标出「内置已更新」并列出内置改了什么;没记录的(旧版本里改的)只能和现在的内置对比。
+   */
+  promptBases: Partial<Record<keyof CustomPrompts, string>>;
   /** 任务说明三态;旧 jailbreak 字段保留作自定义内容。 */
   taskContextMode: 'default' | 'custom' | 'disabled';
   /** 主对话四类记忆槽的总估算token预算,0=不限;不是模型精确token数。 */
@@ -348,6 +353,7 @@ function defaults(): ApiSettings {
       orbSize: 48,
     },
     prompts: { summary: '', resummary: '', resummary2: '', jailbreak: '', timeTag: '' },
+    promptBases: {},
     taskContextMode: 'default',
     memoryBudgetTokens: 6000,
     verbosity: 'detailed',
@@ -406,6 +412,15 @@ function normalize(raw: unknown): ApiSettings {
   // prompts 是嵌套对象,展开合并不会补全缺字段,单独兜底(老数据没有 prompts 键时回退默认)
   merged.prompts = { ...d.prompts, ...((raw as Partial<ApiSettings>).prompts ?? {}) };
   merged.prompts.timeTag = normalizeSavedTimeTag(merged.prompts.timeTag);
+  // 自定义提示词的基准版本:只留已知键的非空字符串;旧数据没有这个字段就是空对象(未记录)
+  const rawBases = (raw as Partial<ApiSettings>).promptBases;
+  merged.promptBases = {};
+  if (rawBases && typeof rawBases === 'object') {
+    for (const key of Object.keys(d.prompts) as Array<keyof CustomPrompts>) {
+      const base = (rawBases as Record<string, unknown>)[key];
+      if (typeof base === 'string' && base.trim()) merged.promptBases[key] = base;
+    }
+  }
   const savedMode = (raw as Partial<ApiSettings>).taskContextMode;
   merged.taskContextMode = savedMode === 'default' || savedMode === 'custom' || savedMode === 'disabled'
     ? savedMode : (typeof merged.prompts.jailbreak === 'string' && merged.prompts.jailbreak.trim() ? 'custom' : 'default');
@@ -635,6 +650,7 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.enabled = src.enabled;
   target.ui = src.ui;
   target.prompts = src.prompts;
+  target.promptBases = src.promptBases;
   target.taskContextMode = src.taskContextMode;
   target.memoryBudgetTokens = src.memoryBudgetTokens;
   target.verbosity = src.verbosity;

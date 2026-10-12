@@ -114,3 +114,24 @@ export function treePage(index: ReturnType<typeof createSummaryIndex>, expanded:
   if (current !== requested) return treePage(index, expanded, current, size);
   return { items, total, page: current };
 }
+
+/** 时长的口语说法:不到一分钟按秒,一小时内按分钟,更长按小时加分钟。 */
+export function formatDuration(ms: number): string {
+  const s = Math.max(1, Math.round(ms / 1000));
+  if (s < 60) return `${s} 秒`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} 分钟`;
+  const h = Math.floor(m / 60);
+  const rest = m % 60;
+  return rest ? `${h} 小时 ${rest} 分钟` : `${h} 小时`;
+}
+
+/**
+ * 批量补摘/重建的剩余时间:按这一次已完成楼层的平均耗时估算;第一楼完成前、或已经做完时返回空串。
+ * 只是估算——各楼长短不同,失败重试也会拉长单楼耗时。
+ */
+export function batchEtaText(p: { done: number; total: number; startedAt: number; lastDoneAt: number }): string {
+  if (p.done <= 0 || p.done >= p.total || !p.startedAt || p.lastDoneAt <= p.startedAt) return '';
+  const perFloor = (p.lastDoneAt - p.startedAt) / p.done;
+  return `每楼约 ${formatDuration(perFloor)}，还要约 ${formatDuration(perFloor * (p.total - p.done))}`;
+}

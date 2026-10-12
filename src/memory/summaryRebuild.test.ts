@@ -616,3 +616,55 @@ describe('伤情排版证据与失败恢复生产链', () => {
     expect(chat[1].extra!.bbs_leaf!.text).toBe('岑岚仍需休养三天。'); expect(chat[2].extra!.bbs_leaf).toBeUndefined();
   });
 });
+
+// 预设模型响应：验证预览不落盘、提交前的核对和替换后的状态重算，不代表模型质量。
+describe('重新摘要先对比再替换', () => {
+  it('预览不写入，选「用新的」才替换，状态按新结果重算；同一份预览不能用两次', async () => {
+    const chat = [msg('原文', true)]; useChat(chat);
+    chat[0].mes = '小A把地图交给林舟。';
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(response('小A把地图交给林舟。', { items: { add: [{ name: '地图', qty: 1, carried: true }] } }));
+    const before = JSON.stringify(chat);
+    const preview = await engine.previewRegenerateFloor(0);
+    expect(preview?.current.text).toBe('旧摘要');
+    expect(preview?.next.text).toBe('小A把地图交给林舟。');
+    expect(preview?.next.delta.items?.add?.[0]).toMatchObject({ name: '地图', qty: 1 });
+    expect(JSON.stringify(chat)).toBe(before);
+    expect(deriveMemory(chat).items).toEqual([]);
+    expect(await engine.applyFloorPreview(preview!)).toBe(true);
+    expect(chat[0].extra?.bbs_leaf).toMatchObject({ id: '原文', text: '小A把地图交给林舟。' });
+    expect(deriveMemory(chat).items.find(i => i.name === '地图')?.qty).toBe(1);
+    expect(await engine.applyFloorPreview(preview!)).toBe(false);
+  });
+  it('选「保留现在的」什么都不改', async () => {
+    const chat = [msg('原文', true)]; useChat(chat);
+    const before = JSON.stringify(chat);
+    const preview = await engine.previewRegenerateFloor(0);
+    engine.discardFloorPreview(preview!);
+    expect(JSON.stringify(chat)).toBe(before);
+    expect(await engine.applyFloorPreview(preview!)).toBe(false);
+  });
+  it('生成后这一楼之前的记忆变了，不替换，提示重新生成', async () => {
+    const chat = [msg('一', true), msg('二', true)]; useChat(chat);
+    const preview = await engine.previewRegenerateFloor(1);
+    chat[0].extra!.bbs_leaf = { ...chat[0].extra!.bbs_leaf!, delta: { items: { add: [{ name: '钥匙', qty: 1 }] } } };
+    recomputeDerived();
+    expect(await engine.applyFloorPreview(preview!)).toBe(false);
+    expect(engineState.lastError).toContain('之前的记忆在生成之后有改动');
+    expect(chat[1].extra?.bbs_leaf?.text).toBe('旧摘要');
+  });
+  it('生成后这一楼的正文被改了，不替换', async () => {
+    const chat = [msg('原文', true)]; useChat(chat);
+    const preview = await engine.previewRegenerateFloor(0);
+    chat[0].mes = '改过的正文';
+    expect(await engine.applyFloorPreview(preview!)).toBe(false);
+    expect(engineState.lastError).toContain('发生变化');
+    expect(chat[0].extra?.bbs_leaf?.text).toBe('旧摘要');
+  });
+  it('请求失败时没有预览，原摘要不变', async () => {
+    const chat = [msg('原文', true)]; useChat(chat);
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(JSON.stringify({ summary: '缺了状态清单。' }));
+    expect(await engine.previewRegenerateFloor(0)).toBeNull();
+    expect(engineState.lastError).toContain('stateChanges');
+    expect(chat[0].extra?.bbs_leaf?.text).toBe('旧摘要');
+  });
+});

@@ -14,18 +14,20 @@
  * 数据:chat 非 reactive。leaf 返回浅拷贝(新引用)+ 追踪 sig.tick / derivedMeta.rev,
  *   任何来源(ST 事件、主界面摘要、楼内编辑)的变化都能刷新。
  */
-import { computed, nextTick, reactive, ref, watch } from 'vue';
+import { computed, nextTick, reactive, ref, shallowRef, watch } from 'vue';
 import Icon from '@/components/Icon.vue';
 import BbsSelect from '@/components/BbsSelect.vue';
-import { NPC_AFFINITY_FIELDS, affinityLevelFromInput, fmtNpcAffinity } from '@/memory/npcRelations';
+import { NPC_AFFINITY_FIELDS, affinityLevelFromInput } from '@/memory/npcRelations';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
+import RegenerateCompare from '@/components/RegenerateCompare.vue';
 import { getContext, type STMessage } from '@/st/context';
 import { toast } from '@/st/toast';
-import { getLeaf, leafValid, deleteLeafAt, editLeafFull, planContentById, describeVarOp } from '@/memory/apply';
-import { engineState, floorBackfillState, regenerateFloor, setFloorOmit, summarizeFloor } from '@/memory/engine';
+import { getLeaf, leafValid, deleteLeafAt, editLeafFull } from '@/memory/apply';
+import { DELTA_OP_LABEL, deltaTagGroups, type DeltaTag, type DeltaTagGroup } from '@/memory/deltaTags';
+import { applyFloorPreview, discardFloorPreview, engineState, floorBackfillState, previewRegenerateFloor, setFloorOmit, summarizeFloor, type FloorPreview } from '@/memory/engine';
 import { derivedMeta } from '@/memory/store';
 import { ui } from '@/state/ui';
-import type { LeafExtra, StoredDelta, ItemDelta, NpcDelta, VarOp, JsonValue } from '@/memory/types';
+import type { LeafExtra, StoredDelta, VarOp, JsonValue } from '@/memory/types';
 
 const props = defineProps<{ floor: number; sig: { tick: number } }>();
 
@@ -62,6 +64,10 @@ const d = computed<StoredDelta | null>(() => leaf.value?.delta ?? null);
 const expanded = ref(false);
 const busy = ref(false);
 const regenerateConfirmOpen = ref(false);
+// 重新摘要先对比:新结果放在这里等用户选,选之前不写入
+// shallowRef:预览对象要原样交回 engine(按对象找回请求上下文),不能被包成响应式代理
+const comparePreview = shallowRef<FloorPreview | null>(null);
+const applyingPreview = ref(false);
 
 const summarizingHere = computed(() => {
   void props.sig.tick;
@@ -71,7 +77,7 @@ const summarizingHere = computed(() => {
     && floorBackfillState.floor === props.floor
     && floorBackfillState.chatId === chatId;
 });
-const summaryActionDisabled = computed(() => busy.value || engineState.running || omit.value);
+const summaryActionDisabled = computed(() => busy.value || engineState.running || omit.value || !!comparePreview.value);
 const summaryActionTitle = computed(() => {
   if (omit.value) return '番外楼不参与摘要,请先取消番外';
   if (summarizingHere.value) return `正在生成楼层 #${props.floor} 的摘要`;
@@ -95,28 +101,10 @@ const timeLabel = computed(() => {
 });
 
 /* ============ 变动 → 标签行(带定位信息,供就地编辑用) ============ */
-type Op = 'add' | 'update' | 'remove' | 'resolve' | 'reopen' | 'reparent';
-// 单字符曾让人费解(「改」是什么?),改用明确词条 + 语义色徽标(见 .bbs-fp-op 的 op-* 着色)
-const opLabel: Record<Op, string> = { add: '新增', update: '更新', remove: '移除', resolve: '了结', reopen: '重启', reparent: '迁移' };
+// 标签的构建逻辑和重新摘要的对比弹窗共用,见 memory/deltaTags。
+const opLabel = DELTA_OP_LABEL;
+type Tag = DeltaTag;
 
-// key 用于定位到 delta 里的具体桶+序号,如 'item:add:0'
-// text=主文本(名字/标题,一行),sub=副文本(描述/字段细节,淡色小字另起一行)。
-// 之前把所有细节挤进一行、加大圆角、还居中,长内容就成了臃肿的居中泡泡。拆成「主 + 副」的
-// 账册式左对齐条目后,名字为纲、细节为目,长短皆可读。
-interface Tag {
-  key: string;
-  op: Op;
-  bucket: string; // add/update/remove/reparent/resolve/reopen
-  idx: number;
-  text: string;
-  sub?: string; // 副文本(可选)
-  editable: boolean; // items/npcs 可就地改字段;scenes/plans 只可删
-}
-
-function fmtItem(x: ItemDelta): { text: string; sub?: string } {
-  const text = typeof x.qty === 'number' ? `${x.name} ×${x.qty}` : x.name;
-  return { text, sub: x.desc || undefined };
-}
 // 角色可编辑的文本字段注册表:统一驱动「展示副文本 / 编辑载入 / 保存 / 按需渲染输入框」,
 // 一处定义,避免多处重复且保证一致。key=NpcDelta 字段名,draft=edit 草稿字段名,label=展示/占位。
 const NPC_FIELDS = [
@@ -132,120 +120,10 @@ const NPC_FIELDS = [
   { key: 'location', draft: 'npcLoc', label: '位置' },
 ] as const;
 
-// 角色变动:主文本=名(·身份);副文本=delta 里本轮出现的字段。更新 delta 只含被改字段,
-// 故副文本恰好就是「这层楼改了什么」——之前挤在一行还居中,极难读,拆成副行后清爽。
-function fmtNpc(x: NpcDelta): { text: string; sub?: string } {
-  const text = x.title ? `${x.name}·${x.title}` : x.name;
-  const parts: string[] = [];
-  // 身份已进主文本(名·身份),副文本从「年龄」起,避免重复
-  if (x.age) parts.push(`年龄:${x.age}`);
-  if (x.relation) parts.push(`关系:${x.relation}`);
-  const affinity = fmtNpcAffinity(x, true);
-  if (affinity) parts.push(`好感估计:${affinity}`);
-  if (x.outfit) parts.push(`着装:${x.outfit}`);
-  if (x.condition) parts.push(`状态:${x.condition}`);
-  if (x.desc) parts.push(`外貌:${x.desc}`);
-  if (x.personality) parts.push(`性格:${x.personality}`);
-  if (x.ties) parts.push(`人际:${x.ties}`);
-  if (x.location) parts.push(`位置:${x.location}`);
-  if (x.follow === true) parts.push('随行');
-  if (x.important === true) parts.push('主要角色');
-  return { text, sub: parts.length ? parts.join(' · ') : undefined };
-}
-
-const itemTags = computed<Tag[]>(() => {
-  const it = d.value?.items;
-  if (!it) return [];
-  const out: Tag[] = [];
-  (it.add ?? []).forEach((x, i) => out.push({ key: `item:add:${i}`, op: 'add', bucket: 'add', idx: i, ...fmtItem(x), editable: true }));
-  (it.update ?? []).forEach((x, i) => out.push({ key: `item:update:${i}`, op: 'update', bucket: 'update', idx: i, ...fmtItem(x), editable: true }));
-  (it.remove ?? []).forEach((name, i) => out.push({ key: `item:remove:${i}`, op: 'remove', bucket: 'remove', idx: i, text: name, editable: true }));
-  return out;
-});
-const npcTags = computed<Tag[]>(() => {
-  const np = d.value?.npcs;
-  if (!np) return [];
-  const out: Tag[] = [];
-  (np.add ?? []).forEach((x, i) => out.push({ key: `npc:add:${i}`, op: 'add', bucket: 'add', idx: i, ...fmtNpc(x), editable: true }));
-  (np.update ?? []).forEach((x, i) => out.push({ key: `npc:update:${i}`, op: 'update', bucket: 'update', idx: i, ...fmtNpc(x), editable: true }));
-  (np.remove ?? []).forEach((name, i) => out.push({ key: `npc:remove:${i}`, op: 'remove', bucket: 'remove', idx: i, text: name, editable: true }));
-  return out;
-});
-const protagonistTags = computed<Tag[]>(() => {
-  const protagonist = d.value?.protagonist;
-  if (!protagonist) return [];
-  const labels: Record<keyof typeof protagonist, string> = {
-    gender: '性别',
-    age: '年龄',
-    ageTime: '年龄锚点',
-    identity: '身份',
-    appearance: '外貌',
-    outfit: '着装',
-    condition: '状态',
-  };
-  const parts = (Object.keys(labels) as Array<keyof typeof protagonist>)
-    .filter(key => protagonist[key] !== undefined)
-    .map(key => `${labels[key]}:${protagonist[key] || '(清空)'}`);
-  if (!parts.length) return [];
-  return [{
-    key: 'protagonist:update:0',
-    op: 'update',
-    bucket: 'update',
-    idx: 0,
-    text: '主角档案',
-    sub: parts.join(' · '),
-    editable: false,
-  }];
-});
-const sceneTags = computed<Tag[]>(() => {
-  const sc = d.value?.scenes;
-  if (!sc) return [];
-  const out: Tag[] = [];
-  (sc.add ?? []).forEach((x, i) => out.push({ key: `scene:add:${i}`, op: 'add', bucket: 'add', idx: i, text: (x.path ?? []).join(' / '), editable: false }));
-  (sc.update ?? []).forEach((x, i) => out.push({ key: `scene:update:${i}`, op: 'update', bucket: 'update', idx: i, text: (x.path ?? []).join(' / '), editable: false }));
-  (sc.reparent ?? []).forEach((x, i) => out.push({ key: `scene:reparent:${i}`, op: 'reparent', bucket: 'reparent', idx: i, text: `${(x.node ?? []).join('/')} → ${(x.newPath ?? []).join('/')}`, editable: false }));
-  (sc.remove ?? []).forEach((p, i) => out.push({ key: `scene:remove:${i}`, op: 'remove', bucket: 'remove', idx: i, text: (p ?? []).join(' / '), editable: false }));
-  return out;
-});
-const planTags = computed<Tag[]>(() => {
-  const pl = d.value?.plans;
-  if (!pl) return [];
-  const out: Tag[] = [];
-  (pl.add ?? []).forEach((x, i) =>
-    out.push({ key: `plan:add:${i}`, op: 'add', bucket: 'add', idx: i, text: x.content, sub: x.kind === 'suspense' ? '悬念' : '计划', editable: true }),
-  );
-  (pl.update ?? []).forEach((x, i) =>
-    out.push({ key: `plan:update:${i}`, op: 'update', bucket: 'update', idx: i, text: x.content,
-      sub: x.targetTime === undefined ? '调整安排' : x.targetTime ? `目标时间:${x.targetTime}` : '旧期限已撤销', editable: false }),
-  );
-  // resolve/reopen/remove 存 id,反查内容显示;resolve 还带 outcome/reason(兼容裸字符串旧数据)
-  (pl.resolve ?? []).forEach((r, i) => {
-    const id = typeof r === 'string' ? r : r.id;
-    const oc = typeof r === 'string' ? undefined : r.outcome;
-    const verb = oc === 'done' ? '达成' : oc === 'cancelled' ? '取消' : oc === 'failed' ? '失败' : '了结';
-    const reason = typeof r === 'string' ? '' : (r.reason?.trim() ?? '');
-    out.push({ key: `plan:resolve:${i}`, op: 'resolve', bucket: 'resolve', idx: i, text: planLabel(verb, id), sub: reason || undefined, editable: false });
-  });
-  (pl.reopen ?? []).forEach((id, i) => out.push({ key: `plan:reopen:${i}`, op: 'reopen', bucket: 'reopen', idx: i, text: planLabel('重启', id), editable: false }));
-  (pl.remove ?? []).forEach((id, i) => out.push({ key: `plan:remove:${i}`, op: 'remove', bucket: 'remove', idx: i, text: planLabel('删除', id), editable: false }));
-  return out;
-});
-function planLabel(verb: string, id: string): string {
+// 分组渲染表(模板里循环用)。计划标签要反查别楼的计划内容,所以另外追踪 derivedMeta.rev。
+const groups = computed<DeltaTagGroup[]>(() => {
   void derivedMeta.rev;
-  const c = planContentById(id, props.floor + 1);
-  return c ? `${verb}:${c}` : `${verb}一项`;
-}
-// 变量变动:varOps 是扁平命令数组(非 add/update/remove 分桶),逐条映射成标签。
-// op 复用现有徽标语义:set/add=更新(中性)、assign=新增(强调)、remove=移除(危险)。
-// 可就地编辑(按命令类型暴露不同字段,见模板 var 分支);删除走 deleteTag 的 var 特判。
-const VAR_OP_TO_TAGOP: Record<VarOp['op'], Op> = { set: 'update', add: 'update', assign: 'add', remove: 'remove' };
-const varTags = computed<Tag[]>(() => {
-  const ops = d.value?.varOps;
-  if (!ops?.length) return [];
-  return ops.map((op, i) => {
-    const { text, sub } = describeVarOp(op);
-    return { key: `var:op:${i}`, op: VAR_OP_TO_TAGOP[op.op], bucket: 'op', idx: i, text, sub, editable: true };
-  });
+  return deltaTagGroups(d.value, props.floor);
 });
 // 正在编辑的变量命令(供模板按 op 类型决定显示哪些字段:值/增量/键)
 const editingVarOp = computed<VarOp | null>(() => {
@@ -266,9 +144,7 @@ function parseVarValue(text: string): JsonValue {
   try { return JSON.parse(t); } catch { return text; }
 }
 
-const hasAnyDelta = computed(
-  () => protagonistTags.value.length || itemTags.value.length || npcTags.value.length || sceneTags.value.length || planTags.value.length || varTags.value.length || !!d.value?.location,
-);
+const hasAnyDelta = computed(() => groups.value.some(g => g.tags.length > 0) || !!d.value?.location);
 
 /* ============ 就地编辑 ============ */
 // 当前正在编辑的单元:'text' | 'time' | 'loc' | tag.key(如 'item:add:0');null=无
@@ -646,26 +522,37 @@ async function generateMissingSummary() {
   }
 }
 
+// 先生成新结果、不写入;生成好了打开对比,用户选「用新的」才替换
 async function confirmRegenerate() {
   if (summaryActionDisabled.value) return;
-  const ok = await regenerateFloor(props.floor);
+  const preview = await previewRegenerateFloor(props.floor);
   regenerateConfirmOpen.value = false;
-  if (ok) {
-    toast(`楼层 #${props.floor} 摘要已重新生成`, 'success');
+  if (preview) {
+    comparePreview.value = preview;
     return;
   }
   toast(engineState.lastError || `楼层 #${props.floor} 重新摘要失败`, 'error');
 }
+async function useNewSummary() {
+  const preview = comparePreview.value;
+  if (!preview || applyingPreview.value) return;
+  applyingPreview.value = true;
+  try {
+    const ok = await applyFloorPreview(preview);
+    comparePreview.value = null;
+    if (ok) toast(`楼层 #${props.floor} 已换成新摘要`, 'success');
+    else toast(engineState.lastError || `楼层 #${props.floor} 没有替换`, 'error');
+  } finally {
+    applyingPreview.value = false;
+  }
+}
+function keepCurrentSummary() {
+  const preview = comparePreview.value;
+  if (!preview || applyingPreview.value) return;
+  discardFloorPreview(preview);
+  comparePreview.value = null;
+}
 
-// 分组渲染表(模板里循环用,减少重复)。icon 复用导航同款描边图标,给每个类目一个可辨识的视觉锚点。
-const groups = computed(() => [
-  { title: '主角', icon: 'characters', tags: protagonistTags.value },
-  { title: '物品', icon: 'items', tags: itemTags.value },
-  { title: '角色', icon: 'npcs', tags: npcTags.value },
-  { title: '场景', icon: 'scenes', tags: sceneTags.value },
-  { title: '悬念簿', icon: 'plans', tags: planTags.value },
-  { title: '变量', icon: 'vars', tags: varTags.value },
-]);
 </script>
 
 <template>
@@ -894,15 +781,15 @@ const groups = computed(() => [
     <ConfirmDialog
       v-model:open="regenerateConfirmOpen"
       :title="`重新摘要楼层 #${floor}`"
-      confirmText="重新生成"
+      confirmText="生成新摘要"
       confirmIcon="search"
       :busy="summarizingHere"
       busyText="生成中…"
       @confirm="confirmRegenerate"
     >
-      当前摘要将被新结果替换，该楼带来的时间、物品、角色、计划等记忆会重新计算。
-      如果该楼已被上层总结收纳，包含它的上层总结将失效并被移除。继续？
+      先生成一份新的摘要，和现在的并排对比；你选「用新的」才会替换，选「保留现在的」就什么都不改。生成要请求一次 AI。
     </ConfirmDialog>
+    <RegenerateCompare :preview="comparePreview" :busy="applyingPreview" @keep="keepCurrentSummary" @replace="useNewSummary" />
   </div>
 </template>
 

@@ -33,6 +33,7 @@ import {
   type PromptMacro,
 } from '@/memory/prompts';
 import { TIME_TAG_PROMPT } from '@/memory/timeTag';
+import { diffHunks, diffLines, diffStats, type DiffRow } from './promptDiff';
 import { clearVectorIndex, syncVectorIndex } from '@/memory/vector';
 import { resetVectorStoreProbe, vectorBackendKind } from '@/memory/vector/store';
 import { INTERNAL_UPDATE_NOTICE, performUpdate, updateState } from '@/memory/update';
@@ -324,10 +325,49 @@ const PROMPT_METAS: PromptMeta[] = [
 const editingPrompt = ref<PromptMeta | null>(null);
 const promptDraft = ref('');
 const promptArea = ref<HTMLTextAreaElement | null>(null);
+// 草稿是照着哪一版内置改的:打开时取已记录的基准;原本没自定义、从内置开始改的,就是现在的内置。
+const promptDraftBase = ref<string | null>(null);
+const promptDiffOpen = ref(false);
 
 // 该任务是否已自定义(非空即视为已覆盖内置)
 function isCustom(key: PromptKey): boolean {
   return key === 'jailbreak' ? apiSettings.taskContextMode === 'custom' : apiSettings.prompts[key].trim().length > 0;
+}
+
+/**
+ * 自定义和内置的关系:default=没自定义;synced=照着现在的内置改的;
+ * outdated=改完之后内置又更新了;unknown=旧版本里改的,没记录照着哪一版。
+ */
+type PromptSync = 'default' | 'synced' | 'outdated' | 'unknown';
+function promptSync(meta: PromptMeta): PromptSync {
+  if (!isCustom(meta.key)) return 'default';
+  const base = apiSettings.promptBases[meta.key];
+  if (!base) return 'unknown';
+  return base.trim() === meta.builtin.trim() ? 'synced' : 'outdated';
+}
+const editorSync = computed<PromptSync>(() => (editingPrompt.value ? promptSync(editingPrompt.value) : 'default'));
+/** 差异:内置已更新时看「改的那一版内置 → 现在的内置」;没记录基准时看「你的版本 → 现在的内置」。 */
+const promptDiff = computed<{ title: string; rows: DiffRow[] } | null>(() => {
+  const meta = editingPrompt.value;
+  if (!meta || !promptDiffOpen.value) return null;
+  const base = apiSettings.promptBases[meta.key];
+  const fromBase = editorSync.value === 'outdated' && !!base;
+  const lines = fromBase ? diffLines(base!, meta.builtin) : diffLines(promptDraft.value, meta.builtin);
+  const { added, removed } = diffStats(lines);
+  return {
+    title: fromBase
+      ? `内置从你改的那一版到现在：加了 ${added} 行，删了 ${removed} 行`
+      : `你的版本和现在的内置比：内置多 ${added} 行，少 ${removed} 行（也包括你自己改过的地方）`,
+    rows: diffHunks(lines, 1),
+  };
+});
+// 「已同步，不再提醒」:把基准换成现在的内置,只影响提醒,不改提示词正文
+function markPromptSynced() {
+  const meta = editingPrompt.value;
+  if (!meta) return;
+  apiSettings.promptBases[meta.key] = meta.builtin;
+  promptDraftBase.value = meta.builtin;
+  promptDiffOpen.value = false;
 }
 
 function openPrompt(meta: PromptMeta) {
@@ -335,23 +375,33 @@ function openPrompt(meta: PromptMeta) {
   // 已自定义→载入用户内容;未自定义→预填内置模板,方便直接在其上改
   promptDraft.value = meta.key === 'jailbreak' && apiSettings.taskContextMode === 'custom'
     ? apiSettings.prompts[meta.key] : apiSettings.prompts[meta.key].trim() || meta.builtin;
+  promptDraftBase.value = isCustom(meta.key) ? (apiSettings.promptBases[meta.key] ?? null) : meta.builtin;
+  promptDiffOpen.value = false;
 }
 function closePrompt() {
   editingPrompt.value = null;
   promptDraft.value = '';
+  promptDraftBase.value = null;
+  promptDiffOpen.value = false;
 }
 function savePrompt() {
   const meta = editingPrompt.value;
   if (!meta) return;
   // 草稿与内置完全一致→存空串(回落内置),避免把模板冗余存进设置、也便于显示「默认」
   const v = promptDraft.value.trim();
-  apiSettings.prompts[meta.key] = v === meta.builtin.trim() ? '' : promptDraft.value;
-  if (meta.key === 'jailbreak') apiSettings.taskContextMode = v === meta.builtin.trim() ? 'default' : 'custom';
+  const sameAsBuiltin = v === meta.builtin.trim();
+  apiSettings.prompts[meta.key] = sameAsBuiltin ? '' : promptDraft.value;
+  if (meta.key === 'jailbreak') apiSettings.taskContextMode = sameAsBuiltin ? 'default' : 'custom';
+  // 记下这份自定义照着哪一版内置改的;回到内置就不用记了。旧版本里改的、没有基准的保持不记。
+  if (sameAsBuiltin) delete apiSettings.promptBases[meta.key];
+  else if (promptDraftBase.value) apiSettings.promptBases[meta.key] = promptDraftBase.value;
   closePrompt();
 }
 // 「恢复默认」:把草稿重置回内置模板(保存后即回落内置)
 function resetPrompt() {
-  if (editingPrompt.value) promptDraft.value = editingPrompt.value.builtin;
+  if (!editingPrompt.value) return;
+  promptDraft.value = editingPrompt.value.builtin;
+  promptDraftBase.value = editingPrompt.value.builtin;
 }
 
 /* —— 向量记忆:三个模型角色,embedding 为基准,后两者留空复用它 —— */
@@ -835,7 +885,7 @@ function goToSettingsGroup(id: string) {
             <p>摘要用的 API、摘要和总结的节奏，以及界面外观。</p>
           </header>
           <div class="prism-group-cards">
-      <Collapsible class="prism-settings-card" title="副 API" :open="true">
+      <Collapsible class="prism-settings-card" title="副 API" :open="false">
         <p class="prism-card-intro">摘要和总结可以分别指定渠道；选「跟随主 API」就用酒馆当前连接的 API。点渠道可以修改或测试。</p>
         <!-- 任务指派 -->
         <div class="bbs-field bbs-assign">
@@ -872,7 +922,7 @@ function goToSettingsGroup(id: string) {
         <p v-else class="bbs-field-hint">还没有渠道。点「添加渠道」填一个摘要和总结用的 API。</p>
       </Collapsible>
 
-      <Collapsible class="prism-settings-card" title="基本设置" :open="true">
+      <Collapsible class="prism-settings-card" title="基本设置" :open="false">
         <div class="bbs-field">
           <div class="bbs-field-head">
             <span class="bbs-field-label">主题</span>
@@ -1001,7 +1051,7 @@ function goToSettingsGroup(id: string) {
         </Collapsible>
       </Collapsible>
 
-      <Collapsible class="prism-settings-card prism-card-wide" title="摘要设置" :open="true">
+      <Collapsible class="prism-settings-card prism-card-wide" title="摘要设置" :open="false">
         <p class="prism-card-intro">摘要写多长、保留多少全文、多久合并一次总结、失败后重试几次。</p>
         <label class="bbs-switch-row">
           <span class="bbs-field-label">启用自动摘要</span>
@@ -1064,7 +1114,8 @@ function goToSettingsGroup(id: string) {
             <p>生成正文时给模型看哪些记忆，以及怎样从旧剧情里找回相关内容。</p>
           </header>
           <div class="prism-group-cards">
-      <Collapsible class="prism-settings-card" title="注入设置" :open="true">
+      <!-- 卡片默认收起；只有时间标签提示词超出预算时自动展开，免得警告藏在收起的卡片里 -->
+      <Collapsible class="prism-settings-card" title="注入设置" :open="apiSettings.autoSummaryEnabled && !fitTimeTagPrompt(timeTagPrompt())">
         <p class="prism-card-intro">生成正文时交给模型的记忆：总共占多少预算，包括哪些状态。</p>
         <p v-if="apiSettings.autoSummaryEnabled && !fitTimeTagPrompt(timeTagPrompt())" class="bbs-callout is-warning">时间标签提示词超出了预算里分给它的份额，现在整段没有发送。调高预算，或缩短自定义的时间标签提示词。</p>
         <label class="bbs-switch-row"><span class="bbs-field-label">记忆注入预算</span><input v-model.number="apiSettings.memoryBudgetTokens" class="bbs-input" type="number" min="0" max="50000" step="500" /></label>
@@ -1122,7 +1173,7 @@ function goToSettingsGroup(id: string) {
         <p class="bbs-field-hint">随身和够得着的物品发完整信息，放在别处的只发名字和数量。需要打开场景信息。</p>
       </Collapsible>
 
-      <Collapsible class="prism-settings-card" title="向量记忆" :open="true">
+      <Collapsible class="prism-settings-card" title="向量记忆" :open="false">
         <p class="prism-card-intro">从旧剧情里找回和当前相关的片段，补给正文模型。Embedding 和 Query 重写必须配好；Rerank 可以不填，不填就按相似度排序。</p>
         <label class="bbs-switch-row bbs-vec-enable">
           <span class="bbs-field-label">启用向量记忆</span>
@@ -1519,8 +1570,8 @@ function goToSettingsGroup(id: string) {
             <p>摘要、总结和时间标签用的提示词，可以逐个修改，也能恢复默认。</p>
           </header>
           <div class="prism-group-cards">
-      <Collapsible class="prism-settings-card" title="自定义提示词" :open="true">
-        <p class="prism-card-intro">点一项打开编辑，可以插入宏，也可以恢复默认。</p>
+      <Collapsible class="prism-settings-card" title="自定义提示词" :open="false">
+        <p class="prism-card-intro">点一项打开编辑，可以插入宏，也可以恢复默认。改过的提示词不会跟着内置版本更新；内置改了，这里会标出「内置已更新」，打开能看内置改了什么。</p>
         <label class="bbs-switch-row"><span class="bbs-field-label">任务说明模式</span>
           <select v-model="apiSettings.taskContextMode" class="bbs-input"><option value="default">内置中性说明</option><option value="custom">自定义（可以留空）</option><option value="disabled">禁用</option></select>
         </label>
@@ -1529,8 +1580,8 @@ function goToSettingsGroup(id: string) {
           <li v-for="m in PROMPT_METAS" :key="m.key" class="bbs-prompt-item">
             <button class="bbs-prompt-open" type="button" @click="openPrompt(m)">
               <span class="bbs-prompt-name">{{ m.label }}</span>
-              <span class="bbs-prompt-state" :class="{ 'is-custom': isCustom(m.key) }">
-                {{ m.key === 'jailbreak' && apiSettings.taskContextMode === 'disabled' ? '已禁用' : isCustom(m.key) ? '已自定义' : '默认' }}
+              <span class="bbs-prompt-state" :class="{ 'is-custom': isCustom(m.key), 'is-outdated': promptSync(m) === 'outdated' }">
+                {{ m.key === 'jailbreak' && apiSettings.taskContextMode === 'disabled' ? '已禁用' : promptSync(m) === 'outdated' ? '内置已更新' : isCustom(m.key) ? '已自定义' : '默认' }}
               </span>
               <Icon name="edit" class="bbs-prompt-edit" />
             </button>
@@ -1936,6 +1987,31 @@ function goToSettingsGroup(id: string) {
 
         <p class="bbs-modal-label">{{ editingPrompt.hint }}</p>
         <p class="prism-editor-note">改动点「完成」才保存；「恢复默认」后也要点「完成」才生效，点「取消」就放弃修改。</p>
+
+        <!-- 自定义不会跟着内置更新:内置改过就提醒,并能列出差异 -->
+        <div v-if="editorSync === 'outdated' || editorSync === 'unknown'" class="bbs-callout is-warning prism-prompt-sync" role="status">
+          <p class="prism-prompt-sync-text">
+            {{ editorSync === 'outdated'
+              ? '你改过之后，内置版本又更新了。自定义的不会自动跟着变，可以先看看内置改了什么，需要的话照着改进下面的文本。'
+              : '这份是在旧版本里改的，当时没有记下照着哪一版内置。可以和现在的内置对比一下，看看要不要同步。' }}
+          </p>
+          <div class="prism-prompt-sync-actions">
+            <button class="bbs-btn bbs-btn-sm" type="button" :aria-expanded="promptDiffOpen" @click="promptDiffOpen = !promptDiffOpen">
+              {{ promptDiffOpen ? '收起差异' : editorSync === 'outdated' ? '看内置改了什么' : '和现在的内置对比' }}
+            </button>
+            <button class="bbs-btn bbs-btn-sm" type="button" @click="markPromptSynced">已同步，不再提醒</button>
+          </div>
+        </div>
+        <div v-if="promptDiff" class="prism-diff" role="region" aria-label="提示词差异">
+          <p class="prism-diff-title">{{ promptDiff.title }}</p>
+          <div class="prism-diff-body">
+            <template v-for="(row, i) in promptDiff.rows" :key="i">
+              <p v-if="row.type === 'skip'" class="prism-diff-skip">… 中间相同的 {{ row.count }} 行 …</p>
+              <p v-else class="prism-diff-line" :class="`is-${row.type}`"><span class="prism-diff-mark" aria-hidden="true">{{ row.type === 'add' ? '+' : row.type === 'del' ? '−' : ' ' }}</span>{{ row.text || ' ' }}</p>
+            </template>
+          </div>
+          <p class="prism-diff-hint">「+」是现在的内置有、对比的那一份没有的行，「−」反过来。要同步，就把需要的改动照着改进下面的文本，点「完成」保存，再点「已同步，不再提醒」。</p>
+        </div>
 
         <!-- 可用宏:点一下插入到光标处 -->
         <div class="bbs-macro-bar">
@@ -3081,6 +3157,85 @@ function goToSettingsGroup(id: string) {
   color: var(--bbs-accent);
   background: var(--bbs-accent-soft);
   border-color: transparent;
+}
+/* 内置在你改过之后更新了:换成提醒色,点开编辑能看差异 */
+.bbs-prompt-state.is-outdated {
+  color: var(--bbs-warning);
+  background: var(--bbs-warning-soft);
+}
+/* —— 提示词过期提醒与差异 —— */
+.prism-prompt-sync {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.prism-prompt-sync-text {
+  margin: 0;
+}
+.prism-prompt-sync-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.prism-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.prism-diff-title,
+.prism-diff-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--bbs-ink-muted);
+}
+.prism-diff-title {
+  font-weight: 600;
+  color: var(--bbs-ink-soft);
+}
+.prism-diff-body {
+  max-height: 300px;
+  overflow: auto;
+  padding: 6px 0;
+  border: 1px solid var(--bbs-line);
+  border-radius: var(--bbs-radius-sm);
+  background: var(--bbs-bg);
+}
+.prism-diff-line,
+.prism-diff-skip {
+  margin: 0;
+  padding: 1px 10px 1px 26px;
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--bbs-ink-soft);
+}
+.prism-diff-mark {
+  display: inline-block;
+  width: 16px;
+  margin-left: -16px;
+  font-weight: 700;
+}
+.prism-diff-line.is-add {
+  color: var(--bbs-ink);
+  background: var(--bbs-accent-soft);
+}
+.prism-diff-line.is-add .prism-diff-mark {
+  color: var(--bbs-accent);
+}
+.prism-diff-line.is-del {
+  color: var(--bbs-ink-muted);
+  background: var(--bbs-danger-soft);
+  text-decoration: line-through;
+}
+.prism-diff-line.is-del .prism-diff-mark {
+  color: var(--bbs-danger);
+}
+.prism-diff-skip {
+  color: var(--bbs-ink-muted);
+  font-style: italic;
 }
 .bbs-prompt-edit {
   flex: 0 0 auto;

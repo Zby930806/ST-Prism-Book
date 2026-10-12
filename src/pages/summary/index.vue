@@ -21,7 +21,7 @@ import SummaryPager from './SummaryPager.vue';
 import InitialTime from './InitialTime.vue';
 import { summaryErrorPresentation } from './errorPresentation';
 const summaryFailure = computed(() => summaryErrorPresentation(engineState.lastError, engineState.lastFailure));
-import { arrayPage, createSummaryIndex, PENDING_PAGE_SIZE, SUMMARY_PAGE_SIZE, treePage, walkExpanded } from './view';
+import { arrayPage, batchEtaText, createSummaryIndex, PENDING_PAGE_SIZE, SUMMARY_PAGE_SIZE, treePage, walkExpanded } from './view';
 import { SUMMARY_CTX, type SummaryRow } from './ctx';
 
 /* 兼容报告是最近一次加载/检查时的快照，不作为实时摘要计数。 */
@@ -371,6 +371,8 @@ function runBatchBackfill() {
     floors: [...derivedMeta.pendingFloors].sort((a, b) => a - b),
   });
 }
+// 剩余时间:每完成一楼更新一次,按这一次已完成楼层的平均耗时估算
+const batchEta = computed(() => batchEtaText(batchState));
 
 /* ============ 立即总结 ============
  * 手动触发一次「检测是否达阈值 → 达到就总结(可连锁多层)」。结果用一句临时提示反馈。 */
@@ -981,7 +983,8 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
     <div v-if="batchState.running" class="bbs-pending bbs-job-progress" role="status" aria-live="polite">
         <span class="bbs-batch-progress">
           <span class="bbs-pending-spin"></span>
-          正在补摘 {{ batchState.done }}/{{ batchState.total }}
+          {{ batchState.mode === 'rebuild' ? '正在重建' : '正在补摘' }} {{ batchState.done }}/{{ batchState.total }}
+          <span v-if="batchEta" class="bbs-batch-eta">{{ batchEta }}</span>
           <button class="bbs-batch-cancel" type="button" :disabled="batchState.cancelRequested" @click="cancelBatchBackfill">
             {{ batchState.cancelRequested ? '停止中…' : '取消' }}
           </button>
@@ -1988,14 +1991,20 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
 /* 批量进行中的进度块:旋转环 + 进度文字 + 取消键 */
 .bbs-batch-progress {
   margin-left: auto;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   font-size: 12px;
   font-weight: 600;
   color: var(--bbs-accent);
   font-variant-numeric: tabular-nums;
+}
+/* 剩余时间:估算值,用次要色,窄屏可以折到下一行 */
+.bbs-batch-eta {
+  font-weight: 400;
+  color: var(--bbs-ink-muted);
 }
 .bbs-batch-progress .bbs-pending-spin {
   width: 12px;

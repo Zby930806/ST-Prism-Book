@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { arrayPage, createSummaryIndex, treePage, walkExpanded } from './view';
+import { arrayPage, batchEtaText, createSummaryIndex, formatDuration, treePage, walkExpanded } from './view';
 import { selectViewNodes, type ViewNode } from '@/memory/select';
 const leaf = (i: number): ViewNode => ({ id: `l${i}`, kind: 'leaf', level: 0, text: `合成摘要${i}`, createdAt: i, childIds: [], msgIndex: i, active: true });
 const comp = (id: string, childIds: string[], level = 1): ViewNode => ({ id, kind: 'comp', level, text: `合成总结${id}`, createdAt: 1, childIds, msgIndex: -1, active: false });
@@ -71,5 +71,22 @@ describe('摘要页局部渲染约束', () => {
     }
     const node = await readFile(new URL('SummaryNode.vue', import.meta.url), 'utf8');
     expect(node).not.toMatch(/<SummaryNode\b/);
+  });
+});
+
+describe('批量补摘剩余时间', () => {
+  it('第一楼完成前、已经做完时不显示', () => {
+    expect(batchEtaText({ done: 0, total: 10, startedAt: 1000, lastDoneAt: 0 })).toBe('');
+    expect(batchEtaText({ done: 10, total: 10, startedAt: 1000, lastDoneAt: 9000 })).toBe('');
+  });
+  it('按这次已完成楼层的平均耗时估算', () => {
+    expect(batchEtaText({ done: 2, total: 12, startedAt: 1000, lastDoneAt: 61000 })).toBe('每楼约 30 秒，还要约 5 分钟');
+    expect(batchEtaText({ done: 10, total: 1800, startedAt: 1000, lastDoneAt: 251000 })).toBe('每楼约 25 秒，还要约 12 小时 26 分钟');
+  });
+  it('时长说法', () => {
+    expect(formatDuration(200)).toBe('1 秒');
+    expect(formatDuration(59_400)).toBe('59 秒');
+    expect(formatDuration(59_600)).toBe('1 分钟');
+    expect(formatDuration(3_600_000)).toBe('1 小时');
   });
 });
