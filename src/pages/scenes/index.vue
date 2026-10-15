@@ -388,8 +388,8 @@ function confirmTravel() {
 
     <div v-else class="bbs-empty">
       <span class="bbs-empty-icon"><Icon name="scenes" /></span>
-      <h3>还没有地点</h3>
-      <p>摘要会记下去过的地方，并按上下级整理。{{ hasLeaf ? '也可以手动添加。' : '有了第一条摘要后就能手动添加。' }}</p>
+      <h3>暂无地点</h3>
+      <p>摘要会记录到访过的地点，并按上下级整理。{{ hasLeaf ? '也可手动添加。' : '生成第一条摘要后可手动添加。' }}</p>
       <button v-if="hasLeaf" class="bbs-btn" type="button" @click="openComposer"><Icon name="plus" />添加第一处地点</button>
     </div>
 
@@ -468,7 +468,7 @@ function confirmTravel() {
       @confirm="confirmRemove"
       @cancel="removing = null"
     >
-      删除「{{ removing?.name }}」<template v-if="removeChildCount">和它下面的 {{ removeChildCount }} 个地点</template>？删除会记在最新一条摘要上，删掉那一楼就能恢复。
+      删除「{{ removing?.name }}」<template v-if="removeChildCount">和它下面的 {{ removeChildCount }} 个地点</template>？删除操作记录在最新一条摘要上，删除该楼即可恢复。
     </ConfirmDialog>
   </section>
 </template>

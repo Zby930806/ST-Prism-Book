@@ -5,6 +5,7 @@ import { useDialogFocus } from '@/composables/useDialogFocus';
 import { PLUGIN_VERSION } from '@/version';
 import NavBar from '@/components/NavBar.vue';
 import FloatingOrb from '@/components/FloatingOrb.vue';
+import RecallPeek from '@/components/RecallPeek.vue';
 import { getPage } from '@/pages/registry';
 import { closeBook, cycleTheme, lastOpenedAt, modalHost, THEMES, ui } from '@/state/ui';
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
@@ -97,6 +98,8 @@ const windowStyle = computed(() => {
     <div ref="modalHost"></div>
     <!-- 悬浮球:留在 shadow 内才能用 --bbs-* 主题变量;自身 position:fixed 贴边,不受 host 影响 -->
     <FloatingOrb v-if="ui.showOrb" />
+    <!-- 召回速览:从快捷回复栏的「召回」按钮弹出,不打开宝书也能看上次召回了什么 -->
+    <RecallPeek />
     <Transition name="bbs-fade">
       <div
         v-if="ui.open"

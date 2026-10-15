@@ -38,7 +38,7 @@ function payloadHashOf(mesFull: string, storyTime: string): string {
   return docHashOf(JSON.stringify([mesFull, storyTime]));
 }
 
-interface LeafForIndex {
+export interface LeafForIndex {
   leafId: string;
   docHash: string;
   payloadHash: string;
@@ -76,8 +76,8 @@ function seedLeafIds(): Set<string> {
   return ids;
 }
 
-/** 扫当前 chat 收集所有有效叶子的索引素材(种子叶子除外)。 */
-function collectLeaves(chat: STMessage[]): LeafForIndex[] {
+/** 扫当前 chat 收集所有有效叶子的索引素材(种子叶子除外)。关键词召回也用它,和向量库收录的范围一致。 */
+export function collectLeaves(chat: STMessage[]): LeafForIndex[] {
   const seeds = seedLeafIds();
   const out: LeafForIndex[] = [];
   for (let i = 0; i < chat.length; i++) {

@@ -47,6 +47,10 @@ interface UiState {
   showTopBar: boolean;
   /** 聊天框上方快速回复式按钮(默认关) */
   showQuickReply: boolean;
+  /** 快捷回复栏的「召回」按钮:开了向量记忆才显示(默认开) */
+  showRecallQuickReply: boolean;
+  /** 召回速览弹层是否展开(纯本机临时态,不存设置) */
+  recallPeekOpen: boolean;
   /** 楼层内摘要锚点(查看该楼数据 + 标番外,默认关) */
   showFloorPanel: boolean;
   /** 屏幕边缘悬浮球(默认关) */
@@ -101,6 +105,8 @@ export const ui = reactive<UiState>({
   navTapClose: apiSettings.ui.navTapClose,
   showTopBar: apiSettings.ui.showTopBar,
   showQuickReply: apiSettings.ui.showQuickReply,
+  showRecallQuickReply: apiSettings.ui.showRecallQuickReply,
+  recallPeekOpen: false,
   showFloorPanel: apiSettings.ui.showFloorPanel,
   showOrb: apiSettings.ui.showOrb,
   orbImage: apiSettings.ui.orbImage,
@@ -116,6 +122,7 @@ onSettingsReady(() => {
   ui.navTapClose = apiSettings.ui.navTapClose;
   ui.showTopBar = apiSettings.ui.showTopBar;
   ui.showQuickReply = apiSettings.ui.showQuickReply;
+  ui.showRecallQuickReply = apiSettings.ui.showRecallQuickReply;
   ui.showFloorPanel = apiSettings.ui.showFloorPanel;
   ui.showOrb = apiSettings.ui.showOrb;
   ui.orbImage = apiSettings.ui.orbImage;
@@ -132,6 +139,7 @@ watch(
     ui.navTapClose,
     ui.showTopBar,
     ui.showQuickReply,
+    ui.showRecallQuickReply,
     ui.showFloorPanel,
     ui.showOrb,
     ui.orbImage,
@@ -145,6 +153,7 @@ watch(
     apiSettings.ui.navTapClose = ui.navTapClose;
     apiSettings.ui.showTopBar = ui.showTopBar;
     apiSettings.ui.showQuickReply = ui.showQuickReply;
+    apiSettings.ui.showRecallQuickReply = ui.showRecallQuickReply;
     apiSettings.ui.showFloorPanel = ui.showFloorPanel;
     apiSettings.ui.showOrb = ui.showOrb;
     apiSettings.ui.orbImage = ui.orbImage;

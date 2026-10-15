@@ -31,6 +31,20 @@ export interface RecallDebugRerankHit {
   source: string;
   storyTime: string;
   preview: string;
+  /** 来自哪一路:向量、关键词、两路都有,或上一轮保留;旧快照没有此字段(按向量处理) */
+  route?: 'vector' | 'keyword' | 'both' | 'sticky';
+  /** false = 只由关键词命中,没有向量相似度 */
+  similarityKnown?: boolean;
+}
+
+/** 关键词一路的命中 */
+export interface RecallDebugKeywordHit {
+  leafId: string;
+  source: string;
+  score: number;
+  matched: string[];
+  storyTime: string;
+  preview: string;
 }
 
 export interface RecallDebug {
@@ -43,17 +57,26 @@ export interface RecallDebug {
   /** 查询重写产出的多条检索 query */
   queries: string[];
   embedding: RecallDebugEmbedHit[];
+  /** 关键词一路的命中(关闭关键词召回或没提到已知名字时为空) */
+  keyword: RecallDebugKeywordHit[];
   rerank: RecallDebugRerankHit[];
   /** 最终注入主对话的文本(空 = 本回合未注入) */
   injectedText: string;
 }
 
 function empty(): RecallDebug {
-  return { at: 0, status: '', intent: '', queries: [], embedding: [], rerank: [], injectedText: '' };
+  return { at: 0, status: '', intent: '', queries: [], embedding: [], keyword: [], rerank: [], injectedText: '' };
 }
 
 /** 全局召回调试快照。UI 直接订阅;recall.ts 在各阶段写入。 */
 export const recallDebug = reactive<RecallDebug>(empty());
+
+// 快照每次开新/还原/改状态/清空都 +1。拦截器据此判断这次生成前召回是否真的跑过,
+// 跑过才把结果登记给本次回复(见 floorRecall.ts);不能看 at,复用缓存时 at 是旧值。
+let writes = 0;
+export function recallDebugWrites(): number {
+  return writes;
+}
 
 /** 摘要预览:取摘要文本截断,供面板单行展示(去换行,限长)。 */
 export function previewOf(text: string | null | undefined, max = 80): string {
@@ -63,11 +86,13 @@ export function previewOf(text: string | null | undefined, max = 80): string {
 
 /** 开一次新召回:清空各阶段、置「进行中」。在 runVectorRecall 进入有效路径后调用。 */
 export function resetRecallDebug(): void {
+  writes++;
   Object.assign(recallDebug, empty(), { at: Date.now(), status: '进行中…' });
 }
 
 /** 仅更新状态文案(各早退路径写明原因,如「未召回:Query 重写未配置」)。 */
 export function setRecallStatus(status: string): void {
+  writes++;
   recallDebug.status = status;
   if (!recallDebug.at) recallDebug.at = Date.now();
 }
@@ -79,6 +104,10 @@ export function setRecallRewrite(intent: string, queries: string[]): void {
 
 export function setRecallEmbedding(hits: RecallDebugEmbedHit[]): void {
   recallDebug.embedding = hits;
+}
+
+export function setRecallKeyword(hits: RecallDebugKeywordHit[]): void {
+  recallDebug.keyword = hits;
 }
 
 export function setRecallRerank(hits: RecallDebugRerankHit[]): void {
@@ -94,7 +123,14 @@ export function snapshotRecallDebug(): RecallDebug {
   return JSON.parse(JSON.stringify(recallDebug));
 }
 
-/** 把缓存的调试快照还原到面板(命中缓存时用,免得 reset 后面板空白)。 */
+/** 把缓存的调试快照还原到面板(命中缓存时用,免得 reset 后面板空白)。旧快照缺的字段按空值补齐。 */
 export function restoreRecallDebug(snap: RecallDebug): void {
-  Object.assign(recallDebug, snap);
+  writes++;
+  Object.assign(recallDebug, empty(), snap);
+}
+
+/** 清空快照(切聊天时用):「上次召回」只说当前聊天,不把别的聊天的召回留给面板和快捷回复按钮。 */
+export function clearRecallDebug(): void {
+  writes++;
+  Object.assign(recallDebug, empty());
 }

@@ -17,10 +17,11 @@ import { clampToTimeTags, cleanBody, explicitOpeningTime, hasStoryBody, INITIAL_
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import { memory, memoryWriteIssue, checkCompatibility, recomputeDerived, scheduleLeafFlush } from './store';
 import { legacyLeafIssue } from './compatibility';
-import type { LeafExtra, StoredDelta, SummaryDelta } from './types';
+import type { LeafConflict, LeafExtra, StoredDelta, SummaryDelta } from './types';
 import { scheduleVectorIndex } from './vector';
 import { invalidateRecallCache } from './vector/cache';
 import { clearRecallInjection } from './vector/recall';
+import { clearRecallDebug } from './vector/debug';
 import { reactive, watch } from 'vue';
 import { ensureOpeningStoryTime } from './initialTime';
 
@@ -1255,14 +1256,15 @@ function buildLeafParts(
   aiFloor: number,
   delta: SummaryDelta,
   stateBefore: ReturnType<typeof deriveMemory>,
-): { text: string; delta: StoredDelta; timeStart?: string; timeEnd?: string } {
+): { text: string; delta: StoredDelta; timeStart?: string; timeEnd?: string; conflicts?: LeafConflict[] } {
   // 时间锚点:从该楼正文标签读起止(先裁剪到正文段,跳过思维链/状态栏里混入的同名标签)
   const tag = parseTimeRange(clampToTimeTags(chat[aiFloor].mes));
 
   // 未了结计划的有序列表:顺序即提示词里的 p1/p2…,用于把 update/resolve 短序号翻译成稳定 id
   const openPlansOrdered = stateBefore.plans.filter(p => p.status === 'open');
   // 生活小档案当前列表:顺序即提示词里的 d1/d2…,用于把 update/archive/remove 短序号翻译成稳定 id
-  const storedDelta = finalizeDelta(delta, openPlansOrdered, stateBefore.lifeDetails);
+  // 未结案信息差:顺序即提示词里的 s1/s2…
+  const storedDelta = finalizeDelta(delta, openPlansOrdered, stateBefore.lifeDetails, stateBefore.secrets.filter(s => s.status === 'open'));
 
   // 时间起止:标签优先(与新剧情同源不漂移);标签缺的那端用 AI 补的 timeStart/timeEnd 兜底。
   const timeStart = tag.start || storyTimeValue(delta.timeStart);
@@ -1270,7 +1272,9 @@ function buildLeafParts(
   // 状态当前时间(覆盖型):用结束时间(本段最后时刻);取不到则保留既有状态。
   if (timeEnd) storedDelta.time = timeEnd;
   else delete storedDelta.time; // 协议状态/空值不覆盖既有时钟。
-  return { text: llmString(delta.summary), delta: storedDelta, timeStart, timeEnd };
+  // 正文与记录的矛盾:解析时已校验过原句,这里只拷贝,状态从「待处理」开始
+  const conflicts = delta.conflicts?.length ? delta.conflicts.map(c => ({ about: c.about, record: c.record, text: c.text })) : undefined;
+  return { text: llmString(delta.summary), delta: storedDelta, timeStart, timeEnd, conflicts };
 }
 
 /**
@@ -1308,6 +1312,7 @@ function applyLeafForFloor(
     swipe: replaceLeaf?.swipe ?? (typeof chat[aiFloor].swipe_id === 'number' ? chat[aiFloor].swipe_id : 0),
     v: 1,
   };
+  if (parts.conflicts?.length) leaf.conflicts = parts.conflicts;
   if (replaceLeaf) invalidateSummaryAncestors(replaceLeaf.id);
   chat[aiFloor].extra = { ...(chat[aiFloor].extra ?? {}), bbs_leaf: leaf };
   // 叶子正文/摘要已变 → 召回读到的向量内容会变,立即失效召回缓存(防重生成/翻页复用旧召回)。
@@ -1403,6 +1408,8 @@ async function summarizeFloorWork(
       // 在场标记按「本楼之前」的状态算,要 AI 逐个对照做离场/归场对账(与注入端同一权威判定)
       presence: classifyNpcPresence(n, stateBefore.scenes, stateBefore.state.location, stateBefore.state.locationPath) })),
     openPlans: openPlansOrdered.map(p => ({ kind: p.kind, content: p.content, createdTime: p.createdTime, targetTime: p.targetTime })),
+    // 未结案信息差:顺序即 s1/s2…(与 finalizeDelta 翻译稳定 id 同口径)
+    secrets: stateBefore.secrets.filter(s => s.status === 'open').map(s => ({ content: s.content, knownBy: s.knownBy, unaware: s.unaware })),
     // 近期已完成计划:与注入端同口径,截止点用本楼之前的状态(不泄漏未来)
     resolvedPlans: selectRecentResolvedPlans(stateBefore.plans, apiSettings.recentResolvedPlansCount),
     history,
@@ -1444,7 +1451,7 @@ async function summarizeFloorWork(
       sourceContent: content,
       sourceTexts: targets.map(i => cleanBody(chat[i].mes)),
       conditionContext: { ...stateBefore, content, strict: builtin },
-      finalize: value => finalizeDelta(value, openPlansOrdered, stateBefore.lifeDetails),
+      finalize: value => finalizeDelta(value, openPlansOrdered, stateBefore.lifeDetails, stateBefore.secrets.filter(s => s.status === 'open')),
     });
     if (initialStoryTime()) {
       // 只补缺失端点，不能把后续楼层的完整日期降为正文中的“夜晚”等时段。
@@ -2166,6 +2173,7 @@ export function bindEngine(): void {
     es.on(et.CHAT_CHANGED, () => {
       // 记忆重载由 store 的 CHAT_CHANGED 监听负责;此处仅在其后刷新注入
       clearRecallInjection(); // 切聊天先抹掉上个聊天的召回残留(新聊天下次生成再重算)
+      clearRecallDebug(); // 「上次召回」的面板和快捷回复按钮也只说当前聊天
       setTimeout(() => {
         normalizeBacklogNotices(getContext()?.chat ?? []);
         refreshInjection();

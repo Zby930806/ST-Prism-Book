@@ -139,7 +139,7 @@ export function recomputeDerived(): void {
   const ctx = getContext();
   if (memoryWriteIssue()) {
     const empty = createEmptyMemory();
-    for (const key of ['state', 'protagonist', 'items', 'plans', 'scenes', 'npcs', 'itemLog', 'lifeDetails', 'vars'] as const) Object.assign(memory, { [key]: empty[key] });
+    for (const key of ['state', 'protagonist', 'items', 'plans', 'scenes', 'npcs', 'itemLog', 'lifeDetails', 'secrets', 'vars'] as const) Object.assign(memory, { [key]: empty[key] });
     Object.assign(derivedMeta, { hasLeaf: false, leaves: [], pendingFloors: [], latestStoryTime: '', rev: derivedMeta.rev + 1 });
     return;
   }
@@ -161,6 +161,7 @@ export function recomputeDerived(): void {
   memory.npcs.splice(0, memory.npcs.length, ...d.npcs);
   memory.itemLog.splice(0, memory.itemLog.length, ...d.itemLog);
   memory.lifeDetails.splice(0, memory.lifeDetails.length, ...d.lifeDetails);
+  memory.secrets.splice(0, memory.secrets.length, ...d.secrets);
   // vars 是 JSON 对象:清空后按派生结果重填(不换 reactive 引用,保持页面响应式绑定)
   for (const k of Object.keys(memory.vars)) delete memory.vars[k];
   Object.assign(memory.vars, d.vars);

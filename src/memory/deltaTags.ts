@@ -2,7 +2,7 @@
  * 一楼摘要带来的状态变动 → 可读的标签行。楼层面板(就地编辑)和重新摘要的对比弹窗共用,
  * 两处显示同一份变动时说法一致。纯函数:不改聊天,计划只通过 planContentById 查内容。
  */
-import { describeVarOp, planContentById } from './apply';
+import { describeVarOp, planContentById, secretContentById } from './apply';
 import { fmtNpcAffinity } from './npcRelations';
 import type { ItemDelta, NpcDelta, StoredDelta, VarOp } from './types';
 
@@ -123,6 +123,31 @@ function planLabel(verb: string, id: string, floor: number): string {
   return c ? `${verb}:${c}` : `${verb}一项`;
 }
 
+/** 信息差只存 id 时反查新增时的内容(只扫叶子,不重放)。 */
+function secretLabel(verb: string, id: string, floor: number): string {
+  const c = secretContentById(id, floor + 1);
+  return c ? `${verb}:${c}` : `${verb}一项`;
+}
+
+function secretNames(knownBy?: string[], unaware?: string[]): string | undefined {
+  const parts: string[] = [];
+  if (knownBy?.length) parts.push(`知情:${knownBy.join('、')}`);
+  if (unaware?.length) parts.push(`不知情:${unaware.join('、')}`);
+  return parts.length ? parts.join(' · ') : undefined;
+}
+
+function secretTags(d: Delta, floor: number): DeltaTag[] {
+  const sc = d?.secrets;
+  if (!sc) return [];
+  const out: DeltaTag[] = [];
+  (sc.add ?? []).forEach((x, i) => out.push({ key: `secret:add:${i}`, op: 'add', bucket: 'add', idx: i, text: x.content, sub: secretNames(x.knownBy, x.unaware), editable: false }));
+  (sc.update ?? []).forEach((x, i) => out.push({ key: `secret:update:${i}`, op: 'update', bucket: 'update', idx: i, text: x.content || secretLabel('更新', x.id, floor), sub: secretNames(x.knownBy, x.unaware), editable: false }));
+  (sc.resolve ?? []).forEach((id, i) => out.push({ key: `secret:resolve:${i}`, op: 'resolve', bucket: 'resolve', idx: i, text: secretLabel('结案', id, floor), editable: false }));
+  (sc.reopen ?? []).forEach((id, i) => out.push({ key: `secret:reopen:${i}`, op: 'reopen', bucket: 'reopen', idx: i, text: secretLabel('重开', id, floor), editable: false }));
+  (sc.remove ?? []).forEach((id, i) => out.push({ key: `secret:remove:${i}`, op: 'remove', bucket: 'remove', idx: i, text: secretLabel('删除', id, floor), editable: false }));
+  return out;
+}
+
 function planTags(d: Delta, floor: number): DeltaTag[] {
   const pl = d?.plans;
   if (!pl) return [];
@@ -167,6 +192,7 @@ export function deltaTagGroups(d: Delta, floor: number): DeltaTagGroup[] {
     { title: '角色', icon: 'npcs', tags: npcTags(d) },
     { title: '场景', icon: 'scenes', tags: sceneTags(d) },
     { title: '悬念簿', icon: 'plans', tags: planTags(d, floor) },
+    { title: '信息差', icon: 'eye-off', tags: secretTags(d, floor) },
     { title: '变量', icon: 'vars', tags: varTags(d) },
   ];
 }

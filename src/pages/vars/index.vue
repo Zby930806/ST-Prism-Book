@@ -230,8 +230,8 @@ function applyImport() {
       </button>
     </div>
     <pre v-if="hasState" class="bbs-json-view" tabindex="0" aria-label="当前变量 JSON 状态">{{ stateJson }}</pre>
-    <div v-else class="bbs-var-emptyline"><Icon name="vars" /><div><h3>还没有变量</h3><p>可以在下面定义初始模板，也可以让 AI 在剧情里自己建（比如势力、关系）。</p></div></div>
-    <p v-if="!hasLeaf" class="bbs-modal-hint bbs-var-statehint">有了摘要才能改当前值；现在显示的是初始状态。下面的模板随时可以改。</p>
+    <div v-else class="bbs-var-emptyline"><Icon name="vars" /><div><h3>暂无变量</h3><p>可在下方定义初始模板，也可由 AI 在剧情中自行创建（如势力、关系）。</p></div></div>
+    <p v-if="!hasLeaf" class="bbs-modal-hint bbs-var-statehint">生成摘要后才能修改当前值；当前显示的是初始状态。下方模板可随时修改。</p>
     </section>
 
     <!-- 初始模板与说明 -->

@@ -62,7 +62,7 @@ function keep() {
         <span class="bbs-modal-title">楼层 #{{ preview.floor }}：选一份保留</span>
       </header>
       <p class="prism-compare-note">
-        新摘要还没有写入。选「用新的」会替换这一楼的摘要，以及它带来的时间、物品、角色、计划等变化；包含这一楼的上层总结会作废，之后按设置重新生成。选「保留现在的」什么都不改。
+        新摘要尚未写入。选择「用新的」将替换本楼摘要及其带来的时间、物品、角色、计划等变化；包含本楼的上层总结将作废，之后按设置重新生成。选择「保留现在的」不做任何修改。
       </p>
       <div class="prism-compare-cols">
         <section v-for="side in sides" :key="side.key" class="prism-compare-col" :class="`is-${side.key}`" :aria-label="side.label">

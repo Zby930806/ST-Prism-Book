@@ -85,7 +85,7 @@ async function confirm() {
     <p class="hint">先和模型聊聊人物动机、节奏或走向。讨论不会改动规划，也不会发给正文；想采纳时点「按讨论生成草稿」。</p>
     <p v-if="unsaved" class="bbs-callout is-warning">草稿有没保存的修改：讨论只会参考已保存的版本，按讨论生成草稿也会覆盖这些修改。</p>
     <p v-if="configurationIssue" class="bbs-callout is-warning">{{ configurationIssue }}</p>
-    <p v-if="apiDirty" class="hint">API 设置还没保存，讨论会用上次保存的设置。</p>
+    <p v-if="apiDirty" class="hint">API 设置尚未保存，讨论时使用上次保存的设置。</p>
     <label>参考哪个版本
       <select v-model="target" class="bbs-input" aria-label="讨论参考" :disabled="locked" @change="touchedTarget = true">
         <option v-if="outlineState.active" value="active">正在用的规划 · {{ outlineState.active.content.title }}</option>
@@ -99,7 +99,7 @@ async function confirm() {
         <div class="discussion-text">{{ message.content }}</div>
       </li>
     </ol>
-    <p v-else class="hint">还没有讨论。可以问问：「这个转折会不会让角色太配合了？有没有更自然的走法？」</p>
+    <p v-else class="hint">暂无讨论。可就当前规划的走向、节奏或角色反应提问。</p>
     <label>你想聊的<textarea v-model="question" class="bbs-input" rows="4" maxlength="4000" :disabled="locked" placeholder="想保留什么、想改什么，或者先问问模型的看法。Ctrl+Enter 发送" @keydown.ctrl.enter.prevent="send" /></label>
     <div class="discussion-actions">
       <button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canSend" @click="send">发送</button>
@@ -119,7 +119,7 @@ async function confirm() {
       </div>
     </div>
     <div v-if="confirmation" class="discussion-confirmation">
-      <p>{{ confirmation.kind === 'clear' ? '只清空这个聊天的讨论记录，草稿、规划、札记和摘要都不受影响。确定清空吗？' : '会再请求一次规划 API，按讨论生成新草稿，替换当前草稿（包括没保存的修改）。正在用的规划不受影响，新草稿也要你确认后才生效。' }}</p>
+      <p>{{ confirmation.kind === 'clear' ? '只清空当前聊天的讨论记录，草稿、规划、札记和摘要均不受影响。确定清空？' : '将再次请求规划 API，按讨论生成新草稿并替换当前草稿（包括未保存的修改）。正在使用的规划不受影响，新草稿需确认后生效。' }}</p>
       <div class="discussion-actions">
         <button type="button" class="bbs-btn bbs-btn-primary" :disabled="locked" @click="confirm">{{ confirmation.kind === 'clear' ? '清空' : '生成草稿' }}</button>
         <button type="button" class="bbs-btn" @click="confirmation = null">取消</button>

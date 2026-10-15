@@ -331,6 +331,8 @@ export interface LeafExtra {
    * collectLeaves 据此跳过它。
    */
   seed?: boolean;
+  /** 本楼正文与已有记录的矛盾(可选;旧叶子没有) */
+  conflicts?: LeafConflict[];
   /** 叶子结构版本 */
   v: 1;
 }
@@ -448,6 +450,55 @@ export interface LifeDetailUpdate {
 }
 
 /**
+ * 信息差(派生产物,不持久化):某件事有人知道、有人不知道,且会影响后续人物言行。
+ * id 确定性:`secret:${产生它的叶子id}#${在该叶子 add 数组里的序号}`(重放幂等,手动 op 可稳定引用)。
+ * 注入时只提醒在场的不知情者,避免角色说出或依据自己不知道的事行动。
+ */
+export interface MemSecret {
+  id: string;
+  /** 事实一句话 */
+  content: string;
+  /** 知情者(角色名;主角为主角名) */
+  knownBy: string[];
+  /** 需要提醒的不知情者 */
+  unaware: string[];
+  status: 'open' | 'resolved';
+  /** 记录时的故事内时间 */
+  createdTime?: string;
+  createdAt: number;
+  resolvedAt?: number;
+}
+
+/** AI 侧新增信息差 */
+export interface SecretAdd {
+  content: string;
+  knownBy?: string[];
+  unaware?: string[];
+}
+
+/** AI 侧更新信息差:id 为短序号 s1/s2(固化时翻成稳定 id);给出的名单整体覆盖 */
+export interface SecretUpdate {
+  id: string;
+  content?: string;
+  knownBy?: string[];
+  unaware?: string[];
+}
+
+/**
+ * 本楼正文与已有记录的矛盾(摘要时标出;对应字段保持原记录)。存在叶子上,不参与重放。
+ */
+export interface LeafConflict {
+  /** 冲突的对象和方面,如「洛伊的着装」 */
+  about: string;
+  /** 现有记录中的说法 */
+  record: string;
+  /** 本楼正文原句 */
+  text: string;
+  /** open=待处理(缺省);pending=已选提醒正文模型,下一次生成注入;reminded=已注入;ignored=已忽略 */
+  status?: 'open' | 'pending' | 'reminded' | 'ignored';
+}
+
+/**
  * 顶层记忆对象。
  * **只有 version + summaries 是真源并持久化**;state / items / plans 是从 summaries
  * 重放算出的派生缓存(供页面响应式读取,saveMemory 不写它们)。
@@ -470,6 +521,8 @@ export interface BaibaiMemory {
   itemLog: ItemLogEntry[];
   /** 派生缓存:主角及角色生活小档案(从叶子 delta 重放) */
   lifeDetails: MemLifeDetail[];
+  /** 派生缓存:信息差(从叶子 delta 重放) */
+  secrets: MemSecret[];
   /** 真源镜像:三层变量定义模板(global/char 来自 settings,chat 来自 chatMetadata) */
   varTemplates: Record<VarTier, VarTemplate>;
   /** 派生缓存:变量当前状态(从合并模板起、fold 各叶子 varOps 得到的 JSON 树) */
@@ -486,6 +539,7 @@ export function createEmptyMemory(): BaibaiMemory {
     items: [],
     plans: [],
     lifeDetails: [],
+    secrets: [],
     scenes: [],
     npcs: [],
     itemLog: [],
@@ -656,6 +710,15 @@ export interface SummaryDelta {
     /** 删除(短序号 d1/d2 或稳定 id) */
     remove?: string[];
   };
+  /** 指令型:信息差增改结案(可选;只记正文明确的隐瞒或缺席,id 用短序号 s1/s2) */
+  secrets?: {
+    add?: SecretAdd[];
+    update?: SecretUpdate[];
+    /** 结案:所有相关角色都已知情,或已无关紧要 */
+    resolve?: string[];
+  };
+  /** 正文与已有记录的矛盾(可选;写了就不更新对应字段,存到叶子上供用户处理) */
+  conflicts?: { about: string; record: string; text: string }[];
   /**
    * 指令型:自定义变量的路径命令数组(仿 MVU)。AI 看当前 JSON 状态 + 说明,产出本楼新事件对应的命令:
    *  - { "op":"set", "path":"好感度", "value":60 }
@@ -723,6 +786,14 @@ export interface StoredDelta {
     archive?: string[];
     /** 删除(稳定 id) */
     remove?: string[];
+  };
+  /** 信息差:AI 产 add/update/resolve(稳定 id);remove/reopen 仅手动操作 */
+  secrets?: {
+    add?: SecretAdd[];
+    update?: SecretUpdate[];
+    resolve?: string[];
+    remove?: string[];
+    reopen?: string[];
   };
   varOps?: VarOp[];
 }

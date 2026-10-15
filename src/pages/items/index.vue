@@ -84,7 +84,7 @@ function saveEdit() {
 
 <template>
   <section class="bbs-page">
-    <PageHeader icon="items" title="物品" description="摘要时记下的物品：哪些带在身上，哪些放在别处。也可以手动补录和修改。" />
+    <PageHeader icon="items" title="物品" description="摘要时记录的物品，分为随身携带和存放在别处两类，可手动补录和修改。" />
     <SummaryOnlyNotice subject="物品清单与变动" />
 
     <div class="bbs-ledger-meta" aria-label="物品概览">
@@ -141,8 +141,8 @@ function saveEdit() {
     </div>
     <div v-else class="bbs-empty">
       <span class="bbs-empty-icon"><Icon name="items" /></span>
-      <h3>还没有物品</h3>
-      <p>摘要会自动记下剧情里出现的物品。{{ hasLeaf ? '也可以在上面手动补录。' : '有了第一条摘要后就能手动补录。' }}</p>
+      <h3>暂无物品</h3>
+      <p>摘要会自动记录剧情中出现的物品。{{ hasLeaf ? '也可在上方手动补录。' : '生成第一条摘要后可手动补录。' }}</p>
     </div>
 
     <!-- 编辑弹窗:Teleport 出滚动容器,见 ModalMask -->

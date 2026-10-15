@@ -1,10 +1,14 @@
 import { hydrateOutlineSettings } from '@/outline/settings';
 import { bindOutlineLifecycle, refreshOutlineInjection } from '@/outline/service';
+import { bindOutlineProgress } from '@/outline/progress';
 import { hydrateNotesSettings } from '@/notes/settings';
 import { bindNotesLifecycle, refreshNotesInjection } from '@/notes/service';
-import { hydrateSettings } from '@/api/settings';
+import { apiSettings, hydrateSettings } from '@/api/settings';
 import { bindEngine, handleGenerationIntercept } from '@/memory/engine';
 import { runVectorRecall, shouldRecallForType } from '@/memory/vector/recall';
+import { recallDebugWrites } from '@/memory/vector/debug';
+import { armFloorRecall, beginGenerationRecall, bindFloorRecall } from '@/memory/vector/floorRecall';
+import { bindContinuityNote, prepareContinuityNote } from '@/memory/continuity';
 import { refreshInjection } from '@/memory/inject';
 import { syncTimeTagRegex } from '@/memory/timeTag';
 import { bindChatLifecycle } from '@/memory/store';
@@ -14,6 +18,7 @@ import { vAutosize } from '@/directives/autosize';
 import { injectMenuButton } from '@/menu';
 import { syncTopBarButton } from '@/topbar';
 import { syncQuickReplyButton } from '@/quickReply';
+import { syncRecallQuickReply } from '@/recallQuickReply';
 import { bindFloorPanel } from '@/floorPanel';
 import { registerPublicInterface } from '@/public/register';
 import { ui } from '@/state/ui';
@@ -39,6 +44,10 @@ const HOST_ID = 'bbs-app-host';
   type: string | undefined,
 ): Promise<void> => {
   try {
+    // 作废上一轮没用上的召回登记(楼层面板的召回记录只认本次生成)
+    beginGenerationRecall(type);
+    // 用户选过「提醒正文模型」的记录冲突:本次生成注入一次
+    prepareContinuityNote(type);
     // 先走积压拦截:返回 true = 已 abort 本次生成,无需召回(生成不会发生)。
     refreshNotesInjection();
     refreshOutlineInjection();
@@ -46,7 +55,10 @@ const HOST_ID = 'bbs-app-host';
     // 放行且该类型需要召回 → 阻塞式向量召回(写注入槽后再放行生成)。
     // 召回内部自带向量开关/可用性判断,失败静默降级,绝不影响生成。
     if (!intercepted && shouldRecallForType(type)) {
+      const writes = recallDebugWrites();
       await runVectorRecall();
+      // 召回结果登记给这次生成的回复,回复到达时写进那一楼(供楼层面板显示)
+      armFloorRecall(type, writes);
     }
   } catch (e) {
     console.error('[棱镜宝书] 生成拦截器异常(放行本次生成)', e);
@@ -128,6 +140,10 @@ $(() => {
     () => ui.showQuickReply,
     on => syncQuickReplyButton(on),
   );
+  // 快捷回复栏的「召回」按钮:开了向量记忆、且设置里没关掉才显示
+  const recallButtonWanted = () => ui.showRecallQuickReply && apiSettings.vector.enabled;
+  syncRecallQuickReply(recallButtonWanted());
+  watch(recallButtonWanted, on => syncRecallQuickReply(on));
   // 记忆系统:等 ST 的 getContext 就绪后再绑定(加载顺序不确定时轮询)
   bindMemoryWhenReady();
 });
@@ -143,6 +159,8 @@ function bindMemoryWhenReady(attempt = 0) {
       bindNotesLifecycle();
       hydrateOutlineSettings();
       bindOutlineLifecycle();
+      // 规划推进条件:回复到达时按设置自动检查(默认关),切聊天清空结果
+      bindOutlineProgress();
       // 公共读取接口不依赖记忆引擎开关；聊天载入后立即暴露，供其它插件/脚本读取。
       void registerPublicInterface();
       bindEngine();
@@ -152,6 +170,10 @@ function bindMemoryWhenReady(attempt = 0) {
       refreshInjection();
       // 楼内摘要锚点:按设置开关注入(bindFloorPanel 内 watch 开关 + 主题,immediate 首次同步)
       bindFloorPanel();
+      // 回复到达时记下生成前召回了什么(只在启用楼层面板时写入)
+      bindFloorRecall();
+      // 记录冲突的连续性提醒:回复到达后标为已提醒
+      bindContinuityNote();
       // 后台检测更新(实时比对本地/远端 manifest 版本;失败静默,不阻断启动)
       void checkForUpdate();
       console.log('[棱镜宝书] 启动链绑定完成');

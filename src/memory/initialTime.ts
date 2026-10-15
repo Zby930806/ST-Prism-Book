@@ -16,7 +16,7 @@ function hasStoredHistory(raw: unknown): boolean {
   if (data.version !== MEMORY_VERSION || !Array.isArray(data.summaries) || data.summaries.length) return true;
   const empty = (v: unknown): boolean => v == null || v === '' ||
     (Array.isArray(v) ? v.length === 0 : typeof v === 'object' && Object.values(v).every(empty));
-  const caches = ['state', 'protagonist', 'items', 'plans', 'lifeDetails', 'scenes', 'npcs', 'itemLog', 'vars'];
+  const caches = ['state', 'protagonist', 'items', 'plans', 'lifeDetails', 'secrets', 'scenes', 'npcs', 'itemLog', 'vars'];
   return Object.entries(data).some(([key, value]) => {
     if (['version', 'summaries', 'varsTemplate', 'varTemplates'].includes(key)) return false;
     return !caches.includes(key) || !empty(value);

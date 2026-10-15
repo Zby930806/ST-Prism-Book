@@ -232,8 +232,8 @@ async function pullModels(ch: ApiChannel) {
     models.value[ch.id] = list;
     if (list.length && !ch.model) ch.model = list[0];
     testing.value[ch.id] = list.length
-      ? { tone: 'ok', text: `拉到 ${list.length} 个模型，点「模型」输入框就能选。` }
-      : { tone: 'warn', text: '接口没有返回任何模型，可以直接填写模型名。' };
+      ? { tone: 'ok', text: `已获取 ${list.length} 个模型，可在「模型」输入框中选择。` }
+      : { tone: 'warn', text: '接口未返回模型列表，可直接填写模型名。' };
   } catch (e) {
     const view = describeFailure(e, '请检查地址、网络或超时设置后再试');
     testing.value[ch.id] = { tone: 'error', text: `拉取模型列表失败：${view.message}`, detail: view.detail };
@@ -287,35 +287,35 @@ const PROMPT_METAS: PromptMeta[] = [
   {
     key: 'summary',
     label: '摘要提示词',
-    hint: '把一楼的对话整理成记忆：摘要正文，加上时间、地点、物品、计划等变化。摘要字数在「摘要设置」里调。',
+    hint: '将一楼的对话整理为记忆：摘要正文，以及时间、地点、物品、计划等变化。摘要字数在「摘要设置」中调整。',
     builtin: SUMMARY_PROMPT,
     macros: SUMMARY_MACROS,
   },
   {
     key: 'resummary',
     label: '总结提示词',
-    hint: '把多条楼层摘要合并成一条 L1 总结，字数跟着「字数档位」走。',
+    hint: '将多条楼层摘要合并为一条 L1 总结，字数由「字数档位」决定。',
     builtin: RESUMMARY_PROMPT,
     macros: RESUMMARY_MACROS,
   },
   {
     key: 'resummary2',
     label: '二次总结提示词',
-    hint: '把多条总结再往上合并一层（L1 及以上 → 更高一层）。字数按输入长度算：详细约 40%–50%，精简约 30%–40%。',
+    hint: '将多条总结向上合并一层（L1 及以上 → 更高一层）。字数按输入长度计算：详细约 40%–50%，精简约 30%–40%。',
     builtin: RESUMMARY2_PROMPT,
     macros: RESUMMARY2_MACROS,
   },
   {
     key: 'jailbreak',
     label: '任务说明（旧称破限）' ,
-    hint: '放在最前面的 system 消息，说明这是整理资料的任务、资料的边界在哪。可选默认、自定义、禁用；自定义留空就不发送。',
+    hint: '位于最前面的 system 消息，说明这是整理资料的任务及资料的边界。可选默认、自定义、禁用；自定义留空时不发送。',
     builtin: JAILBREAK_PROMPT,
     macros: [],
   },
   {
     key: 'timeTag',
     label: '时间标签提示词',
-    hint: '发给正文模型，要求每条回复前后写上时间标签，作为剧情时间的锚点，摘要和后续剧情据此对齐。打开「启用自动摘要」后生效；留空用内置默认。',
+    hint: '发送给正文模型，要求每条回复前后写入时间标签，作为剧情时间的锚点，摘要和后续剧情据此对齐。开启「启用自动摘要」后生效；留空时使用内置默认。',
     builtin: TIME_TAG_PROMPT,
     macros: [],
   },
@@ -441,8 +441,8 @@ async function pullVecModels(role: VectorRole) {
     vecModels.value[role] = list;
     if (list.length && !apiSettings.vector[role].model) apiSettings.vector[role].model = list[0];
     vecModelMsg.value[role] = list.length
-      ? { tone: 'ok', text: `拉到 ${list.length} 个模型，点模型输入框就能选。` }
-      : { tone: 'warn', text: '接口没有返回任何模型，可以直接填写模型名。' };
+      ? { tone: 'ok', text: `已获取 ${list.length} 个模型，可在模型输入框中选择。` }
+      : { tone: 'warn', text: '接口未返回模型列表，可直接填写模型名。' };
   } catch (e) {
     vecModelMsg.value[role] = { tone: 'error', text: `拉取模型列表失败：${describeFailure(e, '请检查地址、网络或超时设置后再试').message}` };
   } finally {
@@ -541,7 +541,7 @@ async function doClearIndex() {
   vecIndexError.value = false;
   try {
     const n = await clearVectorIndex();
-    vecIndexMsg.value = `已清空这个聊天的向量索引（${n} 条）。需要时点「重建」重新索引。`;
+    vecIndexMsg.value = `已清空当前聊天的向量索引（${n} 条）。需要时点击「重建当前聊天向量索引」重新索引。`;
   } catch (e) {
     vecIndexError.value = true;
     vecIndexMsg.value = `清空索引失败：${readableError(e, '请稍后再试')}`;
@@ -580,8 +580,8 @@ const migratePlan = computed<MigrationPlan>(() => computeMigrationPlan());
 // 确认文案随「是否覆盖」变化
 const migrateConfirmText = computed(() =>
   migratePlan.value.willOverwrite
-    ? '这个聊天已经有棱镜宝书的数据，迁移会覆盖现有摘要，并在各楼写入数据。继续吗？'
-    : '会把这个聊天里 Horae 的旧数据转成棱镜宝书的记忆。继续吗？',
+    ? '当前聊天已有棱镜宝书数据，迁移会覆盖现有摘要，并在各楼写入数据。是否继续？'
+    : '将当前聊天中 Horae 的旧数据转换为棱镜宝书记忆。是否继续？',
 );
 async function runMigrate() {
   migrateConfirmOpen.value = false;
@@ -754,6 +754,8 @@ function qLabel(queryIndex: number): string {
   return queryIndex >= 0 ? `Q${queryIndex + 1}` : '—';
 }
 const TIER_LABEL: Record<'full' | 'brief' | 'drop', string> = { full: '全文', brief: '摘要', drop: '丢弃' };
+// 候选来自哪一路(向量一路不标)
+const ROUTE_LABEL: Record<'vector' | 'keyword' | 'both' | 'sticky', string> = { vector: '向量', keyword: '关键词', both: '向量+关键词', sticky: '上轮保留' };
 // 状态语气:决定横幅左侧圆点的配色(成功/警示/失败/进行中)
 const recallStatusKind = computed<'ok' | 'warn' | 'fail' | 'pending'>(() => {
   const s = recallDebug.status;
@@ -853,7 +855,7 @@ function goToSettingsGroup(id: string) {
       <div class="bbs-master" :class="{ 'is-off': !apiSettings.enabled }">
         <div class="bbs-master-text">
           <h3 class="bbs-master-title">{{ apiSettings.enabled ? '棱镜宝书已启用' : '棱镜宝书已停用' }}</h3>
-          <p class="prism-master-description">{{ apiSettings.enabled ? '摘要、总结、隐藏旧楼和记忆注入，都按下面的设置进行。' : '不摘要、不注入，也不隐藏旧楼。已有的记忆都还在，设置照常可以改。' }}</p>
+          <p class="prism-master-description">{{ apiSettings.enabled ? '摘要、总结、隐藏旧楼层和记忆注入均按以下设置进行。' : '不摘要、不注入，也不隐藏旧楼层。已有记忆保留，设置仍可修改。' }}</p>
         </div>
         <div class="prism-master-control">
           <button
@@ -882,11 +884,11 @@ function goToSettingsGroup(id: string) {
         <section class="prism-settings-group prism-group-common" aria-labelledby="prism-settings-common">
           <header class="prism-group-head">
             <h2 id="prism-settings-common" tabindex="-1">常用设置</h2>
-            <p>摘要用的 API、摘要和总结的节奏，以及界面外观。</p>
+            <p>摘要使用的 API、摘要与总结的节奏，以及界面外观。</p>
           </header>
           <div class="prism-group-cards">
       <Collapsible class="prism-settings-card" title="副 API" :open="false">
-        <p class="prism-card-intro">摘要和总结可以分别指定渠道；选「跟随主 API」就用酒馆当前连接的 API。点渠道可以修改或测试。</p>
+        <p class="prism-card-intro">摘要和总结可分别指定渠道；选择「跟随主 API」时使用酒馆当前连接的 API。点击渠道可修改或测试。</p>
         <!-- 任务指派 -->
         <div class="bbs-field bbs-assign">
           <div class="bbs-assign-row">
@@ -898,7 +900,7 @@ function goToSettingsGroup(id: string) {
             <BbsSelect v-model="apiSettings.assignments.resummary" :options="channelOptions" class="bbs-assign-select" aria-label="总结使用的渠道" />
           </div>
         </div>
-        <p class="bbs-field-hint">推荐 DeepSeek 或豆包；不推荐 Gemini（甲太厚）。</p>
+        <p class="bbs-field-hint">推荐 DeepSeek 或豆包；不推荐 Gemini（安全过滤较严）。</p>
 
         <hr class="bbs-rule" />
 
@@ -919,7 +921,7 @@ function goToSettingsGroup(id: string) {
             </button>
           </li>
         </ul>
-        <p v-else class="bbs-field-hint">还没有渠道。点「添加渠道」填一个摘要和总结用的 API。</p>
+        <p v-else class="bbs-field-hint">暂无渠道。点击「添加渠道」添加摘要和总结使用的 API。</p>
       </Collapsible>
 
       <Collapsible class="prism-settings-card" title="基本设置" :open="false">
@@ -966,25 +968,31 @@ function goToSettingsGroup(id: string) {
           <span class="bbs-field-label">点当前页导航关闭窗口（手机）</span>
           <input v-model="ui.navTapClose" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
-        <p class="bbs-field-hint">手机上再点一次当前页的导航按钮就能关掉窗口，不用去够右上角的 ×。怕误触可以关掉。</p>
+        <p class="bbs-field-hint">手机端再次点击当前页的导航按钮时关闭窗口；容易误触时可关闭此项。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">在酒馆顶栏显示按钮</span>
           <input v-model="ui.showTopBar" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
-        <p class="bbs-field-hint">在酒馆顶栏（用户设定按钮左边）加一个打开棱镜宝书的按钮，不用每次去点左下角的魔杖。魔杖里的入口仍然保留。</p>
+        <p class="bbs-field-hint">在酒馆顶栏（用户设定按钮左侧）显示棱镜宝书按钮。左下角魔杖菜单中的入口仍保留。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">在聊天框上方显示按钮</span>
           <input v-model="ui.showQuickReply" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
-        <p class="bbs-field-hint">在输入框上方（快速回复那一栏）加一个「棱镜宝书」按钮，样式跟随酒馆主题。</p>
+        <p class="bbs-field-hint">在输入框上方的快捷回复栏显示「棱镜宝书」按钮，样式跟随酒馆主题。</p>
+
+        <label class="bbs-switch-row">
+          <span class="bbs-field-label">在快捷回复栏显示召回</span>
+          <input v-model="ui.showRecallQuickReply" type="checkbox" class="bbs-checkbox bbs-switch" />
+        </label>
+        <p class="bbs-field-hint">启用向量记忆时，在快捷回复栏显示「召回」按钮，标注上次召回的段数；点击可查看召回内容和注入方式（全文或摘要）。未启用向量记忆时不显示。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">启用楼层面板</span>
           <input v-model="ui.showFloorPanel" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
-        <p class="bbs-field-hint">在每条 AI 回复下面加一个小面板，可以查看这一楼的摘要和数据变动，也能标记成「番外」。番外楼层不摘要、不总结、不注入，适合小剧场；取消标记就恢复。</p>
+        <p class="bbs-field-hint">在每条 AI 回复下方显示楼层面板，可查看和编辑本楼摘要及数据变动，或将本楼标记为「番外」（不摘要、不总结、不注入）。启用向量记忆时，面板同时记录并显示生成本楼前的召回内容；启用前生成的楼层没有召回记录。</p>
 
         <!-- 屏幕悬浮球:配置项多,收进可收缩小分组 -->
         <Collapsible title="屏幕悬浮球" :open="false">
@@ -992,7 +1000,7 @@ function goToSettingsGroup(id: string) {
             <span class="bbs-field-label">显示屏幕悬浮球</span>
             <input v-model="ui.showOrb" type="checkbox" class="bbs-checkbox bbs-switch" />
           </label>
-          <p class="bbs-field-hint">屏幕上放一个可拖动的悬浮球，点一下打开棱镜宝书。拖到中间会停在那里，拖近左右边缘会贴边。</p>
+          <p class="bbs-field-hint">在屏幕上显示可拖动的悬浮球，点击打开棱镜宝书。拖到屏幕中间时停在原处，靠近左右边缘时自动贴边。</p>
 
           <!-- 形状:仅开启时可配 -->
           <div v-if="ui.showOrb" class="bbs-field">
@@ -1021,7 +1029,7 @@ function goToSettingsGroup(id: string) {
               <span class="bbs-field-value">{{ ui.orbOpacity }}%</span>
             </div>
             <input v-model.number="ui.orbOpacity" type="range" min="20" max="100" step="1" class="bbs-range" />
-            <p class="bbs-field-hint">悬浮球静止时的不透明度；鼠标移上去或拖动时完全显示。</p>
+            <p class="bbs-field-hint">悬浮球静止时的不透明度；鼠标悬停或拖动时完全显示。</p>
           </div>
 
           <!-- 大小:仅开启时可配 -->
@@ -1047,63 +1055,63 @@ function goToSettingsGroup(id: string) {
             </div>
             <input ref="orbFileInput" type="file" accept="image/*" hidden @change="onOrbFileChange" />
           </div>
-          <p v-if="ui.showOrb" class="bbs-field-hint">支持普通图片和 GIF 动图（GIF 保留动画，不超过 2MB）。图标会传到酒馆服务器，换设备也能用；不传就用默认的小狐狸图标。</p>
+          <p v-if="ui.showOrb" class="bbs-field-hint">支持普通图片和 GIF 动图（保留动画，不超过 2MB）。图标上传到酒馆服务器，可跨设备使用；未上传时使用默认的小狐狸图标。</p>
         </Collapsible>
       </Collapsible>
 
       <Collapsible class="prism-settings-card prism-card-wide" title="摘要设置" :open="false">
-        <p class="prism-card-intro">摘要写多长、保留多少全文、多久合并一次总结、失败后重试几次。</p>
+        <p class="prism-card-intro">摘要篇幅、全文保留范围、总结合并频率和失败重试次数。</p>
         <label class="bbs-switch-row">
           <span class="bbs-field-label">启用自动摘要</span>
           <input v-model="apiSettings.autoSummaryEnabled" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
-        <p class="bbs-field-hint">打开后会自动摘要并隐藏旧楼，同时启用正文时间标签（剧情时间的锚点）和积压拦截（有楼层漏摘时先拦下发送，提示你补摘）。</p>
+        <p class="bbs-field-hint">启用后自动摘要并隐藏旧楼层，同时启用正文时间标签（剧情时间的锚点）和积压拦截（有楼层漏摘时拦截发送并提示补摘）。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">摘要字数</span>
           <input v-model.number="apiSettings.summaryMaxChars" class="bbs-input bbs-num" type="number" :min="SUMMARY_MAX_CHARS_MIN" :max="SUMMARY_MAX_CHARS_MAX" @change="onSummaryMaxCharsChange" />
         </label>
-        <p class="bbs-field-hint">写进摘要提示词，要求模型生成每楼摘要时不超过这么多字（含标点），信息少时会写得更短。它只管模型怎么写，不限制保存：模型写超了、你手动改长了都照常保存。默认 300，可填 {{ SUMMARY_MAX_CHARS_MIN }}–{{ SUMMARY_MAX_CHARS_MAX }}。只对内置的摘要提示词生效。</p>
+        <p class="bbs-field-hint">写入摘要提示词，要求每楼摘要不超过该字数（含标点），信息较少时会更短。只约束模型生成，不限制保存：模型超出或手动改长均照常保存。默认 300，可填 {{ SUMMARY_MAX_CHARS_MIN }}–{{ SUMMARY_MAX_CHARS_MAX }}。仅对内置摘要提示词生效。</p>
         <div class="bbs-num-row">
           <span class="bbs-field-label">字数档位</span>
           <BbsSelect v-model="apiSettings.verbosity" :options="VERBOSITY_OPTIONS" class="bbs-select-narrow" aria-label="字数档位" />
         </div>
-        <p class="bbs-field-hint">调整总结和二次总结的篇幅。详细：总结 300–500 字，二次总结约为输入的 40%–50%；精简：总结 150–300 字，二次总结约 30%–40%。每楼摘要的字数看上面的「摘要字数」。只影响内置提示词，自定义的不受影响。</p>
+        <p class="bbs-field-hint">调整总结和二次总结的篇幅。详细：总结 300–500 字，二次总结约为输入的 40%–50%；精简：总结 150–300 字，二次总结约为 30%–40%。每楼摘要的字数由上方「摘要字数」决定。仅影响内置提示词。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">保留最近 AI 消息数</span>
           <input v-model.number="apiSettings.keepRecent" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">最近多少条 AI 回复保留全文发送；更早的自动隐藏，改发摘要。</p>
+        <p class="bbs-field-hint">最近若干条 AI 回复保留全文发送；更早的楼层自动隐藏，改为发送摘要。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">每次总结几条摘要</span>
           <input v-model.number="apiSettings.leafBatchThreshold" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">攒够多少条摘要合并成一条总结（不算用户楼层）。填 0 关闭自动总结。</p>
+        <p class="bbs-field-hint">摘要达到该数量时合并为一条总结（不计用户楼层）。填 0 关闭自动总结。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">总结时保留摘要数</span>
           <input v-model.number="apiSettings.leafKeepRecent" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">总结时最新的这几条摘要先不合并，总结后仍留一截细节，不会一下子断档。例如每次总结 12 条、这里填 3：攒够 15 条才总结，合并最旧的 12 条，留下最新 3 条。填 0 就是攒够后全部合并（旧版做法）。默认 3。</p>
+        <p class="bbs-field-hint">总结时保留最新的若干条摘要不合并，使总结后仍保留近期细节。例如每次总结 12 条、此处填 3：摘要达到 15 条时合并最旧的 12 条，保留最新 3 条。填 0 时达到数量后全部合并（旧版做法）。默认 3。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">二次总结</span>
           <input v-model.number="apiSettings.resummaryThreshold" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">L1 总结攒够多少条，再合并成一条 L2。填 0 关闭，默认 6。</p>
+        <p class="bbs-field-hint">L1 总结达到该数量时合并为一条 L2。填 0 关闭，默认 6。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">高层总结</span>
           <input v-model.number="apiSettings.higherResummaryThreshold" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">L2 及更高层的总结攒够多少条，再往上合并一层。层级越高内容越长，建议填小一点。填 0 关闭，默认 3。</p>
+        <p class="bbs-field-hint">L2 及更高层的总结达到该数量时再向上合并一层。层级越高内容越长，建议填较小的值。填 0 关闭，默认 3。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">附带近期已完成计划</span>
           <input v-model.number="apiSettings.recentResolvedPlansCount" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">在状态里附上最近已完成的计划和悬念，提醒模型别把刚了结的事当成没做完，再推进或重复记录。正文和摘要都会带上。计划、悬念各取最近这么多条（填 5 就是各最多 5 条）。填 0 不附带，默认 5。</p>
+        <p class="bbs-field-hint">在状态中附上最近了结的计划和悬念，避免模型把已了结的事项当作未完成而继续推进或重复记录。正文和摘要请求都会附带。计划、悬念各取最近若干条（填 5 即各最多 5 条）。填 0 不附带，默认 5。</p>
         <label class="bbs-num-row">
           <span class="bbs-field-label">失败重试次数</span>
           <input v-model.number="apiSettings.summaryMaxRetries" class="bbs-input bbs-num" type="number" min="0" />
         </label>
-        <p class="bbs-field-hint">摘要或总结失败（报错，或返回的内容解析不了）时最多再试几次。密钥错误、额度不足、输出被截断这类重试也没用的错误不会重试。填 0 不重试，默认 1。</p>
-        <p class="bbs-field-hint">批量补摘按楼层顺序一楼一楼来，每楼的人物、物品、计划存好才处理下一楼；遇到失败就停，取消会在当前这楼完成后生效。</p>
+        <p class="bbs-field-hint">摘要或总结失败（报错或返回内容无法解析）时的最多重试次数。密钥错误、额度不足、输出被截断等重试无效的错误不重试。填 0 不重试，默认 1。</p>
+        <p class="bbs-field-hint">批量补摘按楼层顺序逐楼进行，每楼的人物、物品、计划保存后才处理下一楼；遇到失败即停止，取消在当前楼层完成后生效。</p>
       </Collapsible>
           </div>
         </section>
@@ -1111,22 +1119,22 @@ function goToSettingsGroup(id: string) {
         <section class="prism-settings-group prism-group-memory" aria-labelledby="prism-settings-memory">
           <header class="prism-group-head">
             <h2 id="prism-settings-memory" tabindex="-1">记忆与召回</h2>
-            <p>生成正文时给模型看哪些记忆，以及怎样从旧剧情里找回相关内容。</p>
+            <p>生成正文时注入的记忆，以及从旧剧情中检索相关内容的方式。</p>
           </header>
           <div class="prism-group-cards">
       <!-- 卡片默认收起；只有时间标签提示词超出预算时自动展开，免得警告藏在收起的卡片里 -->
       <Collapsible class="prism-settings-card" title="注入设置" :open="apiSettings.autoSummaryEnabled && !fitTimeTagPrompt(timeTagPrompt())">
-        <p class="prism-card-intro">生成正文时交给模型的记忆：总共占多少预算，包括哪些状态。</p>
-        <p v-if="apiSettings.autoSummaryEnabled && !fitTimeTagPrompt(timeTagPrompt())" class="bbs-callout is-warning">时间标签提示词超出了预算里分给它的份额，现在整段没有发送。调高预算，或缩短自定义的时间标签提示词。</p>
+        <p class="prism-card-intro">生成正文时注入的记忆：预算总量及包含的状态。</p>
+        <p v-if="apiSettings.autoSummaryEnabled && !fitTimeTagPrompt(timeTagPrompt())" class="bbs-callout is-warning">时间标签提示词超出预算中分配给它的份额，目前整段未发送。请调高预算，或缩短自定义的时间标签提示词。</p>
         <label class="bbs-switch-row"><span class="bbs-field-label">记忆注入预算</span><input v-model.number="apiSettings.memoryBudgetTokens" class="bbs-input" type="number" min="0" max="50000" step="500" /></label>
-        <p class="bbs-field-hint">默认 6000；填 0 不限制，其他值最少按 2000 算。按 UTF-8 字节粗略估算，和模型实际的 token 数不完全一样。历史、状态、时间指令、召回分别占 45%、35%、5%、15%，用不完的份额不会挪给别的部分。超出时整条省略，不会删除存档；时间指令太长就整段不发。预算不包括聊天正文、角色卡和其他插件。改了预算后，上次的向量召回结果会清空，下次生成时重新计算。</p>
-        <p class="bbs-field-hint">下面选择哪些状态交给正文模型。这些开关<strong>只影响正文模型看到什么</strong>：摘要那边始终能看到全部状态、照常记录，关掉某项不会造成重复记录。时间地点、计划悬念和自定义变量总会发送，不在这里开关。</p>
+        <p class="bbs-field-hint">默认 6000；填 0 不限制，其他值最少按 2000 计算。按 UTF-8 字节粗略估算，与模型实际 token 数不完全一致。历史、状态、时间指令、召回分别占 45%、35%、5%、15%，未用完的份额不挪给其他部分。超出时整条省略，不删除存档；时间指令过长时整段不发送。预算不包括聊天正文、角色卡和其他插件。修改预算后，上次的向量召回结果会清空，下次生成时重新计算。</p>
+        <p class="bbs-field-hint">以下开关选择注入正文的状态，<strong>只影响正文模型看到的内容</strong>：摘要请求始终包含全部状态并照常记录，关闭某项不会造成重复记录。时间地点、计划悬念和自定义变量始终发送，不在此处开关。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">仅注入剧情摘要</span>
           <input v-model="apiSettings.summaryOnlyMode" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
-        <p class="bbs-field-hint">给自带变量系统的角色卡用。打开后，物品、角色、场景、计划和变量照常分析、保存、在棱镜宝书里显示，但不再交给正文模型（下面各项开关随之失效），之后的楼层也不再写物品和变量的变动旁注。已有楼层里的旁注不会被清理；场景页的「前往」不受影响。</p>
+        <p class="bbs-field-hint">适用于自带变量系统的角色卡。启用后，物品、角色、场景、计划和变量照常分析、保存并在棱镜宝书中显示，但不再注入正文（以下各项开关随之失效），之后的楼层也不再写入物品和变量的变动旁注。已有楼层中的旁注不会清理；场景页的「前往」不受影响。</p>
 
         <hr class="bbs-rule" />
 
@@ -1134,47 +1142,53 @@ function goToSettingsGroup(id: string) {
           <span class="bbs-field-label">眼下局势</span>
           <input v-model="apiSettings.injection.sceneFocus" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode" />
         </label>
-        <p class="bbs-field-hint">眼下局势卡：现在的局面、在场的人、互动张力和即将发生的事，帮模型接住当前场面。</p>
+        <p class="bbs-field-hint">互动局势卡：当前局面、在场人物、互动张力和即将发生的事，用于衔接当前场面。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">生活档案</span>
           <input v-model="apiSettings.injection.lifeDetails" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode" />
         </label>
-        <p class="bbs-field-hint">主角和主要角色的生活档案。档案总是照常记录（可以在角色页管理），这里关掉只是不再交给正文模型，重新打开就恢复。</p>
+        <p class="bbs-field-hint">主角和主要角色的生活档案。档案始终记录（可在角色页管理），此处关闭后不再注入正文，重新开启即恢复。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">主角信息</span>
           <input v-model="apiSettings.injection.protagonist" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode" />
         </label>
-        <p class="bbs-field-hint">主角现在的样子：性别、年龄、身份、外貌、着装和状态。不依赖场景信息。</p>
+        <p class="bbs-field-hint">主角当前的性别、年龄、身份、外貌、着装和状态。不依赖场景信息。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">场景信息</span>
           <input v-model="apiSettings.injection.scenes" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode" />
         </label>
-        <p class="bbs-field-hint">当前地点和它的上级地点（详细），以及其他已知地点（只有名字）。<strong>NPC 名册和物品信息要靠场景判断谁在场、什么够得着，关掉这项后它们也不会发送。</strong></p>
+        <p class="bbs-field-hint">当前地点及其上级地点（详细），以及其他已知地点（仅名称）。<strong>NPC 名册和物品信息依赖场景判断在场与可及范围，关闭此项后二者也不发送。</strong></p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">NPC 名册</span>
           <input v-model="apiSettings.injection.npcs" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.scenes" />
         </label>
-        <p class="bbs-field-hint">在场的角色发完整信息，同一区域的从简，不在场的只发名字和身份。需要打开场景信息。</p>
+        <p class="bbs-field-hint">在场角色发送完整信息，同一区域的从简，不在场的只发送名字和身份。需开启场景信息。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">角色好感估计</span>
           <input v-model="apiSettings.injection.npcAffinity" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.npcs" />
         </label>
-        <p class="bbs-field-hint">NPC 名册里的五档好感（内心好感、外在态度和说明）。好感总是照常记录、在角色页显示；关掉后名册照发，只是不带好感。适合角色卡自带好感系统、不想两套并行的情况。</p>
+        <p class="bbs-field-hint">NPC 名册中的五档好感（内心好感、外在态度和说明）。好感始终记录并在角色页显示；关闭后名册照常发送，但不附带好感。适用于自带好感系统的角色卡。</p>
 
         <label class="bbs-switch-row">
           <span class="bbs-field-label">物品信息</span>
           <input v-model="apiSettings.injection.items" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.scenes" />
         </label>
-        <p class="bbs-field-hint">随身和够得着的物品发完整信息，放在别处的只发名字和数量。需要打开场景信息。</p>
+        <p class="bbs-field-hint">随身和可及的物品发送完整信息，存放在别处的只发送名字和数量。需开启场景信息。</p>
+
+        <label class="bbs-switch-row">
+          <span class="bbs-field-label">信息差</span>
+          <input v-model="apiSettings.injection.secrets" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.npcs || !apiSettings.injection.scenes" />
+        </label>
+        <p class="bbs-field-hint">提醒在场的角色哪些事不知情，避免其说出或依据自己不知道的事行动。信息差始终记录，可在角色页查看；需要打开 NPC 名册。</p>
       </Collapsible>
 
       <Collapsible class="prism-settings-card" title="向量记忆" :open="false">
-        <p class="prism-card-intro">从旧剧情里找回和当前相关的片段，补给正文模型。Embedding 和 Query 重写必须配好；Rerank 可以不填，不填就按相似度排序。</p>
+        <p class="prism-card-intro">从旧剧情中检索与当前剧情相关的片段，注入正文。Embedding 和 Query 重写为必填；Rerank 可不填，不填时按相似度排序。</p>
         <label class="bbs-switch-row bbs-vec-enable">
           <span class="bbs-field-label">启用向量记忆</span>
           <input v-model="apiSettings.vector.enabled" type="checkbox" class="bbs-checkbox bbs-switch" />
@@ -1198,7 +1212,7 @@ function goToSettingsGroup(id: string) {
           >
             <span class="prism-endpoint-heading">
               <span class="bbs-field-label">{{ role.label }}</span>
-              <span class="prism-endpoint-model">{{ apiSettings.vector[role.key].model || '还没填模型' }}</span>
+              <span class="prism-endpoint-model">{{ apiSettings.vector[role.key].model || '未填写模型' }}</span>
             </span>
             <Icon name="chevron" class="bbs-vec-chevron" />
           </button>
@@ -1206,7 +1220,7 @@ function goToSettingsGroup(id: string) {
           <div class="bbs-vec-ep-outer" :inert="!vecEpOpen[role.key]" :aria-hidden="!vecEpOpen[role.key]">
             <div class="bbs-vec-ep-inner">
           <div class="bbs-vec-ep-body">
-          <p v-if="role.key !== 'embedding'" class="bbs-field-hint">地址和密钥留空就用 Embedding 的；模型要单独填。</p>
+          <p v-if="role.key !== 'embedding'" class="bbs-field-hint">地址和密钥留空时使用 Embedding 的设置；模型需单独填写。</p>
 
           <label class="bbs-modal-field">
             <span class="bbs-modal-label">API 地址</span>
@@ -1248,7 +1262,7 @@ function goToSettingsGroup(id: string) {
                 <input
                   v-model="apiSettings.vector[role.key].model"
                   class="bbs-input"
-                  :placeholder="(vecModels[role.key]?.length) ? '搜索或输入模型名…' : '模型名，或点右边按钮拉取列表'"
+                  :placeholder="(vecModels[role.key]?.length) ? '搜索或输入模型名…' : '模型名，或点击右侧按钮拉取列表'"
                   :disabled="!apiSettings.vector.enabled"
                   @focus="openVecModelMenu(role.key)"
                   @input="vecModelQuery = apiSettings.vector[role.key].model; vecModelMenuOpen = role.key"
@@ -1333,7 +1347,7 @@ function goToSettingsGroup(id: string) {
               />
             </label>
             <p class="bbs-field-hint">
-              沿用「提示词」里的任务说明模式；那边禁用或自定义为空时不附加。检索重写的输出很短，不需要很大的输出上限。
+              沿用「提示词」中的任务说明模式；任务说明禁用或自定义内容为空时不附加。检索重写的输出较短，无需设置较大的输出上限。
             </p>
           </template>
           </div>
@@ -1347,13 +1361,13 @@ function goToSettingsGroup(id: string) {
         <Collapsible title="召回参数" :open="false">
           <div class="bbs-vec-recall" :class="{ 'is-disabled': !apiSettings.vector.enabled }">
             <p class="bbs-field-hint">
-              先按 embedding 相似度从全部索引里挑出得分最高的几条，交给 rerank 打分，再分两档：得分高的发原文，稍低但过了 embedding 阈值的发摘要。两档加起来不超过「最终召回条数」。
+              先按 embedding 相似度从全部索引中选出得分最高的若干条（开启关键词召回时，名字匹配的本聊天摘要也作为候选），交给 rerank 打分，再分为两档：得分高的发送原文，稍低但达到 embedding 阈值的发送摘要。两档合计不超过「最终召回条数」。
             </p>
 
             <p class="bbs-field-hint">
-              生成前先用「Query 重写」模型把当前剧情改写成几条检索语句，分头去找，召回更全面。
-              <strong>这一步必不可少：没配 Query 重写模型或重写失败，这一轮就不召回。</strong>
-              每轮会多一次小模型请求，稍微多一点延迟。
+              生成前先用「Query 重写」模型将当前剧情改写为若干条检索语句，分别检索。
+              <strong>此步骤为必需：未配置 Query 重写模型或重写失败时，本轮不召回。</strong>
+              每轮增加一次小模型请求，延迟略有增加。
             </p>
 
           <label class="bbs-num-row">
@@ -1367,7 +1381,7 @@ function goToSettingsGroup(id: string) {
               :disabled="!apiSettings.vector.enabled"
             />
           </label>
-          <p class="bbs-field-hint">召回内容插在聊天里的位置。0 表示紧挨着最新一条用户消息，数字越大越往前。</p>
+          <p class="bbs-field-hint">召回内容在聊天中的插入位置。0 表示紧邻最新一条用户消息，数字越大位置越靠前。</p>
 
           <label class="bbs-num-row">
             <span class="bbs-field-label">Rerank 候选数</span>
@@ -1379,7 +1393,7 @@ function goToSettingsGroup(id: string) {
               :disabled="!apiSettings.vector.enabled"
             />
           </label>
-          <p class="bbs-field-hint">按 embedding 相似度取前几条交给 rerank（越多越准，也越慢）。</p>
+          <p class="bbs-field-hint">按 embedding 相似度取前若干条交给 rerank。数量越多越准确，也越慢。</p>
 
           <label class="bbs-num-row">
             <span class="bbs-field-label">Embedding 阈值</span>
@@ -1393,7 +1407,7 @@ function goToSettingsGroup(id: string) {
               :disabled="!apiSettings.vector.enabled"
             />
           </label>
-          <p class="bbs-field-hint">摘要档的门槛：embedding 相似度低于这个值的，连摘要都不召回（0–1）。</p>
+          <p class="bbs-field-hint">摘要档的门槛：embedding 相似度低于该值时不召回（0–1）。</p>
 
           <label class="bbs-num-row">
             <span class="bbs-field-label">Rerank 阈值</span>
@@ -1407,7 +1421,7 @@ function goToSettingsGroup(id: string) {
               :disabled="!apiSettings.vector.enabled"
             />
           </label>
-          <p class="bbs-field-hint">rerank 得分不低于这个值的发原文；低于它但过了 embedding 阈值的改发摘要（0–1）。</p>
+          <p class="bbs-field-hint">rerank 得分不低于该值时发送原文；低于该值但达到 embedding 阈值时发送摘要（0–1）。</p>
 
           <label class="bbs-num-row">
             <span class="bbs-field-label">召回全文数</span>
@@ -1419,7 +1433,7 @@ function goToSettingsGroup(id: string) {
               :disabled="!apiSettings.vector.enabled"
             />
           </label>
-          <p class="bbs-field-hint">最多几条发原文；超出的即使过了 rerank 阈值也改发摘要。</p>
+          <p class="bbs-field-hint">最多发送原文的条数；超出部分即使达到 rerank 阈值也改为发送摘要。</p>
 
           <label class="bbs-num-row">
             <span class="bbs-field-label">最终召回条数</span>
@@ -1431,7 +1445,7 @@ function goToSettingsGroup(id: string) {
               :disabled="!apiSettings.vector.enabled"
             />
           </label>
-          <p class="bbs-field-hint">召回总数上限（原文和摘要合计）；原文不够就用摘要补，补不满也没关系。</p>
+          <p class="bbs-field-hint">召回总数上限（原文和摘要合计）；原文不足时用摘要补充，未达上限也可。</p>
 
           <label class="bbs-num-row">
             <span class="bbs-field-label">开始召回的 AI 楼数</span>
@@ -1444,9 +1458,34 @@ function goToSettingsGroup(id: string) {
             />
           </label>
           <p class="bbs-field-hint">
-            AI 回复少于这个数时不召回（0 表示不限制）：剧情刚开始时旧记忆少，跳过能省额度和时间。
-            另外，所有楼层都还在全文发送范围内时也会自动跳过；「带数据创建新对话」带来的旧档不受这个限制，总会召回。
+            AI 回复少于该数量时不召回（0 表示不限制）。剧情初期旧记忆较少，跳过可节省额度和时间。
+            所有楼层仍在全文发送范围内时也会自动跳过；「带数据创建新对话」带来的旧档不受此限制，始终召回。
           </p>
+
+          <label class="bbs-switch-row">
+            <span class="bbs-field-label">关键词召回</span>
+            <input v-model="apiSettings.vector.recall.keywordRoute" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="!apiSettings.vector.enabled" />
+          </label>
+          <p class="bbs-field-hint">用名册、物品和地点的名字在本聊天摘要中精确匹配，作为一路候选与向量检索结果合并，减少自造人名、地名的漏召回。仅限本聊天，不含旧档。</p>
+
+          <label class="bbs-switch-row">
+            <span class="bbs-field-label">在场角色加权</span>
+            <input v-model="apiSettings.vector.recall.presentBoost" type="checkbox" class="bbs-checkbox bbs-switch" :disabled="!apiSettings.vector.enabled" />
+          </label>
+          <p class="bbs-field-hint">候选摘要涉及当前在场角色时排序靠前。只影响排序，不改变阈值。</p>
+
+          <label class="bbs-num-row">
+            <span class="bbs-field-label">召回保留轮数</span>
+            <input
+              v-model.number="apiSettings.vector.recall.stickyTurns"
+              class="bbs-input bbs-num"
+              type="number"
+              min="0"
+              max="5"
+              :disabled="!apiSettings.vector.enabled"
+            />
+          </label>
+          <p class="bbs-field-hint">上一轮注入的段落在之后的若干轮内，有空位时以摘要形式保留，减少召回内容逐轮变动。0 为关闭，最多 5。</p>
           </div>
         </Collapsible>
 
@@ -1465,11 +1504,11 @@ function goToSettingsGroup(id: string) {
             </span>
           </div>
           <p class="bbs-field-hint">
-            平时每条摘要生成后会自动加进索引；如果是中途才打开向量记忆，可以手动把这个聊天已有的摘要补进去。
-            清空只删这个聊天自己的索引，不动「带数据创建新对话」带来的旧档。
+            每条摘要生成后自动加入索引；中途开启向量记忆时，可手动将当前聊天已有的摘要补入索引。
+            清空只删除当前聊天的索引，不影响「带数据创建新对话」带来的旧档。
           </p>
           <p v-if="vecBackend === 'local'" class="bbs-field-hint">
-            本地模式：索引存在浏览器里，只能在当前聊天召回，不跨聊天、不跨设备。装上柏宝库后端就能用完整功能。
+            本地模式：索引存储在浏览器中，只能在当前聊天召回，不跨聊天、不跨设备。安装柏宝库后端后可使用完整功能。
           </p>
           <div class="bbs-vec-index-actions">
             <button
@@ -1488,7 +1527,7 @@ function goToSettingsGroup(id: string) {
               @blur="vecClearConfirm = false"
             >
               <Icon name="trash" />
-              {{ vecClearing ? '清空中…' : vecClearConfirm ? '再点一次确认清空' : '清空当前聊天索引' }}
+              {{ vecClearing ? '清空中…' : vecClearConfirm ? '再次点击确认清空' : '清空当前聊天索引' }}
             </button>
           </div>
           <p v-if="vecIndexMsg" class="bbs-callout prism-inline-notice" :class="vecIndexError ? 'is-danger' : 'is-success'" role="status">{{ vecIndexMsg }}</p>
@@ -1499,7 +1538,7 @@ function goToSettingsGroup(id: string) {
         <!-- 上次召回详情:把上一次召回各阶段的中间结果可视化,便于调参/排障(reactive 自动刷新) -->
         <Collapsible title="上次召回详情" :open="false">
           <p v-if="!recallDebug.at" class="bbs-field-hint">
-            还没有召回记录。配好向量记忆后发一条消息，这里会显示重写、检索、重排和注入各步的结果。
+            暂无召回记录。配置向量记忆后发送一条消息，此处将显示重写、检索、重排和注入各步骤的结果。
           </p>
           <div v-else class="bbs-dbg">
             <!-- 状态横幅:左侧圆点按语气配色,右侧时间 -->
@@ -1509,7 +1548,7 @@ function goToSettingsGroup(id: string) {
               <span class="bbs-dbg-time">{{ fmtRecallTime(recallDebug.at) }}</span>
             </div>
 
-            <!-- 四阶段各自可折叠,默认收起;标题带计数 -->
+            <!-- 五个阶段各自可折叠,默认收起;标题带计数 -->
             <Collapsible :title="`1 · 查询重写 · ${recallDebug.queries.length} Q`" :open="false">
               <p v-if="recallDebug.intent" class="bbs-dbg-intent">
                 <span class="bbs-dbg-tag">INTENT</span><span class="bbs-dbg-intent-text">{{ recallDebug.intent }}</span>
@@ -1538,12 +1577,28 @@ function goToSettingsGroup(id: string) {
               <p v-else class="bbs-dbg-empty">无</p>
             </Collapsible>
 
-            <Collapsible :title="`3 · Rerank 分档 · ${recallDebug.rerank.length} 条`" :open="false">
+            <Collapsible :title="`3 · 关键词命中 · ${recallDebug.keyword.length} 条`" :open="false">
+              <ul v-if="recallDebug.keyword.length" class="bbs-dbg-cards">
+                <li v-for="(h, i) in recallDebug.keyword" :key="i" class="bbs-dbg-card">
+                  <div class="bbs-dbg-card-top">
+                    <span class="bbs-dbg-from">{{ h.source }}</span>
+                    <span v-if="h.storyTime" class="bbs-dbg-when">【{{ h.storyTime }}】</span>
+                    <span class="bbs-dbg-num">{{ h.score.toFixed(2) }}</span>
+                  </div>
+                  <p class="bbs-dbg-prev">命中：{{ h.matched.join('、') }}</p>
+                  <p class="bbs-dbg-prev">{{ h.preview }}</p>
+                </li>
+              </ul>
+              <p v-else class="bbs-dbg-empty">无（未启用关键词召回，或当前对话未提到已记录的名字）</p>
+            </Collapsible>
+
+            <Collapsible :title="`4 · Rerank 分档 · ${recallDebug.rerank.length} 条`" :open="false">
               <ul v-if="recallDebug.rerank.length" class="bbs-dbg-cards">
                 <li v-for="(h, i) in recallDebug.rerank" :key="i" class="bbs-dbg-card" :class="{ 'is-dropped': h.tier === 'drop' }">
                   <div class="bbs-dbg-card-top">
                     <span class="bbs-dbg-tier" :class="`is-${h.tier}`">{{ TIER_LABEL[h.tier] }}</span>
                     <span class="bbs-dbg-from" :class="{ 'is-bundle': h.source === '旧档' }">{{ h.source }}</span>
+                    <span v-if="h.route && h.route !== 'vector'" class="bbs-dbg-src">{{ ROUTE_LABEL[h.route] }}</span>
                     <span v-if="h.storyTime" class="bbs-dbg-when">【{{ h.storyTime }}】</span>
                     <span class="bbs-dbg-num">{{ h.rerankScore.toFixed(3) }}</span>
                   </div>
@@ -1551,12 +1606,12 @@ function goToSettingsGroup(id: string) {
                   <p class="bbs-dbg-prev">{{ h.preview }}</p>
                 </li>
               </ul>
-              <p v-else class="bbs-dbg-empty">无（没有执行 rerank，或没有候选）</p>
+              <p v-else class="bbs-dbg-empty">无（未执行 rerank，或没有候选）</p>
             </Collapsible>
 
-            <Collapsible title="4 · 最终注入" :open="false">
+            <Collapsible title="5 · 最终注入" :open="false">
               <pre v-if="recallDebug.injectedText" class="bbs-dbg-pre">{{ recallDebug.injectedText }}</pre>
-              <p v-else class="bbs-dbg-empty">这一轮没有注入。</p>
+              <p v-else class="bbs-dbg-empty">本轮未注入。</p>
             </Collapsible>
           </div>
         </Collapsible>
@@ -1567,15 +1622,15 @@ function goToSettingsGroup(id: string) {
         <section class="prism-settings-group prism-group-prompts" aria-labelledby="prism-settings-prompts">
           <header class="prism-group-head">
             <h2 id="prism-settings-prompts" tabindex="-1">提示词</h2>
-            <p>摘要、总结和时间标签用的提示词，可以逐个修改，也能恢复默认。</p>
+            <p>摘要、总结和时间标签使用的提示词，可逐项修改或恢复默认。</p>
           </header>
           <div class="prism-group-cards">
       <Collapsible class="prism-settings-card" title="自定义提示词" :open="false">
-        <p class="prism-card-intro">点一项打开编辑，可以插入宏，也可以恢复默认。改过的提示词不会跟着内置版本更新；内置改了，这里会标出「内置已更新」，打开能看内置改了什么。</p>
+        <p class="prism-card-intro">点击一项打开编辑，可插入宏或恢复默认。修改过的提示词不随内置版本更新；内置版本更新后，此处标有「内置已更新」，打开可查看内置的改动。</p>
         <label class="bbs-switch-row"><span class="bbs-field-label">任务说明模式</span>
-          <select v-model="apiSettings.taskContextMode" class="bbs-input"><option value="default">内置中性说明</option><option value="custom">自定义（可以留空）</option><option value="disabled">禁用</option></select>
+          <select v-model="apiSettings.taskContextMode" class="bbs-input"><option value="default">内置中性说明</option><option value="custom">自定义（可留空）</option><option value="disabled">禁用</option></select>
         </label>
-        <p class="bbs-field-hint">以前自定义的内容会保留。保存自定义的任务说明会自动切到「自定义」；恢复默认再保存就用内置说明。「禁用」只是不发这段说明，输出格式要求照样会发。</p>
+        <p class="bbs-field-hint">已有的自定义内容会保留。保存自定义任务说明时自动切换为「自定义」；恢复默认后保存即使用内置说明。「禁用」只是不发送这段说明，输出格式要求照常发送。</p>
         <ul class="bbs-prompt-list">
           <li v-for="m in PROMPT_METAS" :key="m.key" class="bbs-prompt-item">
             <button class="bbs-prompt-open" type="button" @click="openPrompt(m)">
@@ -1594,11 +1649,11 @@ function goToSettingsGroup(id: string) {
         <section class="prism-settings-group prism-group-advanced" aria-labelledby="prism-settings-advanced">
           <header class="prism-group-head">
             <h2 id="prism-settings-advanced" tabindex="-1">高级过滤</h2>
-            <p>摘要时跳过哪些角色、世界书条目和格式标签。</p>
+            <p>摘要时跳过的角色、世界书条目和格式标签。</p>
           </header>
           <div class="prism-group-cards">
       <Collapsible class="prism-settings-card" title="排除角色" :open="false">
-        <p class="bbs-field-hint">名单里的角色（同名的卡一起算）在聊天里不使用棱镜宝书：不摘要、不隐藏、不注入、不拦截。适合工具类、不需要记忆的角色。</p>
+        <p class="bbs-field-hint">名单中的角色（含同名角色卡）在聊天中不使用棱镜宝书：不摘要、不隐藏、不注入、不拦截。适用于工具类、不需要记忆的角色。</p>
         <div class="bbs-channel-bar">
           <span class="bbs-field-label">
             已排除 {{ apiSettings.excludedChars.length }} 个
@@ -1615,12 +1670,12 @@ function goToSettingsGroup(id: string) {
             </button>
           </li>
         </ul>
-        <p v-else class="bbs-field-hint">名单是空的，所有角色都会使用棱镜宝书。</p>
+        <p v-else class="bbs-field-hint">名单为空，所有角色均使用棱镜宝书。</p>
       </Collapsible>
 
       <Collapsible class="prism-settings-card" title="排除世界书内容" :open="false">
         <p class="bbs-field-hint">
-          摘要和总结时会激活世界书作参考。可以在这里去掉对剧情记忆没用的条目，比如全局挂载的知识书、规则说明，省 token 也少干扰。只影响摘要和总结，不改动正文用的世界书。
+          摘要和总结时会激活世界书作为参考。可在此排除与剧情记忆无关的条目（如全局挂载的知识书、规则说明），以节省 token、减少干扰。只影响摘要和总结，不改动正文使用的世界书。
         </p>
 
         <!-- 渲染世界书模板:配合「提示词模板(ST-Prompt-Template)」等插件 -->
@@ -1629,7 +1684,7 @@ function goToSettingsGroup(id: string) {
           <input v-model="apiSettings.renderWorldInfoTemplates" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
         <p class="bbs-field-hint">
-          摘要前先展开世界书条目里的宏，并执行提示词模板（EJS）的代码，让摘要看到渲染后的内容。条目里如果有改变量的代码，每次摘要都会多执行一次，介意的话关掉。
+          摘要前展开世界书条目中的宏并执行提示词模板（EJS）代码，使摘要使用渲染后的内容。条目中含修改变量的代码时，每次摘要会额外执行一次，此时可关闭。
         </p>
 
         <hr class="bbs-rule" />
@@ -1649,7 +1704,7 @@ function goToSettingsGroup(id: string) {
             </button>
           </li>
         </ul>
-        <p v-else class="bbs-field-hint">没有排除任何世界书，激活的条目都会作为摘要参考。</p>
+        <p v-else class="bbs-field-hint">未排除任何世界书，激活的条目均作为摘要参考。</p>
 
         <hr class="bbs-rule" />
 
@@ -1658,9 +1713,9 @@ function goToSettingsGroup(id: string) {
           <span class="bbs-field-label">按条目名过滤</span>
         </div>
         <p class="bbs-field-hint">
-          填条目的备注名（comment），按<strong>包含</strong>匹配，不分大小写：填 <code>附加</code> 能匹配「附加设定」。
-          也可以写正则，<code>^规则</code> 表示以「规则」开头。只对上面没有整本排除的世界书生效。
-          默认有一条 <code>\[mvu[\s\S]*?\]</code>，用来过滤 MVU 变量框架的机制条目，不需要可以删掉。
+          填写条目的备注名（comment），按<strong>包含</strong>匹配，不区分大小写：填 <code>附加</code> 可匹配「附加设定」。
+          也可填写正则，<code>^规则</code> 表示以「规则」开头。只对未整本排除的世界书生效。
+          默认包含一条 <code>\[mvu[\s\S]*?\]</code>，用于过滤 MVU 变量框架的机制条目，不需要时可删除。
         </p>
         <div class="bbs-striptag-bar">
           <input
@@ -1682,13 +1737,13 @@ function goToSettingsGroup(id: string) {
             </button>
           </li>
         </ul>
-        <p v-else class="bbs-field-hint">还没有规则。</p>
+        <p v-else class="bbs-field-hint">暂无规则。</p>
       </Collapsible>
 
       <Collapsible class="prism-settings-card" title="自定义清洗标签" :open="false">
         <p class="bbs-field-hint">
-          正文里如果混进了其他插件或世界书写的格式块（比如状态栏 <code>&lt;snow&gt;…&lt;/snow&gt;</code>），在这里填标签名（只填 <code>snow</code>，不带尖括号），摘要、建索引和召回时会把整块连同内容删掉。
-          改动对召回立即生效（索引里存的是原文，召回时再清洗），不用重建索引。
+          正文中混有其他插件或世界书生成的格式块时（如状态栏 <code>&lt;snow&gt;…&lt;/snow&gt;</code>），在此填写标签名（只填 <code>snow</code>，不带尖括号），摘要、建立索引和召回时会删除整块及其内容。
+          修改对召回立即生效（索引中存储原文，召回时再清洗），无需重建索引。
         </p>
         <div class="bbs-striptag-bar">
           <input
@@ -1710,7 +1765,7 @@ function goToSettingsGroup(id: string) {
             </button>
           </li>
         </ul>
-        <p v-else class="bbs-field-hint">还没有自定义标签，只做内置清洗（思维链、注释、物品旁注等）。</p>
+        <p v-else class="bbs-field-hint">暂无自定义标签，仅执行内置清洗（思维链、注释、物品旁注等）。</p>
       </Collapsible>
           </div>
         </section>
@@ -1718,16 +1773,16 @@ function goToSettingsGroup(id: string) {
         <section class="prism-settings-group prism-group-data" aria-labelledby="prism-settings-data">
           <header class="prism-group-head">
             <h2 id="prism-settings-data" tabindex="-1">数据与迁移</h2>
-            <p>带着记忆开新对话、从 Horae 迁移，或者把记忆接给其他插件。</p>
+            <p>带记忆创建新对话、从 Horae 迁移，或将记忆提供给其他插件。</p>
           </header>
           <div class="prism-group-cards">
       <Collapsible class="prism-settings-card" title="带数据创建新对话" :open="false">
         <p class="bbs-field-hint">
-          把这个聊天最近的全文、合并后的历史摘要和当前状态（时间地点、场景、物品、角色、计划、变量）打包，新建一个对话带过去。
-          新对话从一条「种子摘要」还原状态，旧剧情以摘要的形式跟过去；如果开着向量记忆，旧聊天会存一份快照，新对话也能召回里面的内容（多次接续会累加，分支也会继承）。
+          将当前聊天最近的全文、合并后的历史摘要和当前状态（时间地点、场景、物品、角色、计划、信息差、变量）打包，带入新建的对话。
+          新对话通过一条「种子摘要」还原状态，旧剧情以摘要形式保留；启用向量记忆时，旧聊天会保存一份快照，新对话也可召回其中的内容（多次接续时累加，分支也会继承）。
         </p>
         <div v-if="carryPlan" class="bbs-field-hint">
-          会带过去：AI 回复 {{ carryPlan.aiCount }} 条，实际消息 {{ carryPlan.carryCount }} 条；旧剧情摘要{{ carryPlan.recapLen > 0 ? '有' : '无' }}。
+          将带入：AI 回复 {{ carryPlan.aiCount }} 条，实际消息 {{ carryPlan.carryCount }} 条；旧剧情摘要：{{ carryPlan.recapLen > 0 ? '有' : '无' }}。
         </div>
         <button
           class="bbs-btn bbs-btn-sm bbs-btn-primary"
@@ -1742,14 +1797,14 @@ function goToSettingsGroup(id: string) {
 
       <Collapsible class="prism-settings-card" title="从旧版 Horae 迁移" :open="false">
         <p class="bbs-field-hint">
-          把这个聊天里旧版 Horae 的摘要、物品和计划搬过来。每个要迁移的聊天各点一次，Horae 的原数据不会被改动。
+          将当前聊天中旧版 Horae 的摘要、物品和计划迁移过来。每个聊天需分别执行一次，Horae 的原数据不会改动。
         </p>
         <div v-if="migratePlan" class="bbs-field-hint">
           <template v-if="migratePlan.hasData">
             找到：可建摘要 {{ migratePlan.leafFloors }} 层，旧总结 {{ migratePlan.summaryCount }} 条，物品 {{ migratePlan.itemCount }} 个，计划悬念 {{ migratePlan.planCount }} 条。
-            <strong v-if="migratePlan.willOverwrite">这个聊天已经有棱镜宝书的数据，迁移会覆盖它。</strong>
+            <strong v-if="migratePlan.willOverwrite">当前聊天已有棱镜宝书数据，迁移会将其覆盖。</strong>
           </template>
-          <template v-else>这个聊天里没有 Horae 的旧数据（请先打开有旧数据的聊天）。</template>
+          <template v-else>当前聊天中没有 Horae 旧数据（请先打开含旧数据的聊天）。</template>
         </div>
         <button
           class="bbs-btn bbs-btn-sm bbs-btn-primary"
@@ -1764,7 +1819,7 @@ function goToSettingsGroup(id: string) {
 
       <Collapsible class="prism-settings-card" title="获取数据" :open="false">
         <p class="bbs-field-hint bbs-data-intro">
-          下面的宏可以用在提示词、变量说明和其他支持酒馆宏的地方。完整的接口、命令和返回结构可以导出成文档给插件作者看。
+          以下宏可用于提示词、变量说明和其他支持酒馆宏的位置。完整的接口、命令和返回结构可导出为文档，供插件作者参考。
         </p>
 
         <div class="bbs-data-macros">
@@ -1791,7 +1846,7 @@ function goToSettingsGroup(id: string) {
         <div class="bbs-data-export">
           <div class="bbs-data-export-text">
             <span class="bbs-field-label">公共接口文档</span>
-            <p class="bbs-data-desc">下载 PUBLIC_API.md，里面有 JavaScript API、斜杠命令、宏、返回结构和示例。</p>
+            <p class="bbs-data-desc">下载 PUBLIC_API.md，包含 JavaScript API、斜杠命令、宏、返回结构和示例。</p>
           </div>
           <button class="bbs-btn bbs-btn-primary" type="button" @click="exportPublicApiDocument">
             <Icon name="download" />
@@ -1812,7 +1867,7 @@ function goToSettingsGroup(id: string) {
       confirm-text="创建并切入"
       @confirm="runCarryover"
     >
-      会根据这个聊天新建一个对话，带上记忆并切换过去。继续吗？
+      基于当前聊天新建一个对话，带入记忆并切换过去。是否继续？
     </ConfirmDialog>
     <ConfirmDialog
       v-model:open="migrateConfirmOpen"
@@ -1922,7 +1977,7 @@ function goToSettingsGroup(id: string) {
             />
           </div>
         </div>
-        <span class="bbs-field-hint">思考强度不确定就选 auto，DeepSeek 系列推荐 max。最大输出包括思考过程，摘要总被截断就调大它。</span>
+        <span class="bbs-field-hint">不确定思考强度时选 auto，DeepSeek 系列推荐 max。最大输出包含思考过程，摘要经常被截断时调大。</span>
         <label class="bbs-switch-row">
           <span class="bbs-modal-label">流式传输</span>
           <input v-model="editingChannel.stream" type="checkbox" class="bbs-checkbox bbs-switch" />
@@ -1931,7 +1986,7 @@ function goToSettingsGroup(id: string) {
           <span class="bbs-modal-label">发送预填充</span>
           <input v-model="editingChannel.prefill" type="checkbox" class="bbs-checkbox bbs-switch" />
         </label>
-        <span class="bbs-field-hint">默认打开。报错里提到 prefill 时关掉它。</span>
+        <span class="bbs-field-hint">两项默认关闭。流式传输：接口支持时可启用，出错时便于查看服务商返回的原始信息。发送预填充：接口支持时（如 Claude）可启用，摘要格式更稳定；报错提及 prefill 时关闭。</span>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">排除参数</span>
           <input
@@ -1940,7 +1995,7 @@ function goToSettingsGroup(id: string) {
             type="text"
             placeholder="用逗号分隔，如 temperature, max_tokens"
           />
-          <span class="bbs-field-hint">发请求前从请求里删掉这些参数，用来应付不接受某些参数的接口。留空就不删。</span>
+          <span class="bbs-field-hint">发送请求前从中删除这些参数，用于不接受某些参数的接口。留空则不删除。</span>
         </label>
         <div v-if="testing[editingChannel.id]" class="bbs-callout bbs-channel-test" :class="TONE_CLASS[testing[editingChannel.id].tone]" role="status">
           <p>{{ testing[editingChannel.id].text }}</p>
@@ -1972,7 +2027,7 @@ function goToSettingsGroup(id: string) {
           top-layer
           @confirm="confirmRemoveChannel"
         >
-          确定删除渠道「{{ editingChannel.name || '未命名渠道' }}」吗？删除后不能恢复，用这个渠道的任务会改回「跟随主 API」。
+          确定删除渠道「{{ editingChannel.name || '未命名渠道' }}」？删除后无法恢复，使用该渠道的任务将改为「跟随主 API」。
         </ConfirmDialog>
       </div>
     </ModalMask>
@@ -1986,18 +2041,18 @@ function goToSettingsGroup(id: string) {
         </header>
 
         <p class="bbs-modal-label">{{ editingPrompt.hint }}</p>
-        <p class="prism-editor-note">改动点「完成」才保存；「恢复默认」后也要点「完成」才生效，点「取消」就放弃修改。</p>
+        <p class="prism-editor-note">修改后点击「完成」保存；「恢复默认」后同样需点击「完成」生效，点击「取消」放弃修改。</p>
 
         <!-- 自定义不会跟着内置更新:内置改过就提醒,并能列出差异 -->
         <div v-if="editorSync === 'outdated' || editorSync === 'unknown'" class="bbs-callout is-warning prism-prompt-sync" role="status">
           <p class="prism-prompt-sync-text">
             {{ editorSync === 'outdated'
-              ? '你改过之后，内置版本又更新了。自定义的不会自动跟着变，可以先看看内置改了什么，需要的话照着改进下面的文本。'
-              : '这份是在旧版本里改的，当时没有记下照着哪一版内置。可以和现在的内置对比一下，看看要不要同步。' }}
+              ? '自定义后内置版本已更新，自定义内容不会自动同步。可查看内置版本的改动，按需修改下方文本。'
+              : '该自定义内容修改于旧版本，未记录当时依据的内置版本。可与当前内置版本对比，判断是否需要同步。' }}
           </p>
           <div class="prism-prompt-sync-actions">
             <button class="bbs-btn bbs-btn-sm" type="button" :aria-expanded="promptDiffOpen" @click="promptDiffOpen = !promptDiffOpen">
-              {{ promptDiffOpen ? '收起差异' : editorSync === 'outdated' ? '看内置改了什么' : '和现在的内置对比' }}
+              {{ promptDiffOpen ? '收起差异' : editorSync === 'outdated' ? '查看内置改动' : '与当前内置对比' }}
             </button>
             <button class="bbs-btn bbs-btn-sm" type="button" @click="markPromptSynced">已同步，不再提醒</button>
           </div>
@@ -2010,12 +2065,12 @@ function goToSettingsGroup(id: string) {
               <p v-else class="prism-diff-line" :class="`is-${row.type}`"><span class="prism-diff-mark" aria-hidden="true">{{ row.type === 'add' ? '+' : row.type === 'del' ? '−' : ' ' }}</span>{{ row.text || ' ' }}</p>
             </template>
           </div>
-          <p class="prism-diff-hint">「+」是现在的内置有、对比的那一份没有的行，「−」反过来。要同步，就把需要的改动照着改进下面的文本，点「完成」保存，再点「已同步，不再提醒」。</p>
+          <p class="prism-diff-hint">「+」表示当前内置版本有、对比版本没有的行，「−」相反。同步时将所需改动写入下方文本，点击「完成」保存，再点击「已同步，不再提醒」。</p>
         </div>
 
         <!-- 可用宏:点一下插入到光标处 -->
         <div class="bbs-macro-bar">
-          <span class="bbs-macro-tip">点一下插入宏：</span>
+          <span class="bbs-macro-tip">点击插入宏：</span>
           <button
             v-for="mac in editingPrompt.macros"
             :key="mac.token"
@@ -2074,7 +2129,7 @@ function goToSettingsGroup(id: string) {
             />
             <span class="bbs-exclude-row-name">{{ name }}</span>
           </label>
-          <p v-if="!charNames.length" class="bbs-field-hint">没读到角色列表，请先在酒馆里加载角色。</p>
+          <p v-if="!charNames.length" class="bbs-field-hint">未读取到角色列表，请先在酒馆中加载角色。</p>
           <p v-else-if="!filteredCharNames.length" class="bbs-field-hint">没有匹配「{{ excludeSearch }}」的角色。</p>
         </div>
 
@@ -2112,7 +2167,7 @@ function goToSettingsGroup(id: string) {
             />
             <span class="bbs-exclude-row-name">{{ name }}</span>
           </label>
-          <p v-if="!worldNames.length" class="bbs-field-hint">没读到世界书，请先在酒馆里加载世界书。</p>
+          <p v-if="!worldNames.length" class="bbs-field-hint">未读取到世界书，请先在酒馆中加载世界书。</p>
           <p v-else-if="!filteredWorldNames.length" class="bbs-field-hint">没有匹配「{{ excludeWorldSearch }}」的世界书。</p>
         </div>
 
@@ -2134,7 +2189,7 @@ function goToSettingsGroup(id: string) {
       @confirm="confirmUpdate"
     >
       当前版本 v{{ updateState.current || '—' }}，最新版本 v{{ updateState.latest }}。<br />
-      现在更新吗？更新完会自动刷新页面。
+      是否立即更新？更新完成后将自动刷新页面。
     </ConfirmDialog>
   </section>
 </template>

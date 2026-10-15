@@ -9,9 +9,34 @@ import type { StoredDelta, SummaryDelta } from './types';
  */
 export class SummaryResponseError extends Error {}
 
-const stateKeys = ['location', 'locationPath', 'sceneFocus', 'protagonist', 'items', 'scenes', 'npcs', 'plans', 'lifeDetails', 'vars'] as const;
-const groups = ['items', 'scenes', 'npcs', 'plans', 'lifeDetails'] as const;
+const stateKeys = ['location', 'locationPath', 'sceneFocus', 'protagonist', 'items', 'scenes', 'npcs', 'plans', 'lifeDetails', 'secrets', 'vars'] as const;
+const groups = ['items', 'scenes', 'npcs', 'plans', 'lifeDetails', 'secrets'] as const;
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** 引号和空白不参与原文比对(模型摘原句时常加减引号、换行)。 */
+const squash = (s: string) => s.replace(/[\s「」『』“”"'‘’]/g, '');
+
+/**
+ * 正文与记录的矛盾:about/record/text 三项都要有,text 须能在本楼原文里连续找到;最多 3 条。
+ * 不合格的条目直接丢掉,不让整楼摘要失败(矛盾只是提示,不是状态)。
+ */
+function cleanConflicts(value: unknown, sources: readonly string[]): NonNullable<SummaryDelta['conflicts']> {
+  if (!Array.isArray(value) || !sources.length) return [];
+  const pool = sources.map(squash);
+  const out: NonNullable<SummaryDelta['conflicts']> = [];
+  for (const raw of value) {
+    if (!record(raw)) continue;
+    const about = typeof raw.about === 'string' ? raw.about.trim() : '';
+    const prior = typeof raw.record === 'string' ? raw.record.trim() : '';
+    const text = typeof raw.text === 'string' ? raw.text.trim() : '';
+    if (!about || !prior || !text) continue;
+    const needle = squash(text);
+    if (needle.length < 2 || !pool.some(p => p.includes(needle))) continue;
+    out.push({ about: about.slice(0, 80), record: prior.slice(0, 200), text: text.slice(0, 200) });
+    if (out.length >= 3) break;
+  }
+  return out;
+}
 
 export function parseSummaryResponse(raw: string, options: {
   sourceContent?: string;
@@ -70,6 +95,9 @@ export function parseSummaryResponse(raw: string, options: {
     }
   }
   const delta = { ...parsed, summary } as SummaryDelta & { summary: string };
+  const conflicts = cleanConflicts(parsed.conflicts, options.sourceTexts ?? (options.sourceContent ? [options.sourceContent] : []));
+  if (conflicts.length) delta.conflicts = conflicts;
+  else delete delta.conflicts;
   const stored = options.finalize(delta);
   for (const key of (options.requireStateChanges || 'stateChanges' in parsed) ? groups : []) {
     if (!(key in parsed)) continue;
@@ -78,7 +106,7 @@ export function parseSummaryResponse(raw: string, options: {
     const cleaned = stored[key] as Record<string, unknown> | undefined;
     const allowed = key === 'items' || key === 'npcs' ? ['add', 'update', 'remove']
       : key === 'scenes' ? ['add', 'update', 'reparent']
-      : key === 'plans' ? ['add', 'update', 'resolve'] : ['add', 'update', 'archive', 'remove'];
+      : key === 'plans' || key === 'secrets' ? ['add', 'update', 'resolve'] : ['add', 'update', 'archive', 'remove'];
     for (const [op, values] of Object.entries(group)) {
       if (!allowed.includes(op) || !Array.isArray(values)) {
         throw new SummaryResponseError(key + '.' + op + ' 不是合法操作数组，请使用模板规定的字段。');

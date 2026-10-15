@@ -13,11 +13,12 @@ const defaults = (): OutlineSettings => ({
     temperature: 0.7, maxTokens: 6000, timeoutSec: 180, stream: true,
     prefill: false, excludeParams: [], reasoningEffort: '',
   },
+  progressCheck: { auto: false, interval: 3 },
 });
 export const outlineSettings = reactive<OutlineSettings>(defaults());
 let protectedSettings = false;
 let committed = defaults();
-const copy = (s: OutlineSettings): OutlineSettings => ({ ...s, channel: { ...s.channel, excludeParams: [...s.channel.excludeParams] } });
+const copy = (s: OutlineSettings): OutlineSettings => ({ ...s, channel: { ...s.channel, excludeParams: [...s.channel.excludeParams] }, progressCheck: { ...s.progressCheck } });
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const bounded = (v: unknown, fallback: number, lo: number, hi: number) =>
   typeof v === 'number' && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : fallback;
@@ -29,6 +30,7 @@ function recognized(raw: unknown): raw is Record<string, unknown> {
 function normalize(value: OutlineSettings | Record<string, unknown>): OutlineSettings {
   const d = defaults();
   const c = record(value.channel) ? value.channel : {};
+  const pc = record(value.progressCheck) ? value.progressCheck : {};
   return {
     apiMode: value.apiMode === 'independent' ? 'independent' : 'notes',
     channel: {
@@ -42,6 +44,11 @@ function normalize(value: OutlineSettings | Record<string, unknown>): OutlineSet
       stream: c.stream !== false, prefill: c.prefill === true,
       excludeParams: Array.isArray(c.excludeParams) ? c.excludeParams.filter((p): p is string => typeof p === 'string') : [],
       reasoningEffort: typeof c.reasoningEffort === 'string' ? c.reasoningEffort.trim() : '',
+    },
+    // 旧设置没有这一项:按默认(不自动检查,间隔 3 楼)
+    progressCheck: {
+      auto: pc.auto === true,
+      interval: Math.floor(bounded(pc.interval, d.progressCheck.interval, 1, 20)),
     },
   };
 }

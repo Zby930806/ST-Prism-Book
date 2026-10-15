@@ -4,11 +4,12 @@ import OutlineDiscussion from './OutlineDiscussion.vue';
 import { getContext } from '@/st/context';
 import type { ApiChannel } from '@/api/settings';
 import { engineActiveHere } from '@/api/settings';
-import type { OutlineContent, OutlineDraft } from '@/outline/types';
+import type { OutlineContent, OutlineDraft, OutlineSettings } from '@/outline/types';
 import { OUTLINE_LIMITS as L } from '@/outline/limits';
 import { validateOutlineContent } from '@/outline/protocol';
 import { outlineSettings, outlineSettingsIssue, resolveOutlineChannel, saveOutlineSettings } from '@/outline/settings';
 import { outlineRun, generateOutline, cancelOutline, discussionRun } from '@/outline/service';
+import { checkOutlineProgress, dismissOutlineProgress, outlineProgress, progressForCurrentStage } from '@/outline/progress';
 import { discussionState } from '@/outline/discussionStore';
 import {
   outlineState, saveOutlineDraft, activateOutlineDraft, setOutlineEnabled,
@@ -182,11 +183,48 @@ function confirmReconfirm() {
 function toggleActive() {
   const value = active.value;
   if (!value) return;
-  return runAction(() => setOutlineEnabled(!value.enabled), value.enabled ? '规划已暂停，不再交给正文模型。' : '规划已继续。');
+  return runAction(() => setOutlineEnabled(!value.enabled), value.enabled ? '规划已暂停，不再注入正文。' : '规划已继续。');
 }
 function moveStage(index: number) {
   return runAction(() => setOutlineChapter(index), index === active.value?.content.chapters.length
-    ? '规划已结束，不再交给正文模型。' : '已切换到新的阶段。');
+    ? '规划已结束，不再注入正文。' : '已切换到新的阶段。');
+}
+
+/* —— 推进条件检查:结果只作提示,切换仍由用户操作 —— */
+const progressShown = computed(() => progressForCurrentStage());
+async function checkProgress() {
+  if (locked.value || outlineProgress.busy) return;
+  error.value = ''; notice.value = '';
+  await checkOutlineProgress();
+}
+function advanceFromProgress() {
+  const value = active.value;
+  if (!value) return;
+  dismissOutlineProgress();
+  return moveStage(value.currentChapter + 1);
+}
+// 自动检查的开关和间隔:改了立即保存,失败回滚并提示
+function saveProgressSetting(patch: Partial<OutlineSettings['progressCheck']>) {
+  if (protectedSettings.value) return;
+  const previous = { ...outlineSettings.progressCheck };
+  try {
+    outlineSettings.progressCheck = { ...previous, ...patch };
+    saveOutlineSettings();
+  } catch (cause) {
+    outlineSettings.progressCheck = previous;
+    error.value = errorText(cause);
+  }
+}
+const progressAuto = computed({
+  get: () => outlineSettings.progressCheck.auto,
+  set: (value: boolean) => saveProgressSetting({ auto: value }),
+});
+const progressInterval = ref(outlineSettings.progressCheck.interval);
+watch(() => outlineSettings.progressCheck.interval, value => { progressInterval.value = value; });
+function commitProgressInterval() {
+  const n = Math.floor(Number(progressInterval.value));
+  if (!Number.isFinite(n) || n < 1 || n > 20) { progressInterval.value = outlineSettings.progressCheck.interval; return; }
+  saveProgressSetting({ interval: n });
 }
 
 const apiDraft = reactive(copy(outlineSettings.channel));
@@ -268,14 +306,14 @@ async function startGeneration(confirmed = false) {
       <details v-if="outlineRun.error && outlineRun.errorDetail"><summary>技术细节</summary><p>{{ outlineRun.errorDetail }}</p></details>
     </div>
     <p v-if="disabled" class="hint">记忆处于只读保护，暂时不能修改规划。</p>
-    <p v-if="!engineEnabled" class="hint">当前角色没有启用棱镜宝书：可以查看规划，但不会生成，也不会交给正文。</p>
+    <p v-if="!engineEnabled" class="hint">当前角色未启用棱镜宝书：可查看规划，但不生成，也不注入正文。</p>
 
     <section v-if="active" class="planner-card planner-active" aria-label="已确认的创作规划">
       <header class="planner-active-head">
         <h3>{{ active.content.title }}</h3>
         <span class="planner-state" :class="{ 'is-on': currentStage && engineEnabled && activeCurrent && active.enabled }">{{ !currentStage ? '已结束' : !engineEnabled ? '未启用' : !activeCurrent ? '剧情有改动，已暂停' : active.enabled ? '正在生效' : '已暂停' }}</span>
       </header>
-      <p v-if="!currentStage" class="hint">规划已经全部走完，不再交给正文模型。</p>
+      <p v-if="!currentStage" class="hint">规划的各阶段均已结束，不再注入正文。</p>
       <template v-else>
         <p class="planner-stage-line">第 {{ active.currentChapter + 1 }} / {{ active.content.chapters.length }} 阶段 · {{ currentStage.title }}</p>
         <dl class="planner-stage">
@@ -291,7 +329,31 @@ async function startGeneration(confirmed = false) {
         <button type="button" class="bbs-btn" :disabled="locked || active.currentChapter === 0" @click="moveStage(active.currentChapter - 1)">上一阶段</button>
         <button v-if="currentStage" type="button" class="bbs-btn" :disabled="locked" @click="moveStage(active.currentChapter + 1)">{{ active.currentChapter + 1 === active.content.chapters.length ? '结束规划' : '下一阶段' }}</button>
       </div>
-      <p class="hint">阶段由你手动切换；切换只代表规划进度，不代表剧情已经发生。</p>
+      <p class="hint">阶段需手动切换；切换只表示规划进度，不表示剧情已发生。</p>
+      <div v-if="currentStage" class="planner-progress">
+        <div class="actions">
+          <button type="button" class="bbs-btn" :disabled="locked || outlineProgress.busy || !engineEnabled || !activeCurrent || !active.enabled" @click="checkProgress">{{ outlineProgress.busy ? '检查中…' : '检查推进条件' }}</button>
+          <label class="checkbox planner-progress-auto">
+            <input v-model="progressAuto" type="checkbox" class="bbs-switch" :disabled="protectedSettings" />
+            <span>每</span>
+            <input v-model.number="progressInterval" class="bbs-input" type="number" min="1" max="20" step="1" aria-label="自动检查间隔（AI 楼数）" :disabled="protectedSettings" @change="commitProgressInterval" />
+            <span>个 AI 楼自动检查</span>
+          </label>
+        </div>
+        <div v-if="progressShown && outlineProgress.met && !outlineProgress.dismissed" class="bbs-callout is-success" role="status">
+          <p>推进条件可能已满足：{{ outlineProgress.reason || '（未给出依据）' }}（第 {{ outlineProgress.floor }} 楼时检查）</p>
+          <div class="actions">
+            <button type="button" class="bbs-btn bbs-btn-primary" :disabled="locked" @click="advanceFromProgress">{{ active.currentChapter + 1 === active.content.chapters.length ? '结束规划' : '切换到下一阶段' }}</button>
+            <button type="button" class="bbs-btn" @click="dismissOutlineProgress">忽略</button>
+          </div>
+        </div>
+        <p v-else-if="progressShown && outlineProgress.met === false" class="hint" role="status">推进条件尚未满足：{{ outlineProgress.reason || '（未给出依据）' }}（第 {{ outlineProgress.floor }} 楼时检查）</p>
+        <div v-if="outlineProgress.error" class="bbs-callout is-danger" role="alert">
+          <p>{{ outlineProgress.error }}</p>
+          <details v-if="outlineProgress.errorDetail"><summary>技术细节</summary><p>{{ outlineProgress.errorDetail }}</p></details>
+        </div>
+        <p class="hint">检查使用规划 API，每次请求一次；结果仅作提示，不会自动切换阶段。</p>
+      </div>
       <div v-if="confirmation?.kind === 'reconfirm'" class="confirmation">
         <p>先对照当前剧情看一遍下面的各阶段。确认后会以当前剧情为准，重新启用当前阶段。</p>
         <div class="actions"><button type="button" class="bbs-btn bbs-btn-primary" :disabled="locked" @click="confirmReconfirm">已核对，重新启用</button><button type="button" class="bbs-btn" @click="confirmation = null">取消</button></div>
@@ -326,7 +388,7 @@ async function startGeneration(confirmed = false) {
         </fieldset>
         <button v-if="outlineRun.busy || generating" type="button" class="bbs-btn" @click="cancelOutline">取消生成</button>
         <p v-if="configurationIssue" class="bbs-callout is-warning">{{ configurationIssue }} <button type="button" class="bbs-btn bbs-btn-sm" @click="apiOpen = true">打开规划 API 设置</button></p>
-        <p v-if="apiDirty" class="hint">API 设置还没保存，生成会用上次保存的设置。</p>
+        <p v-if="apiDirty" class="hint">API 设置尚未保存，生成时使用上次保存的设置。</p>
         <div v-if="confirmation?.kind === 'generate'" class="confirmation">
           <p>重新生成会再请求一次 API。成功后会替换当前草稿（包括没保存的修改），正在用的规划不受影响。</p>
           <div class="actions"><button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canGenerate" @click="startGeneration(true)">确认重新生成</button><button type="button" class="bbs-btn" @click="confirmation = null">取消</button></div>
@@ -335,7 +397,7 @@ async function startGeneration(confirmed = false) {
       </section>
 
       <section v-if="editor" class="planner-section" aria-label="未确认的规划草稿编辑器">
-        <h3>规划草稿 <span class="hint">{{ dirty ? '有未保存的修改' : '已保存，还没加入计划' }}</span></h3>
+        <h3>规划草稿 <span class="hint">{{ dirty ? '有未保存的修改' : '已保存，尚未加入计划' }}</span></h3>
         <p v-if="!draftCurrent" class="bbs-callout is-warning">草稿生成后剧情有变动，请核对后重新保存再加入计划。</p>
         <fieldset :disabled="locked">
           <label>规划标题<input v-model="editor.title" class="bbs-input" :maxlength="L.title" /></label>
@@ -364,7 +426,7 @@ async function startGeneration(confirmed = false) {
 
       <details class="bbs-disclosure planner-api" :open="apiOpen" @toggle="apiOpen = ($event.target as HTMLDetailsElement).open">
         <summary>规划 API 设置 <span class="bbs-disclosure-meta">{{ outlineSettings.apiMode === 'notes' ? '用札记的 API' : '专用 API' }}</span></summary>
-        <p class="hint">默认直接用札记填好的 API（不需要打开札记功能），也可以给规划单独设一个。改完点保存才生效；密钥保存在酒馆的扩展设置里，分享设置备份前记得删掉。</p>
+        <p class="hint">默认使用札记中填写的 API（无需启用札记功能），也可为规划单独设置。修改后点击保存生效；密钥保存在酒馆的扩展设置中，分享设置备份前需删除。</p>
         <form @submit.prevent="saveApi">
           <fieldset :disabled="locked || protectedSettings">
             <label>用哪个 API<select v-model="apiMode" class="bbs-input" aria-label="API 模式"><option value="notes">用札记的 API（默认）</option><option value="independent">规划专用 API</option></select></label>
@@ -374,7 +436,7 @@ async function startGeneration(confirmed = false) {
               <div class="actions"><button type="button" class="bbs-btn" :disabled="modelsLoading || !apiDraft.url.trim()" @click="pullModels">{{ modelsLoading ? '拉取中…' : '拉取模型列表' }}</button><button v-if="modelsLoading" type="button" class="bbs-btn" @click="cancelModels">取消拉取</button></div>
               <label v-if="models.length">搜索模型<input v-model="modelSearch" class="bbs-input" type="search" /></label>
               <label>从列表选择<select class="bbs-input" aria-label="模型下拉选择" :value="visibleModels.includes(apiDraft.model) ? apiDraft.model : ''" :disabled="!visibleModels.length || modelsLoading" @change="apiDraft.model = ($event.target as HTMLSelectElement).value"><option value="" disabled>{{ models.length ? '选择一个模型' : '先拉取列表，或直接在下面填写' }}</option><option v-for="model in visibleModels" :key="model" :value="model">{{ model }}</option></select></label>
-              <p v-if="matchingModels.length > 200" class="hint">只显示前 200 个，可以搜索缩小范围。</p>
+              <p v-if="matchingModels.length > 200" class="hint">仅显示前 200 个，可通过搜索缩小范围。</p>
               <label>模型名<input v-model="apiDraft.model" class="bbs-input" required autocomplete="off" spellcheck="false" /></label>
               <p v-if="modelsMessage" class="hint" role="status">{{ modelsMessage }}</p><p v-if="modelsError" class="bbs-callout is-warning" role="alert">{{ modelsError }}</p>
               <div class="planner-grid">
@@ -415,6 +477,11 @@ async function startGeneration(confirmed = false) {
 .planner-row > .bbs-btn { margin-bottom:10px; }
 .planner-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,140px),1fr)); gap:0 12px; }
 .planner-api { margin-top:10px; border-top:1px solid var(--bbs-line); }
+.planner-progress { margin-top:4px; padding-top:4px; border-top:1px dashed var(--bbs-line); }
+.planner-progress .actions { align-items:center; }
+.outline-planner .planner-progress-auto { margin:0; flex-wrap:wrap; gap:6px; min-height:38px; }
+.outline-planner .planner-progress-auto .bbs-input { width:64px; flex:0 0 64px; min-height:34px; text-align:center; }
+.planner-progress .bbs-callout p { margin:0 0 4px; }
 .outline-planner h3 { margin:0; font-size:15px; font-weight:650; }
 .outline-planner h4 { margin:8px 0; font-size:13px; }
 .outline-planner p { margin:8px 0; }

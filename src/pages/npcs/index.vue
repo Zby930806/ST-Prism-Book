@@ -8,10 +8,10 @@ import { NPC_AFFINITY_FIELDS, affinityLevelFromInput, fmtNpcAffinity } from '@/m
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import SummaryOnlyNotice from '@/components/SummaryOnlyNotice.vue';
-import { classifyNpcPresence, editNpc, removeNpc, setNpcFollow, setNpcImportant, setProtagonist, upsertNpc, addLifeDetail, removeLifeDetail, updateLifeDetail } from '@/memory/apply';
+import { classifyNpcPresence, editNpc, removeNpc, setNpcFollow, setNpcImportant, setProtagonist, upsertNpc, addLifeDetail, removeLifeDetail, updateLifeDetail, removeSecret, reopenSecret, resolveSecret } from '@/memory/apply';
 import { derivedMeta, memory } from '@/memory/store';
 import { ageDisplay } from '@/memory/timeRel';
-import type { MemLifeDetail, MemNpc } from '@/memory/types';
+import type { MemLifeDetail, MemNpc, MemSecret } from '@/memory/types';
 import { getContext } from '@/st/context';
 import { toast } from '@/st/toast';
 import { computed, nextTick, ref } from 'vue';
@@ -118,6 +118,40 @@ const lifeShown = computed(() => !lifeCollapsed.value || !lifeFoldable.value);
 function toggleLifeFold() {
   lifeCollapsed.value = !lifeCollapsed.value;
   persistCollapsed(LIFE_COLLAPSE_KEY, lifeCollapsed.value);
+}
+
+/* —— 信息差:谁知道什么。默认收起,免得打开角色页就被剧透;折叠态同样只存本机 —— */
+const SECRETS_COLLAPSE_KEY = 'bbs.ui.secretsCollapsed.v1';
+function loadCollapsedDefaultOn(key: string): boolean {
+  try {
+    return localStorage.getItem(key) !== '0';
+  } catch {
+    return true;
+  }
+}
+const secretsCollapsed = ref(loadCollapsedDefaultOn(SECRETS_COLLAPSE_KEY));
+const secretsFoldable = computed(() => memory.secrets.length > 0);
+const secretsShown = computed(() => !secretsCollapsed.value || !secretsFoldable.value);
+function toggleSecretsFold() {
+  secretsCollapsed.value = !secretsCollapsed.value;
+  persistCollapsed(SECRETS_COLLAPSE_KEY, secretsCollapsed.value);
+}
+const openSecrets = computed(() => memory.secrets.filter(s => s.status === 'open'));
+const resolvedSecrets = computed(() => memory.secrets.filter(s => s.status === 'resolved'));
+function secretMeta(s: MemSecret): string {
+  const parts: string[] = [];
+  if (s.knownBy.length) parts.push(`知情：${s.knownBy.join('、')}`);
+  if (s.unaware.length) parts.push(`不知情：${s.unaware.join('、')}`);
+  return parts.join(' · ');
+}
+function closeSecret(s: MemSecret) {
+  if (!resolveSecret(s.id)) toast('需先有摘要才能修改信息差。', 'warning');
+}
+function reopenSecretItem(s: MemSecret) {
+  if (!reopenSecret(s.id)) toast('需先有摘要才能修改信息差。', 'warning');
+}
+function removeSecretItem(s: MemSecret) {
+  if (!removeSecret(s.id)) toast('需先有摘要才能修改信息差。', 'warning');
 }
 
 const LIFE_PIN_CAP = 5;
@@ -363,7 +397,7 @@ function confirmRemove() {
 
 <template>
   <section class="bbs-page">
-    <PageHeader icon="npcs" title="角色" description="主角和出场过的角色：身份、关系、近况和生活档案。">
+    <PageHeader icon="npcs" title="角色" description="主角和出场过的角色：身份、关系、近况、生活档案和信息差。">
       <template #actions>
         <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!hasLeaf"
           :title="hasLeaf ? '手动添加角色' : '需先有摘要才能手动添加'" @click="openComposer"><Icon name="plus" />添加角色</button>
@@ -374,6 +408,7 @@ function confirmRemove() {
       <span><strong>{{ memory.npcs.length }}</strong>位 NPC</span>
       <span><strong>{{ mains.length }}</strong>主要角色</span>
       <span><strong>{{ memory.lifeDetails.length }}</strong>条生活细节</span>
+      <span><strong>{{ openSecrets.length }}</strong>条信息差</span>
       <span v-if="!hasLeaf" class="bbs-ledger-note">有了摘要才能手动补录</span>
     </div>
 
@@ -440,7 +475,59 @@ function confirmRemove() {
               </span>
             </article>
           </div>
-          <p v-if="!memory.lifeDetails.length" class="bbs-npc-mainhint">还没有生活细节。摘要会记下主角和主要角色明确说过、或正文写到的偏好、习惯和近况，每条注明是谁的；也可以手动添加或改归属。</p>
+          <p v-if="!memory.lifeDetails.length" class="bbs-npc-mainhint">暂无生活细节。摘要会记录主角和主要角色明确说过或正文写明的偏好、习惯和近况，每条注明所属人物；也可手动添加或修改归属。</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 信息差:谁知道什么。默认收起(避免剧透);在场的不知情角色会收到提醒 ===== -->
+    <div class="bbs-protagonist-section bbs-life-section bbs-secret-section">
+      <div class="bbs-npc-grouphead">
+        <button
+          class="bbs-fold-head"
+          type="button"
+          :class="{ 'is-static': !secretsFoldable }"
+          :disabled="!secretsFoldable"
+          :aria-expanded="secretsShown"
+          :title="secretsFoldable ? (secretsShown ? '收起信息差' : '展开信息差') : ''"
+          @click="toggleSecretsFold"
+        >
+          <Icon v-if="secretsFoldable" name="chevron" class="bbs-fold-caret" :class="{ 'is-collapsed': !secretsShown }" />
+          <h2 class="bbs-life-title" title="在场的不知情角色会收到提醒">信息差</h2>
+          <span v-if="secretsFoldable" class="bbs-fold-count">{{ openSecrets.length }}</span>
+        </button>
+        <span v-if="apiSettings.summaryOnlyMode || !apiSettings.injection.secrets" class="bbs-npc-grouphint is-local-only">仅供棱镜宝书记录，不发送给主对话 AI</span>
+      </div>
+      <div class="bbs-fold-wrap" :class="{ 'is-collapsed': !secretsShown }" :inert="!secretsShown">
+        <div class="bbs-fold-inner">
+          <div v-if="openSecrets.length" class="bbs-life-group">
+            <article v-for="s in openSecrets" :key="s.id" class="bbs-life">
+              <div class="bbs-life-main">
+                <p class="bbs-life-text">{{ s.content }}</p>
+                <div v-if="secretMeta(s)" class="bbs-life-meta"><span class="bbs-life-tag">{{ secretMeta(s) }}</span></div>
+              </div>
+              <span class="bbs-npc-acts">
+                <button class="bbs-item-act" type="button" title="结案（相关角色都已知情）" @click="closeSecret(s)"><Icon name="check" /></button>
+                <button class="bbs-item-act bbs-item-del" type="button" title="删除" @click="removeSecretItem(s)"><Icon name="trash" /></button>
+              </span>
+            </article>
+          </div>
+          <template v-if="resolvedSecrets.length">
+            <p class="bbs-secret-subhead">已结案</p>
+            <div class="bbs-life-group">
+              <article v-for="s in resolvedSecrets" :key="s.id" class="bbs-life is-archive">
+                <div class="bbs-life-main">
+                  <p class="bbs-life-text">{{ s.content }}</p>
+                  <div v-if="secretMeta(s)" class="bbs-life-meta"><span class="bbs-life-tag">{{ secretMeta(s) }}</span></div>
+                </div>
+                <span class="bbs-npc-acts">
+                  <button class="bbs-item-act" type="button" title="重开" @click="reopenSecretItem(s)"><Icon name="refresh" /></button>
+                  <button class="bbs-item-act bbs-item-del" type="button" title="删除" @click="removeSecretItem(s)"><Icon name="trash" /></button>
+                </span>
+              </article>
+            </div>
+          </template>
+          <p v-if="!memory.secrets.length" class="bbs-npc-mainhint">暂无信息差。摘要会记录正文中明确的隐瞒，以及重要的事发生时某个角色不在场的情况；在场的不知情角色会收到提醒。</p>
         </div>
       </div>
     </div>
@@ -476,7 +563,7 @@ function confirmRemove() {
             <div v-if="memory.protagonist.outfit" class="bbs-npc-field f-outfit"><dt>着装</dt><dd>{{ memory.protagonist.outfit }}</dd></div>
             <div v-if="memory.protagonist.condition" class="bbs-npc-field f-cond"><dt>状态</dt><dd>{{ memory.protagonist.condition }}</dd></div>
           </dl>
-          <p v-else-if="!protagonistHasData" class="bbs-npc-mainhint">还没有主角的状态记录，之后的摘要会根据剧情补上。</p>
+          <p v-else-if="!protagonistHasData" class="bbs-npc-mainhint">暂无主角状态记录，之后的摘要会根据剧情补充。</p>
         </div>
       </article>
     </div>
@@ -524,7 +611,7 @@ function confirmRemove() {
                 <div v-if="n.outfit" class="bbs-npc-field f-outfit"><dt>着装</dt><dd>{{ n.outfit }}</dd></div>
                 <div v-if="n.condition" class="bbs-npc-field f-cond"><dt>状态</dt><dd>{{ n.condition }}</dd></div>
               </dl>
-              <p v-else class="bbs-npc-mainhint">还没有状态记录，可以点编辑补上着装、状态和位置。</p>
+              <p v-else class="bbs-npc-mainhint">暂无状态记录，可点击编辑补充着装、状态和位置。</p>
             </div>
           </article>
         </div>
@@ -692,7 +779,7 @@ function confirmRemove() {
     </div>
     <div v-else class="bbs-empty">
       <span class="bbs-empty-icon"><Icon name="npcs" /></span>
-      <h3>还没有角色</h3><p>摘要会记下和主角有交集的人。{{ hasLeaf ? '也可以手动添加。' : '有了第一条摘要后就能手动添加。' }}</p>
+      <h3>暂无角色</h3><p>摘要会记录与主角有交集的人物。{{ hasLeaf ? '也可手动添加。' : '生成第一条摘要后可手动添加。' }}</p>
       <button v-if="hasLeaf" class="bbs-btn" type="button" @click="openComposer"><Icon name="plus" />添加第一位角色</button>
     </div>
 
@@ -929,7 +1016,7 @@ function confirmRemove() {
       @confirm="confirmRemove"
       @cancel="removing = null"
     >
-      删除「{{ removing?.name }}」？删除会记在最新一条摘要上，删掉那一楼就能恢复。
+      删除「{{ removing?.name }}」？删除操作记录在最新一条摘要上，删除该楼即可恢复。
     </ConfirmDialog>
   </section>
 </template>
@@ -1028,6 +1115,7 @@ function confirmRemove() {
 .bbs-fold-wrap.is-collapsed { grid-template-rows: 0fr; }
 .bbs-fold-inner { min-height: 0; overflow: hidden; }
 .bbs-life-group { display: flex; flex-direction: column; }
+.bbs-secret-subhead { margin: 12px 0 4px; font-size: 12px; font-weight: 600; color: var(--bbs-ink-muted); }
 .bbs-life { display: flex; align-items: flex-start; gap: 12px; padding: 13px 0 13px 12px; border-bottom: 1px solid var(--bbs-line); border-left: 2px solid var(--bbs-line); }
 .bbs-life:last-child { border-bottom: 0; }
 .bbs-life.is-pinned { border-left-color: var(--bbs-warning); }

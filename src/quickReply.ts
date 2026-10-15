@@ -24,8 +24,11 @@ const BAR_CLASS = 'bbs-qr-bar'; // 仅当 #qr--bar 不存在时,我们自建的�
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let observer: MutationObserver | null = null;
 
-/** 取(或建)#qr--bar:优先复用 ST 原生那条,没有才自建一条同款。返回挂按钮用的 .qr--buttons 容器。 */
-function ensureButtonHolder(sendForm: HTMLElement): HTMLElement {
+/**
+ * 取(或建)#qr--bar:优先复用 ST 原生那条,没有才自建一条同款。返回挂按钮用的 .qr--buttons 容器。
+ * 快捷回复栏的「召回」按钮(recallQuickReply.ts)也挂在这里。
+ */
+export function ensureButtonHolder(sendForm: HTMLElement): HTMLElement {
   // id 唯一约束,用属性筛选而非 #qr--bar 选择器(同 JS-Slash-Runner 的做法)
   let bar = Array.from(sendForm.querySelectorAll('div')).find(d => d.id === 'qr--bar') as HTMLElement | undefined;
   if (!bar) {
@@ -79,7 +82,11 @@ function tryInject(): boolean {
 
 function removeButton(): void {
   document.getElementById(BTN_ID)?.remove();
-  // 若是我们自建的空 #qr--bar(原生没有 QR),按钮撤了就一并回收,别留空条
+  removeOwnBarIfEmpty();
+}
+
+/** 若是我们自建的空 #qr--bar(原生没有 QR),按钮都撤了就一并回收,别留空条。 */
+export function removeOwnBarIfEmpty(): void {
   const bar = document.querySelector(`#qr--bar.${BAR_CLASS}`) as HTMLElement | null;
   if (bar && bar.querySelector('.qr--buttons')?.children.length === 0) bar.remove();
 }

@@ -88,10 +88,10 @@ const decisionActions = [
 ] as const;
 const injecting = computed(() => notesSettings.enabled && notesSettings.injectConfirmed);
 const injectionNote = computed(() => !notesSettings.enabled
-  ? '双子札记没有启用，这些安排暂时不会交给正文模型。'
+  ? '双子札记未启用，安排暂不注入正文。'
   : !notesSettings.injectConfirmed
     ? '「注入已确认安排」没有打开（在页面底部的「自动生成与注入」里），这些安排暂时只是记录。'
-    : '待兑现和进行中的安排会交给正文模型；标成已完成或已取消后就不再交。');
+    : '待兑现和进行中的安排注入正文；标记为已完成或已取消后停止注入。');
 
 function questionKey(noteId: string, questionId: string): string {
   return JSON.stringify([noteId, questionId]);
@@ -141,7 +141,7 @@ watch(visibleRecords, records => {
 }, { deep: true, immediate: true });
 
 function channelIssue(channel: typeof apiDraft): string {
-  if (!channel.url.trim() || !channel.model.trim()) return '札记要用单独的 API，还没填写地址和模型名。';
+  if (!channel.url.trim() || !channel.model.trim()) return '札记需使用独立的 API，尚未填写地址和模型名。';
   try {
     const url = new URL(channel.url.trim());
     if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return 'API 地址要写完整的 http(s) 地址，不能带账号、? 参数或 #。';
@@ -175,7 +175,7 @@ function saveApi() {
 const flagNotices = {
   enabled: ['双子札记已启用。', '双子札记已关闭。'],
   autoGenerate: ['已打开自动生成。', '已关闭自动生成。'],
-  injectConfirmed: ['已确认的安排会交给正文模型。', '已确认的安排不再交给正文模型。'],
+  injectConfirmed: ['已确认的安排将注入正文。', '已确认的安排不再注入正文。'],
 } as const;
 function changeFlag(key: 'enabled' | 'autoGenerate' | 'injectConfirmed', event: Event) {
   const input = event.target as HTMLInputElement;
@@ -249,13 +249,13 @@ function confirm(record: NoteRecord, questionId: string) {
 function reject(noteId: string, questionId: string) {
   return runAction('q:' + questionKey(noteId, questionId), async () => {
     await rejectQuestion(noteId, questionId);
-    notice.value = '已搁置，不会交给正文模型。';
+    notice.value = '已搁置，不注入正文。';
   });
 }
 function updateDecision(decision: NoteDecision, status: typeof decisionActions[number]['status']) {
   return runAction('d:' + decision.id, async () => {
     if ((status === 'pending' || status === 'in_progress') && !decisionIsCurrent(decision)) {
-      throw new Error('这条安排对应的正文已经变了，不能再设为待兑现或进行中；可以标成已完成或已取消。');
+      throw new Error('该安排对应的正文已变化，不能再设为待兑现或进行中；可标记为已完成或已取消。');
     }
     await setDecisionStatus(decision.id, status);
     notice.value = `已标成「${statusLabels[status]}」。`;
@@ -272,7 +272,7 @@ function importNotes() {
 
 <template>
   <div class="notes-page">
-    <PageHeader title="双子札记" icon="notes" description="模型读完最近的剧情，在故事外提几个问题跟你商量。你确认过的方案才算「安排」，可以交给正文模型慢慢写进故事。" />
+    <PageHeader title="双子札记" icon="notes" description="根据最近的剧情在故事外提出问题；确认后的方案作为「安排」，可注入正文。" />
 
     <section class="notes-panel" aria-label="札记生成">
       <div class="notes-toolbar">
@@ -286,13 +286,13 @@ function importNotes() {
           <button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canGenerate" @click="startGeneration()"><Icon name="edit" />生成札记</button>
         </div>
       </div>
-      <p v-if="!notesSettings.enabled" class="bbs-field-hint">没有启用：不会生成新札记，已有的札记和安排照样可以查看、整理。</p>
+      <p v-if="!notesSettings.enabled" class="bbs-field-hint">未启用：不生成新札记，已有的札记和安排仍可查看和整理。</p>
       <div v-if="configurationIssue" class="bbs-callout is-warning notes-setup">
         <span>{{ configurationIssue }}</span>
         <button type="button" class="bbs-btn" @click="openApi">去填写</button>
       </div>
-      <p v-if="apiDirty" class="bbs-field-hint">API 设置还没保存，生成会用上次保存的设置。</p>
-      <p v-if="notesSettings.enabled && !orderedRecords.length" class="bbs-field-hint">预设或悬浮球里如果也在生成札记（aftertalk），先关掉那边，免得一轮出两份。</p>
+      <p v-if="apiDirty" class="bbs-field-hint">API 设置尚未保存，生成时使用上次保存的设置。</p>
+      <p v-if="notesSettings.enabled && !orderedRecords.length" class="bbs-field-hint">预设或悬浮球中如也在生成札记（aftertalk），需关闭，以免每轮生成两份。</p>
     </section>
 
     <div class="notes-feedback" aria-live="polite" aria-atomic="true">
@@ -325,8 +325,8 @@ function importNotes() {
         <span v-if="orderedRecords.length" class="notes-count">共 {{ orderedRecords.length }} 份</span>
       </div>
       <div v-if="!orderedRecords.length" class="notes-empty">
-        <p>还没有札记。</p>
-        <p class="bbs-field-hint">启用并填好 API 后点「生成札记」。正文里以前写过的 aftertalk，可以在页面底部导入。</p>
+        <p>暂无札记。</p>
+        <p class="bbs-field-hint">启用并填写 API 后点击「生成札记」。正文中已有的 aftertalk 可在页面底部导入。</p>
       </div>
       <details v-for="(record, index) in visibleRecords" :key="JSON.stringify([recordExpansionScope, record.id])" class="bbs-disclosure is-card notes-record" :class="{ 'is-stale': !isCurrent(record) }" :data-expansion-scope="recordExpansionScope" :open="expandedRecords.has(record.id)" @toggle="toggleRecord(record.id, $event)">
         <summary>
@@ -355,7 +355,7 @@ function importNotes() {
             <p v-if="actionError" class="bbs-callout is-danger" role="alert">{{ actionError }}</p>
           </div>
         </div>
-        <p v-if="!record.questions.length" class="bbs-field-hint">这份札记里没有 Q1–Q4 这样的编号问题，所以没有可以确认的方案；原文都在上面。</p>
+        <p v-if="!record.questions.length" class="bbs-field-hint">该札记中没有 Q1–Q4 形式的编号问题，因此没有可确认的方案；原文见上方。</p>
       </details>
       <nav v-if="pageCount > 1" class="notes-pagination" aria-label="札记历史分页">
         <button type="button" class="bbs-btn" :disabled="page <= 1" aria-label="上一页札记" @click="page--">上一页</button>
@@ -370,7 +370,7 @@ function importNotes() {
         <span class="notes-inject" :class="{ 'is-on': injecting }">{{ injecting ? '注入中' : '未注入' }}</span>
       </div>
       <p class="bbs-field-hint">{{ injectionNote }}在聊天里回复「Q1：……」只会让下一份札记读到，确认还是要在这里点。</p>
-      <p v-if="!decisions.length" class="notes-empty">还没有确认过安排。札记里的方案不会自动变成剧情。</p>
+      <p v-if="!decisions.length" class="notes-empty">暂无已确认的安排。札记中的方案不会自动成为剧情。</p>
       <article v-for="decision in visibleDecisions" :key="decision.id" class="notes-decision" :class="`is-${decision.status}`">
         <header class="notes-decision-head">
           <span class="notes-chip">{{ statusLabels[decision.status] }}</span>
@@ -395,7 +395,7 @@ function importNotes() {
 
     <footer class="notes-footer" aria-label="札记设置">
       <details ref="apiPanel" class="bbs-disclosure" :open="apiOpen" @toggle="apiOpen = ($event.target as HTMLDetailsElement).open">
-        <summary>独立 API 设置 <span class="bbs-disclosure-meta">{{ configurationIssue ? '还没填好' : notesSettings.channel.model }}</span></summary>
+        <summary>独立 API 设置 <span class="bbs-disclosure-meta">{{ configurationIssue ? '未填写完整' : notesSettings.channel.model }}</span></summary>
         <p class="bbs-field-hint">札记只用这里填的 API（OpenAI 兼容接口），不会借用正文或摘要的；创作规划默认也用它。密钥存在酒馆的扩展设置里，分享设置备份前记得删掉。</p>
         <form class="notes-form" @submit.prevent="saveApi" @input="apiDirty = true">
           <fieldset :disabled="locked">
@@ -412,14 +412,14 @@ function importNotes() {
               <label v-if="models.length" class="notes-field">搜索<input v-model="modelSearch" class="bbs-input" type="search" autocomplete="off" aria-label="搜索札记模型" placeholder="输入关键词筛选" @input.stop /></label>
               <label class="notes-field">从列表选择
                 <select class="bbs-input" :value="visibleModels.includes(apiDraft.model) ? apiDraft.model : ''" :disabled="!visibleModels.length || modelsLoading" aria-label="札记模型下拉选择" @change="chooseModel">
-                  <option value="" disabled>{{ models.length ? (matchingModels.length ? '选择一个模型' : '没有匹配的模型，可以在下面手动填写') : '先填地址，再拉取模型列表' }}</option>
+                  <option value="" disabled>{{ models.length ? (matchingModels.length ? '选择一个模型' : '没有匹配的模型，可在下方手动填写') : '请先填写地址，再拉取模型列表' }}</option>
                   <option v-for="model in visibleModels" :key="model" :value="model">{{ model }}</option>
                 </select>
               </label>
-              <p v-if="matchingModels.length > 200" class="bbs-field-hint">匹配到 {{ matchingModels.length }} 个，只显示前 200 个，可以搜索缩小范围。</p>
+              <p v-if="matchingModels.length > 200" class="bbs-field-hint">匹配到 {{ matchingModels.length }} 个，仅显示前 200 个，可通过搜索缩小范围。</p>
               <label class="notes-field">模型名<input v-model="apiDraft.model" class="bbs-input" type="text" required autocomplete="off" spellcheck="false" aria-label="札记独立 API 模型" placeholder="也可以直接填写服务商给的模型名" /></label>
               <p v-if="modelsMessage" class="bbs-field-hint" role="status">{{ modelsMessage }}</p>
-              <p v-else-if="!modelsError" class="bbs-field-hint">拉取用的是上面填的地址和密钥，不用先保存。</p>
+              <p v-else-if="!modelsError" class="bbs-field-hint">拉取使用上方填写的地址和密钥，无需先保存。</p>
               <p v-if="modelsError" class="bbs-callout is-warning" role="alert">{{ modelsError }}</p>
             </div>
             <div class="notes-grid">
@@ -427,7 +427,7 @@ function importNotes() {
               <label class="notes-field">最大输出（tokens）<input v-model.number="apiDraft.maxTokens" class="bbs-input" type="number" required min="256" max="65535" step="1" inputmode="numeric" aria-label="札记独立 API 最大输出 tokens" /></label>
               <label class="notes-field">超时（秒）<input v-model.number="apiDraft.timeoutSec" class="bbs-input" type="number" required min="10" max="600" step="1" inputmode="numeric" aria-label="札记独立 API 超时秒数" /></label>
             </div>
-            <p class="bbs-field-hint">最大输出是模型一次最多写多少，默认 8000，思考型模型的思考过程也算在里面。札记总被截断就调大；超过模型自己的上限时服务商会报错，按提示调小就行。</p>
+            <p class="bbs-field-hint">单次生成的最大输出长度，默认 8000，思考型模型的思考过程计入其中。札记经常被截断时调大；超过模型上限时服务商会报错，需按提示调小。</p>
             <label class="notes-switch-row"><span><strong>流式输出</strong><small>边写边显示；接口不支持时关掉。</small></span><input v-model="apiDraft.stream" type="checkbox" class="bbs-switch" aria-label="札记独立 API 流式输出" /></label>
             <button type="submit" class="bbs-btn bbs-btn-primary notes-save"><Icon name="check" />保存</button>
           </fieldset>
@@ -445,10 +445,10 @@ function importNotes() {
           <input type="checkbox" class="bbs-switch" :checked="notesSettings.autoGenerate" :disabled="locked || (!notesSettings.autoGenerate && (!notesSettings.enabled || !!configurationIssue))" aria-label="自动生成札记" @change="changeFlag('autoGenerate', $event)" />
         </label>
         <label class="notes-switch-row">
-          <span><strong>注入已确认安排</strong><small>{{ !notesSettings.injectConfirmed && !notesSettings.enabled ? '要先启用双子札记。' : '把待兑现、进行中的安排交给正文模型。' }}</small></span>
+          <span><strong>注入已确认安排</strong><small>{{ !notesSettings.injectConfirmed && !notesSettings.enabled ? '需先启用双子札记。' : '将待兑现、进行中的安排注入正文。' }}</small></span>
           <input type="checkbox" class="bbs-switch" :checked="notesSettings.injectConfirmed" :disabled="locked || (!notesSettings.injectConfirmed && !notesSettings.enabled)" aria-label="注入已确认的有效安排" @change="changeFlag('injectConfirmed', $event)" />
         </label>
-        <p class="bbs-field-hint">以前用过原版札记的话，先关掉悬浮球里的札记自动生成，以及预设里让正文输出 aftertalk 的那一条，免得重复。</p>
+        <p class="bbs-field-hint">使用过原版札记时，需关闭悬浮球中的札记自动生成，以及预设中要求正文输出 aftertalk 的条目，以免重复。</p>
         <div class="notes-grid">
           <label class="notes-field">参考最近几层（1–40）<input :value="notesSettings.recentFloors" class="bbs-input" type="number" min="1" max="40" step="1" inputmode="numeric" :disabled="locked" aria-label="札记参考最近正文楼层数" @change="changeLimit('recentFloors', $event)" /></label>
           <label class="notes-field">摘要和状态最多读多少字（1000–40000）<input :value="notesSettings.memoryChars" class="bbs-input" type="number" min="1000" max="40000" step="1" inputmode="numeric" :disabled="locked" aria-label="札记参考记忆字数上限" @change="changeLimit('memoryChars', $event)" /></label>
@@ -469,7 +469,7 @@ function importNotes() {
         <p class="bbs-field-hint">把聊天正文里已有的 aftertalk 读成札记，方便在这里确认。正文不会被修改或删除，里面说过的安排也不会自动确认。</p>
         <button type="button" class="bbs-btn" :disabled="locked" @click="importNotes"><Icon name="download" />导入</button>
         <div v-if="feedbackAt === 'import' && (importResult !== null || actionError)" class="notes-inline">
-          <p v-if="importResult !== null" class="notes-status" role="status">{{ importResult ? `导入了 ${importResult} 份札记，聊天正文没有改动。` : '正文里没有新的 aftertalk 可以导入。' }}</p>
+          <p v-if="importResult !== null" class="notes-status" role="status">{{ importResult ? `已导入 ${importResult} 份札记，聊天正文未改动。` : '正文中没有可导入的新 aftertalk。' }}</p>
           <p v-if="actionError" class="bbs-callout is-danger" role="alert">{{ actionError }}</p>
         </div>
       </details>

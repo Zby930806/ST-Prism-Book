@@ -24,7 +24,7 @@ import { memory, memoryWriteIssue } from './store';
 import { compactTimeLabel, formatRange, latestStoryTime, splitTimeLabel, timeTagPrompt } from './timeTag';
 import { relativeTimeLabel, weekdayLabel, ageDisplay, calculateRelativeDays } from './timeRel';
 import { selectViewNodes, selectLifeDetailsForInjection, type ViewNode } from './select';
-import type { LeafExtra, MemItem, MemLifeDetail, MemNpc, MemProtagonist, MemScene, MemSummary, SceneFocus } from './types';
+import type { LeafExtra, MemItem, MemLifeDetail, MemNpc, MemProtagonist, MemScene, MemSecret, MemSummary, SceneFocus } from './types';
 
 // 摘要页列表复用同一套选择逻辑,经此 re-export(纯算法在 select.ts,零依赖、可单测)
 export { selectViewNodes, type ViewNode };
@@ -502,6 +502,37 @@ function fmtNpcContext(npcs: MemNpc[], scenes: MemScene[], here: string, locatio
 }
 
 /**
+ * 信息差注入:只列未结案、且此刻有不知情者在场的条目,写「谁不知道什么」和知情者。
+ * 在场 = 名册判定在场(含随行)、局势卡在场名单、主角(始终在场)。最多 8 条,防止挤占预算。
+ */
+export function fmtSecretContext(
+  secrets: MemSecret[],
+  npcs: MemNpc[],
+  scenes: MemScene[],
+  here: string,
+  locationPath: string[] | undefined,
+  focus: SceneFocus | null,
+  userName: string,
+): string {
+  const open = secrets.filter(s => s.status === 'open' && s.unaware.length);
+  if (!open.length) return '';
+  const present = new Set<string>();
+  for (const n of npcs) if (classifyNpcPresence(n, scenes, here, locationPath) === 'present') present.add(n.name);
+  for (const p of focus?.participants ?? []) if (p.trim()) present.add(p.trim());
+  if (userName.trim()) present.add(userName.trim());
+  const lines: string[] = [];
+  for (const s of open) {
+    const who = s.unaware.filter(name => present.has(name));
+    if (!who.length) continue;
+    const known = s.knownBy.length ? `(知情:${s.knownBy.map(oneLine).join('、')})` : '';
+    lines.push(`- ${who.map(oneLine).join('、')}不知道:${oneLine(s.content)}${known}`);
+    if (lines.length >= 8) break;
+  }
+  if (!lines.length) return '';
+  return `[信息差·保持人物视角]\n${lines.join('\n')}\n(不知情者不能说出、提及或依据这些事行动,除非正文中有人告诉他们;这是写作参考,不要在正文中点破)`;
+}
+
+/**
  * 渲染指定地点视角下的物品上下文。
  * 正常状态注入与「前往地点」草稿共用这一入口，确保寄存物品的可达判定不会分叉。
  */
@@ -621,6 +652,12 @@ export function buildStateInjectionText(): string {
   if (npcsOn) {
     const npcBlock = fmtNpcContext(memory.npcs, memory.scenes, here, locPath, memory.state.time);
     if (npcBlock) st.push(`NPC名册:\n${npcBlock}`);
+  }
+
+  // 信息差:依赖名册的在场判定,随名册开关;记录始终开启,这里只管注入
+  if (npcsOn && inj.secrets) {
+    const secretBlock = fmtSecretContext(memory.secrets, memory.npcs, memory.scenes, here, locPath, memory.state.sceneFocus, getContext()?.name1 ?? '');
+    if (secretBlock) st.push(secretBlock);
   }
 
   const openPlans = memory.plans

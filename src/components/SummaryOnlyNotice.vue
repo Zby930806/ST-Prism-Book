@@ -9,8 +9,8 @@ defineProps<{ subject: string }>();
   <aside v-if="apiSettings.summaryOnlyMode" class="bbs-summary-only-notice" role="status">
     <span class="bbs-summary-only-icon"><Icon name="eye-off" /></span>
     <div class="bbs-summary-only-copy">
-      <strong>只记录，不交给正文模型</strong>
-      <p>设置里打开了「仅注入剧情摘要」：{{ subject }}照常分析和保存，但不会交给正文模型。</p>
+      <strong>仅记录，不注入正文</strong>
+      <p>已开启「仅注入剧情摘要」：{{ subject }}照常分析和保存，但不注入正文。</p>
     </div>
   </aside>
 </template>

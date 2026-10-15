@@ -16,14 +16,15 @@ import { fitMemoryUnits, estimateTokens, slotBudget } from '../budget';
 
 import { getContext, type STMessage } from '@/st/context';
 import { apiSettings, engineActiveHere } from '@/api/settings';
-import { memoryWriteIssue } from '../store';
+import { memory, memoryWriteIssue } from '../store';
 import type { VecHit } from '@/api/baibaoku';
 import { vecSearch } from './store';
-import { getLeaf, leafValid } from '../apply';
+import { classifyNpcPresence, getLeaf, leafValid } from '../apply';
 import { MEMORY_BRIEFING_NOTE, MEMORY_BRIEFING_END } from '../prompts';
 import { embedTexts, encodeFloat32Base64, rerankDocuments } from './embed';
 import { rewriteQuery } from './rewrite';
-import { ensureRecallIndex } from './index';
+import { collectLeaves, ensureRecallIndex } from './index';
+import { fuseRecallRoutes, keywordHits, presentOrderKey, recallEntities, type FusedCandidate, type KeywordHit } from './routes';
 import { currentBundleHashes, currentChatId, currentChatScope, currentVectorDb, recallScopes } from './scope';
 import { isAiFloor, resolveKeepStart } from '../engine';
 import { cleanBody, compactTimeLabel, latestStoryTime, splitTimeLabel } from '../timeTag';
@@ -36,6 +37,7 @@ import {
   restoreRecallDebug,
   setRecallEmbedding,
   setRecallInjected,
+  setRecallKeyword,
   setRecallRerank,
   setRecallRewrite,
   setRecallStatus,
@@ -160,6 +162,9 @@ function recallParamFingerprint(cfg: typeof apiSettings.vector.recall): string {
     cfg.fullTextCount,
     cfg.finalRecallCount,
     apiSettings.memoryBudgetTokens,
+    cfg.keywordRoute === true,
+    cfg.presentBoost === true,
+    cfg.stickyTurns ?? 0,
     "prompt-v2",
   ].join(',');
 }
@@ -283,6 +288,70 @@ export function shouldRecallForType(type: string | undefined): boolean {
 export function clearRecallInjection(): void {
   cancelActiveRecall();
   clearRecallSlot();
+  sticky = null;
+}
+
+/* ============ 召回保留(上一轮注入的段落在之后几轮有空位时保留) ============ */
+
+interface StickyEntry {
+  hit: RankedHit;
+  turnsLeft: number;
+}
+let sticky: { chatId: string; entries: Map<string, StickyEntry> } | null = null;
+
+/** 本轮可补位的保留段落:同一聊天、还有剩余轮数、不在全文窗口内、本轮候选里没有的。 */
+function stickyCandidates(chatId: string | undefined, exclude: Set<string>, taken: Set<string>): RankedHit[] {
+  if (!chatId || sticky?.chatId !== chatId) return [];
+  const out: RankedHit[] = [];
+  for (const [id, e] of sticky.entries) {
+    if (e.turnsLeft > 0 && !exclude.has(id) && !taken.has(id)) out.push({ ...e.hit, route: 'sticky' });
+  }
+  return out;
+}
+
+/** 一次新召回结束后更新保留表:本轮新入选的重置为 N 轮,其余(含靠保留补位的)各减一轮。 */
+function updateSticky(chatId: string | undefined, pool: RankedHit[], selected: Map<string, 'full' | 'brief'>, turns: number): void {
+  if (!chatId || turns <= 0) { sticky = null; return; }
+  const prev = sticky?.chatId === chatId ? sticky.entries : new Map<string, StickyEntry>();
+  const next = new Map<string, StickyEntry>();
+  for (const [id, e] of prev) if (e.turnsLeft > 1) next.set(id, { hit: e.hit, turnsLeft: e.turnsLeft - 1 });
+  for (const h of pool) {
+    if (h.route !== 'sticky' && selected.has(h.leafId)) next.set(h.leafId, { hit: { ...h }, turnsLeft: turns });
+  }
+  sticky = { chatId, entries: next };
+}
+
+/* ============ 关键词一路 ============ */
+
+/** 当前对话里用来找名字的文字:查询重写的意图和问题 + 最新用户输入 + 它前面那条 AI 回复。 */
+function keywordQueryText(chat: STMessage[], intent: string, queries: string[]): string {
+  const parts = [intent, ...queries];
+  let userIdx = -1;
+  for (let i = chat.length - 1; i >= 0; i--) if (chat[i]?.is_user) { userIdx = i; break; }
+  if (userIdx >= 0) {
+    parts.push(cleanBody(chat[userIdx].mes ?? ''));
+    for (let i = userIdx - 1; i >= 0; i--) if (isAiFloor(chat[i])) { parts.push(cleanBody(chat[i].mes ?? '')); break; }
+  }
+  return parts.filter(Boolean).join('\n');
+}
+
+/** 名册、物品、地点名字在本聊天(全文窗口外)摘要里的精确匹配。 */
+function findKeywordHits(chat: STMessage[], exclude: Set<string>, queryText: string, limit: number): KeywordHit[] {
+  const ctx = getContext();
+  const leaves = collectLeaves(chat).filter(l => !exclude.has(l.leafId));
+  const entities = recallEntities(memory, [ctx?.name1 ?? '', ctx?.name2 ?? '']);
+  return keywordHits(leaves, entities, queryText, limit);
+}
+
+/** 当前在场的角色名(名册在场判定 + 局势卡在场者),主角除外。 */
+function presentNames(): string[] {
+  const names = new Set<string>();
+  for (const n of memory.npcs) {
+    if (classifyNpcPresence(n, memory.scenes, memory.state.location, memory.state.locationPath) === 'present') names.add(n.name);
+  }
+  for (const p of memory.state.sceneFocus?.participants ?? []) names.add(p);
+  names.delete(getContext()?.name1?.trim() ?? '');
+  return [...names];
 }
 
 /**
@@ -339,6 +408,8 @@ async function executeRecall(run: RecallRun, cfg: typeof apiSettings.vector.reca
   try {
     assertRecallCurrent(run);
     if (!recallWorthRunning(chat)) {
+      // 先清掉上一次的各阶段结果,免得面板和快捷回复按钮把旧的召回内容当成这一次的
+      resetRecallDebug();
       setRecallStatus('未召回:楼层未达起召门槛或全在窗口内');
       inject('');
       return;
@@ -353,7 +424,7 @@ async function executeRecall(run: RecallRun, cfg: typeof apiSettings.vector.reca
     resetRecallDebug();
     await awaitRecall(run, () => ensureRecallIndex(signal));
     assertRecallCurrent(run);
-    const { queryVectors, rerankQuery } = await resolveQueryVectors(run);
+    const { queryVectors, rerankQuery, intent, queries } = await resolveQueryVectors(run);
     assertRecallCurrent(run);
     if (!queryVectors.length) {
       setRecallStatus('未召回:查询重写未产出 query');
@@ -361,10 +432,12 @@ async function executeRecall(run: RecallRun, cfg: typeof apiSettings.vector.reca
       return;
     }
 
-    const exclude = windowLeafIds(chat);
+    const excludeIds = windowLeafIds(chat);
+    const exclude = new Set(excludeIds);
     const selfScope = currentChatScope();
+    const topK = Math.max(1, cfg.rerankCandidates);
     const { results } = await awaitRecall(run, () => vecSearch(database, scopes, queryVectors, {
-      topK: Math.max(1, cfg.rerankCandidates), excludeLeafIds: exclude,
+      topK, excludeLeafIds: excludeIds,
     }));
     assertRecallCurrent(run);
     setRecallEmbedding(results.map(h => ({
@@ -372,20 +445,40 @@ async function executeRecall(run: RecallRun, cfg: typeof apiSettings.vector.reca
       source: sourceLabel(h, selfScope), storyTime: compactTimeLabel((h.storyTime || '').trim()),
       preview: previewOf(h.document),
     })));
-    if (!results.length) {
+    // 关键词一路只查本聊天;没有本聊天 scope 时跳过
+    const keyword = cfg.keywordRoute === true && selfScope
+      ? findKeywordHits(chat, exclude, keywordQueryText(chat, intent, queries), topK)
+      : [];
+    setRecallKeyword(keyword.map(k => ({
+      leafId: k.leaf.leafId, source: `#${k.leaf.msgIndex}`, score: k.score, matched: k.matched,
+      storyTime: compactTimeLabel(k.leaf.storyTime.trim()), preview: previewOf(k.leaf.document),
+    })));
+    if (!results.length && !keyword.length) {
       setRecallStatus('未召回:检索无候选');
       inject('');
       return;
     }
-    const ranked = await rerankCandidates(rerankQuery, results, run);
+    const present = cfg.presentBoost === true ? presentNames() : [];
+    const candidates = fuseRecallRoutes(results, keyword, selfScope ?? '', present, topK);
+    const ranked = await rerankCandidates(rerankQuery, candidates, run);
     assertRecallCurrent(run);
-    const { text, tiers } = buildRecallText(ranked, cfg, selfScope, latestStoryTime(chat));
+    // 在场角色加权:rerank 成功时在 rerank 分上加一点排序加成;降级时融合顺序里已经计入
+    if (present.length && ranked[0]?.reranked) {
+      ranked.sort((a, b) => presentOrderKey(b.rerankScore, b.presentHits) - presentOrderKey(a.rerankScore, a.presentHits));
+    }
+    // 输入框可能暂时为空或越界,运行时再收一次:0–5 的整数
+    const stickyTurns = Math.min(5, Math.max(0, Math.floor(Number(cfg.stickyTurns) || 0)));
+    const pool: RankedHit[] = stickyTurns > 0
+      ? [...ranked, ...stickyCandidates(run.chatId, exclude, new Set(ranked.map(h => h.leafId)))]
+      : ranked;
+    const { text, tiers } = buildRecallText(pool, cfg, selfScope, latestStoryTime(chat));
     assertRecallCurrent(run);
-    recordRerankDebug(ranked, tiers, selfScope);
+    recordRerankDebug(pool, tiers, selfScope);
     inject(text);
     setRecallInjected(text);
     setRecallStatus(text ? '召回完成' : '召回完成:无内容达标,本回合未注入');
     assertRecallCurrent(run);
+    updateSticky(run.chatId, pool, tiers, stickyTurns);
     if (cacheKey) saveRecallCache({ key: cacheKey, text, debug: snapshotRecallDebug() });
   } catch (e) {
     // 切聊天/被更新代次取代:失败收尾也不准动共享槽、debug 或缓存。
@@ -420,9 +513,21 @@ function recordRerankDebug(
       source: sourceLabel(h, selfScope),
       storyTime: compactTimeLabel((h.storyTime || '').trim()),
       preview: previewOf(h.document),
+      route: h.route ?? 'vector',
+      similarityKnown: h.similarityKnown !== false && h.route !== 'sticky',
     });
   }
   setRecallRerank(hits);
+}
+
+/**
+ * 摘要档准入:向量相似度过阈值即可;关键词命中的段落没有可信的相似度,
+ * rerank 分达到全文阈值的一半才放行(rerank 不可用时直接放行);上一轮保留的段落直接放行(只占剩余空位)。
+ */
+function briefEligible(h: RankedHit, cfg: typeof apiSettings.vector.recall): boolean {
+  if (h.route === 'sticky') return true;
+  if (h.similarityKnown !== false && h.similarity >= cfg.embeddingThreshold) return true;
+  return (h.keywordScore ?? 0) > 0 && (h.reranked !== true || h.rerankScore >= cfg.rerankThreshold / 2);
 }
 
 /**
@@ -432,7 +537,7 @@ function recordRerankDebug(
  */
 async function resolveQueryVectors(
   run: RecallRun,
-): Promise<{ queryVectors: string[]; rerankQuery: string }> {
+): Promise<{ queryVectors: string[]; rerankQuery: string; intent: string; queries: string[] }> {
   const { intent, queries } = await awaitRecall(run, () => rewriteQuery(run.controller.signal));
   assertRecallCurrent(run);
   setRecallRewrite(intent, queries);
@@ -441,15 +546,23 @@ async function resolveQueryVectors(
   const vecs = await awaitRecall(run, () => embedTexts(queries, run.controller.signal));
   assertRecallCurrent(run);
   const queryVectors = vecs.map(v => encodeFloat32Base64(v));
-  return { queryVectors, rerankQuery: intent || queries[0] };
+  return { queryVectors, rerankQuery: intent || queries[0], intent, queries };
 }
 
 interface RankedHit extends VecHit {
   rerankScore: number; // 无 rerank 时 = similarity
+  /** 来自哪一路;旧调用方(单测)不带,按向量处理 */
+  route?: FusedCandidate['route'] | 'sticky';
+  /** false = 只由关键词命中,similarity 不可信 */
+  similarityKnown?: boolean;
+  keywordScore?: number;
+  presentHits?: number;
+  /** rerank 实际打过分(false = rerank 不可用,按融合顺序降级) */
+  reranked?: boolean;
 }
 
-/** 对候选做 rerank;失败/未配置则用 embedding 相似度序降级。 */
-async function rerankCandidates(query: string, hits: VecHit[], run: RecallRun): Promise<RankedHit[]> {
+/** 对候选做 rerank;失败/未配置则保持融合顺序降级,rerank 分取向量相似度(只由关键词命中的记 0)。 */
+async function rerankCandidates<T extends VecHit>(query: string, hits: T[], run: RecallRun): Promise<Array<T & { rerankScore: number; reranked: boolean }>> {
   // rerank 渠道未配置 → 直接降级(embedTexts/resolveVectorModel 在 rerank 缺渠道时会抛错)
   try {
     // 全文精排:发楼层原文(mesFull,已含内嵌起止时间)给 rerank,语义比摘要更全;
@@ -469,18 +582,20 @@ async function rerankCandidates(query: string, hits: VecHit[], run: RecallRun): 
     // order 是 {index, score} 降序;映射回 hit
     return order
       .filter(o => hits[o.index])
-      .map(o => ({ ...hits[o.index], rerankScore: o.score }));
+      .map(o => ({ ...hits[o.index], rerankScore: o.score, reranked: true }));
   } catch {
     assertRecallCurrent(run); // 仅真实重排失败可降级,取消/切聊天不能变成正常命中
-    // 降级:保持 embedding 序,rerankScore 复用 similarity
-    return hits.map(h => ({ ...h, rerankScore: h.similarity }));
+    // 降级:保持融合顺序,rerankScore 复用 similarity
+    return hits.map(h => ({ ...h, rerankScore: h.similarity, reranked: false }));
   }
 }
 
 /**
  * 按分档规则拼注入文本:
  *  - 全文档:rerankScore ≥ rerankThreshold,取前 fullTextCount,发 mes_full(无则退 document)。
- *  - 摘要档:rerankScore < rerankThreshold 但 similarity ≥ embeddingThreshold,发 document。
+ *  - 摘要档:rerankScore < rerankThreshold 但 similarity ≥ embeddingThreshold,发 document;
+ *    关键词命中的段落没有可信的相似度,改看 rerank:rerank 分达到全文阈值一半即可(rerank 不可用时直接放行);
+ *    上一轮保留的段落(route=sticky)排在最后,只在有空位时以摘要补入。
  *  - 总数 ≤ finalRecallCount;按 leaf_id 去重(已在后端跨 scope 合并,这里再兜底)。
  *
  * 返回拼好的注入文本 + 每条被采纳叶子的分档(full/brief),供调试面板标注 tier。
@@ -503,7 +618,7 @@ export function buildRecallText(
     if (seen.size >= cfg.finalRecallCount) break;
     if (seen.has(h.leafId)) continue;
 
-    const isFull = h.rerankScore >= cfg.rerankThreshold && fullUsed < cfg.fullTextCount;
+    const isFull = h.route !== 'sticky' && h.rerankScore >= cfg.rerankThreshold && fullUsed < cfg.fullTextCount;
     if (isFull) {
       // 全文档优先发 mesFull(原文,过 cleanBody 清洗后已含内嵌起止时间),无则退 document
       const cleanFull = h.mesFull ? cleanBody(h.mesFull).trim() : '';
@@ -516,7 +631,7 @@ export function buildRecallText(
       // mesFull 自带 (起始时间…)/(结束时间…),不再加 【】头避免时间重复;退到 document 时才补头
       fullIds.push(h.leafId);
       fullChunks.push(fmtChunk(h, body, useMesFull, selfScope, now));
-    } else if (h.similarity >= cfg.embeddingThreshold) {
+    } else if (briefEligible(h, cfg)) {
       const body = (h.document || '').trim();
       if (!body) continue;
       seen.add(h.leafId);

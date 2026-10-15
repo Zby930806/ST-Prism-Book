@@ -19,6 +19,7 @@ import Icon from '@/components/Icon.vue';
 import BbsSelect from '@/components/BbsSelect.vue';
 import { NPC_AFFINITY_FIELDS, affinityLevelFromInput } from '@/memory/npcRelations';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
+import RecallList from '@/components/RecallList.vue';
 import RegenerateCompare from '@/components/RegenerateCompare.vue';
 import { getContext, type STMessage } from '@/st/context';
 import { toast } from '@/st/toast';
@@ -26,6 +27,9 @@ import { getLeaf, leafValid, deleteLeafAt, editLeafFull } from '@/memory/apply';
 import { DELTA_OP_LABEL, deltaTagGroups, type DeltaTag, type DeltaTagGroup } from '@/memory/deltaTags';
 import { applyFloorPreview, discardFloorPreview, engineState, floorBackfillState, previewRegenerateFloor, setFloorOmit, summarizeFloor, type FloorPreview } from '@/memory/engine';
 import { derivedMeta } from '@/memory/store';
+import { setConflictStatus } from '@/memory/continuity';
+import { readFloorRecall } from '@/memory/vector/floorRecall';
+import { floorRecallView } from '@/memory/vector/recallView';
 import { ui } from '@/state/ui';
 import type { LeafExtra, StoredDelta, VarOp, JsonValue } from '@/memory/types';
 
@@ -60,6 +64,28 @@ const valid = computed(() => {
   return leafValid(msg.value);
 });
 const d = computed<StoredDelta | null>(() => leaf.value?.delta ?? null);
+
+// 生成本楼前的召回记录(启用楼层面板之后生成的回复才有;记录写入在 floorRecall.ts)
+const recall = computed(() => {
+  void props.sig.tick;
+  void derivedMeta.rev;
+  return floorRecallView(readFloorRecall(msg.value));
+});
+// 卡片头的小标签:召回到内容或召回失败时显示,其余情况不占位
+const recallChip = computed(() => {
+  const r = recall.value;
+  if (r?.phase === 'done' && r.items.length) return { text: `召回 ${r.items.length}`, failed: false };
+  if (r?.phase === 'failed') return { text: '召回失败', failed: true };
+  return null;
+});
+
+// 正文与记录不一致(摘要时标出,记录保持原样);番外楼不显示
+const conflicts = computed(() => (omit.value || !valid.value ? [] : (leaf.value?.conflicts ?? [])));
+const openConflicts = computed(() => conflicts.value.filter(c => !c.status || c.status === 'open').length);
+const CONFLICT_STATE: Record<string, string> = { pending: '下一次生成时提醒', reminded: '已提醒正文模型', ignored: '已忽略' };
+function changeConflict(index: number, status: 'pending' | 'ignored' | 'open') {
+  if (!setConflictStatus(props.floor, index, status)) toast('记忆处于保护状态，这次没有修改。', 'error');
+}
 
 const expanded = ref(false);
 const busy = ref(false);
@@ -459,7 +485,7 @@ function deleteTag(tag: Tag) {
       if (Array.isArray(dd.varOps)) dd.varOps.splice(tag.idx, 1); // varOps 是扁平数组,直接按序号删
       return;
     }
-    const group = (dd as Record<string, Record<string, unknown[]>>)[cat === 'item' ? 'items' : cat === 'npc' ? 'npcs' : cat === 'scene' ? 'scenes' : 'plans'];
+    const group = (dd as Record<string, Record<string, unknown[]>>)[cat === 'item' ? 'items' : cat === 'npc' ? 'npcs' : cat === 'scene' ? 'scenes' : cat === 'secret' ? 'secrets' : 'plans'];
     const arr = group?.[bucket];
     if (Array.isArray(arr)) arr.splice(tag.idx, 1);
   });
@@ -564,6 +590,8 @@ function keepCurrentSummary() {
           <span class="bbs-fp-head-top">
             <span class="bbs-fp-floor" :class="{ 'is-pending': !omit && !valid, 'is-omit': omit }">#{{ floor }}</span>
             <span v-if="timeLabel" class="bbs-fp-head-time">🕑 {{ timeLabel }}</span>
+            <span v-if="recallChip" class="bbs-fp-head-recall" :class="{ 'is-failed': recallChip.failed }" :title="recall?.statusText">{{ recallChip.text }}</span>
+            <span v-if="openConflicts" class="bbs-fp-head-recall is-warn" title="本楼正文与已有记录不一致，展开查看">不一致 {{ openConflicts }}</span>
           </span>
           <span class="bbs-fp-preview" :class="{ 'is-muted': previewMuted }">{{ previewText }}</span>
         </span>
@@ -760,6 +788,35 @@ function keepCurrentSummary() {
 
             <p v-else class="bbs-summary-text bbs-fp-text is-muted">此楼尚无摘要。</p>
 
+            <!-- 正文与记录不一致:摘要时标出,记录保持原样;可提醒正文模型或忽略 -->
+            <section v-if="conflicts.length" class="bbs-fp-group bbs-fp-conflicts">
+              <span class="bbs-fp-gtitle"><Icon name="bolt" class="bbs-fp-gicon" />与记录不一致 · {{ conflicts.length }} 处</span>
+              <p class="bbs-fp-recall-status">摘要时发现本楼正文与已有记录不一致，且正文没有交代变化，记录保持原样。</p>
+              <div v-for="(c, i) in conflicts" :key="i" class="bbs-fp-conflict" :class="`is-${c.status ?? 'open'}`">
+                <p class="bbs-fp-conflict-about">{{ c.about }}</p>
+                <p class="bbs-fp-conflict-line"><span class="bbs-fp-conflict-tag">记录</span>{{ c.record }}</p>
+                <p class="bbs-fp-conflict-line"><span class="bbs-fp-conflict-tag">正文</span>「{{ c.text }}」</p>
+                <div class="bbs-fp-conflict-actions">
+                  <template v-if="!c.status || c.status === 'open'">
+                    <button class="bbs-btn bbs-btn-sm" type="button" title="下一次生成时注入一次提醒，让正文按记录继续" @click="changeConflict(i, 'pending')">提醒正文模型</button>
+                    <button class="bbs-btn bbs-btn-sm" type="button" @click="changeConflict(i, 'ignored')">忽略</button>
+                  </template>
+                  <template v-else>
+                    <span class="bbs-fp-conflict-state">{{ CONFLICT_STATE[c.status] }}</span>
+                    <button v-if="c.status !== 'reminded'" class="bbs-fp-conflict-undo" type="button" @click="changeConflict(i, 'open')">撤销</button>
+                  </template>
+                </div>
+              </div>
+              <p class="bbs-fp-conflict-hint">以正文为准时，可在角色页、物品页等处直接修改对应记录。</p>
+            </section>
+
+            <!-- 生成本楼前的召回:来源楼层、故事时间、注入全文还是摘要、内容预览 -->
+            <section v-if="recall" class="bbs-fp-group bbs-fp-recall">
+              <span class="bbs-fp-gtitle"><Icon name="bookmark" class="bbs-fp-gicon" />召回<template v-if="recall.items.length"> · {{ recall.items.length }} 段</template></span>
+              <p class="bbs-fp-recall-status" :class="{ 'is-failed': recall.phase === 'failed' }">{{ recall.statusText }}</p>
+              <RecallList v-if="recall.items.length" :items="recall.items" />
+            </section>
+
             <!-- 页脚:删除整楼摘要(行内两步确认,防误触) -->
             <div v-if="leaf && !omit" class="bbs-fp-footer">
               <template v-if="confirmingDelete">
@@ -787,7 +844,7 @@ function keepCurrentSummary() {
       busyText="生成中…"
       @confirm="confirmRegenerate"
     >
-      先生成一份新的摘要，和现在的并排对比；你选「用新的」才会替换，选「保留现在的」就什么都不改。生成要请求一次 AI。
+      先生成新摘要并与现有摘要并排对比；选择「用新的」时替换，选择「保留现在的」时不修改。生成需请求一次 AI。
     </ConfirmDialog>
     <RegenerateCompare :preview="comparePreview" :busy="applyingPreview" @keep="keepCurrentSummary" @replace="useNewSummary" />
   </div>
@@ -843,6 +900,25 @@ function keepCurrentSummary() {
   font-size: 11.5px;
   color: var(--bbs-ink-muted);
   font-variant-numeric: tabular-nums;
+}
+/* 召回标签:时间之后的小描边签,空间不够时时间先省略 */
+.bbs-fp-head-recall {
+  flex: 0 0 auto;
+  padding: 0 7px;
+  border: 1px solid var(--bbs-line);
+  border-radius: var(--bbs-radius-pill);
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--bbs-ink-soft);
+  white-space: nowrap;
+}
+.bbs-fp-head-recall.is-failed {
+  color: var(--bbs-danger);
+  border-color: var(--bbs-danger);
+}
+.bbs-fp-head-recall.is-warn {
+  color: var(--bbs-warning);
+  border-color: var(--bbs-warning);
 }
 /* 楼号做成药丸,与主界面摘要卡的 #楼层 标签同款——面板一眼就与主界面同源 */
 .bbs-fp-floor {
@@ -1059,6 +1135,99 @@ function keepCurrentSummary() {
 .bbs-fp-gicon {
   color: var(--bbs-accent);
   font-size: 15px;
+}
+/* 召回卡:与变动类目卡同一层级,列表条目沉一档(surface-2),徽标提亮一档(surface) */
+.bbs-fp-recall {
+  margin-top: 10px;
+  --bbs-recall-item-bg: var(--bbs-surface-2);
+  --bbs-recall-badge-bg: var(--bbs-surface);
+}
+.bbs-fp-recall-status {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--bbs-ink-soft);
+}
+.bbs-fp-recall-status.is-failed {
+  color: var(--bbs-danger);
+}
+/* 与记录不一致:每处一块淡底条目,处理过的降一档 */
+.bbs-fp-conflicts {
+  margin-top: 10px;
+}
+.bbs-fp-conflicts .bbs-fp-gicon {
+  color: var(--bbs-warning);
+}
+.bbs-fp-conflict {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--bbs-line);
+  border-left: 3px solid var(--bbs-warning);
+  border-radius: var(--bbs-radius-sm);
+  background: var(--bbs-surface-2);
+}
+.bbs-fp-conflict:not(.is-open) {
+  border-left-color: var(--bbs-line-strong, var(--bbs-line));
+  opacity: 0.8;
+}
+.bbs-fp-conflict p {
+  margin: 0;
+}
+.bbs-fp-conflict-about {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--bbs-ink);
+}
+.bbs-fp-conflict-line {
+  display: flex;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--bbs-ink-soft);
+  word-break: break-word;
+}
+.bbs-fp-conflict-tag {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: var(--bbs-radius-sm);
+  background: var(--bbs-surface);
+  font-size: 11px;
+  line-height: 19px;
+  color: var(--bbs-ink-muted);
+}
+.bbs-fp-conflict-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+.bbs-fp-conflict-actions .bbs-btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.bbs-fp-conflict-state {
+  font-size: 12px;
+  color: var(--bbs-ink-muted);
+}
+.bbs-fp-conflict-undo {
+  padding: 2px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--bbs-ink-muted);
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.bbs-fp-conflict-undo:hover {
+  color: var(--bbs-accent);
+}
+.bbs-fp-conflict-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--bbs-ink-muted);
 }
 /* 变动条纵向堆叠(每条独占一行):它们承载的是可长可短的内容,横向 chip 流会把长条撑成
    丑陋的多行泡泡。改为账册式条目——一行一条、左对齐、内容自然换行。 */

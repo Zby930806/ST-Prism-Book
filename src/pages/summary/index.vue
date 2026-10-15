@@ -215,12 +215,12 @@ const foldGroups = computed(() => [
   {
     kind: 'plan' as const, title: '计划', items: plansOnly.value,
     foldable: true, shown: plansShown.value,
-    empty: '还没有计划。角色说出的打算会在摘要时自动记下，也可以手动添加。',
+    empty: '暂无计划。角色明确的打算会在摘要时自动记录，也可手动添加。',
   },
   {
     kind: 'suspense' as const, title: '悬念', items: suspenses.value,
     foldable: suspenseFoldable.value, shown: suspenseShown.value,
-    empty: '还没有悬念。故事里没解开的谜团会记在这里。',
+    empty: '暂无悬念。故事中尚未解开的谜团会记录在这里。',
   },
 ]);
 
@@ -413,7 +413,7 @@ async function doResummarize() {
     } else {
       // 未达阈值:补一句动态节奏,告诉用户大概每多少楼总结一次
       const cadence = showCadence.value ? `，大约每 ${resummaryEvery.value} 楼合并一次` : '';
-      resummaryHint.value = `还没攒够需要合并的摘要${cadence}。`;
+      resummaryHint.value = `摘要数量尚未达到合并条件${cadence}。`;
     }
   } finally {
     resummaryRunning.value = false;
@@ -527,7 +527,7 @@ function closeImportHistory() {
 function openImportHistory() {
   if (!allowMemoryEdit()) return;
   if (memory.summaries.some(s => s.imported)) {
-    toast('这个聊天已经导入过旧总结，可以直接编辑它，或删掉后重新导入。', 'warning');
+    toast('当前聊天已导入过旧总结，可直接编辑，或删除后重新导入。', 'warning');
     return;
   }
   const chat = getContext()?.chat ?? [];
@@ -536,7 +536,7 @@ function openImportHistory() {
     if (isAiFloor(chat[i])) { lastAi = i; break; }
   }
   if (lastAi < 0) {
-    toast('这个聊天还没有 AI 回复，没有可以覆盖的楼层。', 'warning');
+    toast('当前聊天还没有 AI 回复，没有可覆盖的楼层。', 'warning');
     return;
   }
   importHistoryText.value = '';
@@ -559,11 +559,11 @@ async function saveImportedHistory() {
   }
   const chat = getContext()?.chat ?? [];
   if (!isAiFloor(chat[floor])) {
-    toast('截止楼层要选一条 AI 回复，免得把还没回复的用户消息也藏起来。', 'warning');
+    toast('截止楼层需选择一条 AI 回复，以免隐藏尚未回复的用户消息。', 'warning');
     return;
   }
   if (memory.summaries.some(s => s.imported)) {
-    toast('这个聊天已经有导入的旧总结了。', 'warning');
+    toast('当前聊天已有导入的旧总结。', 'warning');
     return;
   }
   // 不静默覆盖棱镜宝书已经做过的逐楼摘要:重叠时两套叙事会同时进入上下文,应由用户先处理边界。
@@ -916,7 +916,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
 
 <template>
   <section class="bbs-page bbs-summary-page">
-    <PageHeader icon="summary" title="摘要" description="每层楼发生的事记成摘要，攒够了再合并成总结；生成正文时，这些记忆会一起交给模型。" />
+    <PageHeader icon="summary" title="摘要" description="每层楼生成摘要，摘要达到一定数量时进一步总结，并注入正文。" />
 
     <section class="bbs-overview" aria-label="当前聊天概览">
       <dl class="bbs-overview-stats">
@@ -940,21 +940,21 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
     <aside v-if="compatibilityState.mode !== 'ready'" class="bbs-callout is-warning bbs-compatibility" aria-label="旧记忆兼容状态" aria-live="polite">
       <template v-if="compatibilityState.mode === 'convert'">
         <strong class="bbs-callout-title">旧记忆需要转换</strong>
-        <p>这个聊天用的是旧版存储格式。转换只改存储结构，不请求 AI，也不改动摘要内容，转换前会自动备份。</p>
+        <p>当前聊天使用旧版存储格式。转换只改变存储结构，不请求 AI，也不改动摘要内容，转换前自动备份。</p>
         <p class="bbs-compat-note">上次检查：待转换 {{ compatibilityState.conversion.length }} 条，逐楼摘要 {{ compatibilityState.leaves }} 条，总结 {{ compatibilityState.summaries }} 条。转换前请先导出聊天备份，期间不要补摘、重建或导入。</p>
         <button class="bbs-btn bbs-btn-primary" type="button" :disabled="conversionBusy || engineState.running" @click="openConversionConfirm">{{ conversionBusy ? '正在转换…' : '备份并转换…' }}</button>
         <p v-if="engineState.running" class="bbs-compat-note">等当前的摘要任务结束后再转换。</p>
       </template>
       <template v-else>
         <strong class="bbs-callout-title">旧记忆处于只读保护</strong>
-        <p>没法确认旧记忆能安全写入，补摘、重建、总结、导入和编辑都暂停了。原数据还在，没有被当成空记忆覆盖。</p>
+        <p>无法确认旧记忆能否安全写入，补摘、重建、总结、导入和编辑均已暂停。原数据保留，未被当作空记忆覆盖。</p>
         <ul v-if="compatibilityState.issues.length">
           <li v-for="(issue, index) in compatibilityState.issues" :key="index">{{ issue }}</li>
         </ul>
-        <p v-else>兼容检查还没有给出结论。</p>
+        <p v-else>兼容检查尚未完成。</p>
         <p class="bbs-compat-note">建议先用酒馆的导出聊天功能备份，再对照上面的原因检查。不要用重建或导入来解除保护。</p>
       </template>
-      <p v-if="conversionBusy" role="status">转换和保存还没结束，请不要重复提交或切换聊天；关掉确认窗口也不会中断保存。</p>
+      <p v-if="conversionBusy" role="status">转换和保存尚未完成，请勿重复提交或切换聊天；关闭确认窗口不会中断保存。</p>
       <p v-if="conversionError" class="bbs-compatibility-error" role="alert">转换没有成功：{{ conversionError }} 请先导出聊天检查保存结果，不要反复转换或重建。</p>
     </aside>
     <ConfirmDialog
@@ -1008,7 +1008,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           <Icon name="plans" />批量补摘
         </button>
       </div>
-      <p class="bbs-backfill-description">点楼层号单独补摘，或按顺序批量补摘。每层楼请求一次 AI。</p>
+      <p class="bbs-backfill-description">点击楼层号单独补摘，或按顺序批量补摘，每层请求一次 AI。</p>
       <div class="bbs-pending-chips">
         <button
           v-for="f in pendingWindow.items"
@@ -1035,7 +1035,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
       @confirm="runBatchBackfill"
     >
       共有 {{ pendingFloors.length }} 层楼没有摘要。会按楼层顺序逐层生成摘要，并更新人物、物品、计划等状态，每层请求一次 AI。
-      中途可以取消，会在当前这层完成后停下。继续吗？
+      可中途取消，在当前楼层完成后停止。是否继续？
     </ConfirmDialog>
 
     <details class="bbs-reader-context">
@@ -1102,7 +1102,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           </div>
         </dl>
       </article>
-      <p v-else class="bbs-plan-empty">{{ hasLeaf ? '还没有局势卡。场面有实质变化时，摘要会自动更新；也可以点右边的铅笔自己写。' : '有了第一条摘要后才能手动写局势卡，之后场面变化也会在摘要时自动记下。' }}</p>
+      <p v-else class="bbs-plan-empty">{{ hasLeaf ? '暂无局势卡。场面有实质变化时摘要会自动更新；也可点击右侧铅笔手动填写。' : '生成第一条摘要后可手动填写局势卡，之后场面变化也会在摘要时自动记录。' }}</p>
     </div>
 
     <!-- 当前状态 -->
@@ -1197,7 +1197,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
                   </div>
                 </div>
               </div>
-              <p v-else class="bbs-plan-empty">{{ g.empty }}<span v-if="!hasLeaf" class="bbs-empty-prerequisite">有了第一条摘要后就能手动添加。</span></p>
+              <p v-else class="bbs-plan-empty">{{ g.empty }}<span v-if="!hasLeaf" class="bbs-empty-prerequisite">生成第一条摘要后可手动添加。</span></p>
               <SummaryPager :page="arrayPage(g.items, planPages[g.kind]).page" :total="g.items.length" :size="SUMMARY_PAGE_SIZE" :label="g.title" @update:page="planPages[g.kind] = $event" />
             </div>
           </div>
@@ -1209,7 +1209,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           <h2 class="bbs-title bbs-title-sub">创作规划</h2>
           <span v-if="outlineState.active" class="bbs-outline-count">{{ outlineState.active.content.chapters.length }} 个阶段</span>
         </div>
-        <p class="bbs-outline-intro">按剧情和你的想法规划接下来怎么写。规划是写作方向，不是已经发生的事；确认后才会交给正文模型，一次只给当前阶段。</p>
+        <p class="bbs-outline-intro">根据剧情和用户要求规划后续走向。规划是写作方向，不是已发生的事；确认后注入正文，每次只注入当前阶段。</p>
         <OutlinePlanner :disabled="editingBlocked" />
       </section>
     </section>
@@ -1274,7 +1274,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           class="bbs-btn bbs-btn-sm bbs-btn-primary bbs-resummary-btn"
           type="button"
           :disabled="resummaryRunning || engineState.running"
-          title="摘要攒够数量就立刻合并成总结" aria-label="摘要攒够数量就立刻合并成总结"
+          title="摘要达到数量时立即合并为总结" aria-label="摘要达到数量时立即合并为总结"
           @click="doResummarize"
         >
           <span v-if="resummaryRunning" class="bbs-pending-spin"></span>
@@ -1392,7 +1392,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
     </div>
     <div v-else class="bbs-empty">
       <span class="bbs-empty-icon"><Icon name="summary" /></span>
-      <h3>{{ editingBlocked ? '记忆处于只读保护' : '还没有摘要' }}</h3><p>{{ editingBlocked ? '请先看上面的说明。这不代表聊天没有记忆，不要用重建或导入来解除保护。' : pendingFloors.length ? '上面列出了还没摘要的楼层，点楼层号就能生成。也可以等对话继续，到设定楼层后会自动摘要。' : '对话进行到设定的楼层后会自动生成摘要；之前的旧总结可以用「导入旧总结」放进来。' }}</p>
+      <h3>{{ editingBlocked ? '记忆处于只读保护' : '暂无摘要' }}</h3><p>{{ editingBlocked ? '请先查看上方说明。这不表示聊天没有记忆，请勿用重建或导入解除保护。' : pendingFloors.length ? '上方列出了尚未摘要的楼层，点击楼层号即可生成；对话继续到设定楼层后也会自动摘要。' : '对话进行到设定楼层后会自动生成摘要；已有的旧总结可通过「导入旧总结」导入。' }}</p>
     </div>
 
     <SummaryPager :page="activeWindow.page" :total="activeWindow.total" :size="SUMMARY_PAGE_SIZE" label="摘要" @update:page="changeSummaryPage" />
@@ -1446,7 +1446,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
 
     <ConfirmDialog v-if="!editingBlocked" v-model:open="rebuildConfirmOpen" title="重建本聊天记忆" tone="danger" confirmText="按楼层顺序重建" @confirm="rebuildChatMemory">
       升级插件不需要重建：旧摘要和总结能直接读取，或转换后继续用。重建会重新请求 AI，覆盖手动改过的摘要和相关状态。
-      会按顺序重新摘要这个聊天的所有 AI 楼层（番外、导入的旧总结和继承来的数据除外），每层一次请求，失败可能重试，费用可能不少。请先备份聊天，完成前不要切换聊天或修改正文。
+      将按顺序重新摘要当前聊天的所有 AI 楼层（番外、导入的旧总结和继承的数据除外），每层请求一次，失败可能重试，费用可能较高。请先备份聊天，完成前请勿切换聊天或修改正文。
       每层成功后替换这层原来的摘要和状态（包括你手动改过的），相关的上层总结会作废并按设置重新生成。失败或取消就停下：已完成的用新结果，没完成的保留旧结果，剧情原文不会被删。继续吗？
     </ConfirmDialog>
 
@@ -1459,7 +1459,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
       @confirm="runMerge"
     >
       把选中的 {{ selectionSummary.count }} 条合并成一条{{ levelLabel(selectionSummary.level) }}（不受自动总结的数量限制）。
-      原来的条目会收进新总结里，不会被删除；删掉新总结就能还原。继续吗？
+      原条目会收入新总结，不会删除；删除新总结即可还原。是否继续？
     </ConfirmDialog>
 
     <!-- 批量删除确认:选中总结代表整段历史,会连同其收纳的下层节点永久删除。 -->
@@ -1550,7 +1550,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
             v-model="newTargetTime"
             class="bbs-input"
             type="text"
-            placeholder="如：放学后、1988/10/1，可以模糊或留空"
+            placeholder="如：放学后、1988/10/1，可模糊或留空"
           />
         </label>
         <footer class="bbs-modal-foot">
@@ -1577,7 +1577,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
         </label>
         <label v-if="editingPlan.kind === 'plan'" class="bbs-modal-field">
           <span class="bbs-modal-label">目标时间（可选）</span>
-          <input v-model="editingPlan.targetTime" class="bbs-input" type="text" placeholder="如：放学后、1988/10/1，可以模糊或留空" />
+          <input v-model="editingPlan.targetTime" class="bbs-input" type="text" placeholder="如：放学后、1988/10/1，可模糊或留空" />
         </label>
         <footer class="bbs-modal-foot">
           <button class="bbs-btn" type="button" @click="cancelPlanEdit">取消</button>
@@ -1629,7 +1629,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
       <InitialTime />
       <details v-if="compatibilityState.mode === 'ready'" class="bbs-disclosure bbs-compat-ready">
         <summary>旧记忆兼容 <span class="bbs-disclosure-meta">正常，不需要重建</span></summary>
-        <p class="bbs-field-hint">这个聊天的旧摘要和 L1/L2 总结按原格式读取，升级后不需要重新摘要或重建。</p>
+        <p class="bbs-field-hint">当前聊天的旧摘要和 L1/L2 总结按原格式读取，升级后无需重新摘要或重建。</p>
         <p class="bbs-field-hint">上次检查：逐楼摘要 {{ compatibilityState.leaves }} 条，总结 {{ compatibilityState.summaries }} 条（检查时的数量，以上方列表为准）。</p>
       </details>
       <details v-if="hasLeaf" class="bbs-disclosure bbs-maintenance">

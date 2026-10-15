@@ -30,9 +30,9 @@ export interface ApiChannel {
   /** 流式传输(默认关);开启后按 SSE 增量拼接 */
   stream: boolean;
   /**
-   * 发送预填充(默认开)。摘要/批量请求末尾带一条 assistant 预填充消息,引导模型从思维链续写、
-   * 并压制拒答。Claude 等原生支持预填充的后端收益明显;若端点要求「最后一条必须是 user」
-   * 或为纯 OpenAI 端点(预填充不被续写、形同浪费),可关掉——关掉只是不发那条尾 assistant,
+   * 发送预填充(默认关)。打开后摘要/批量请求末尾带一条 assistant 预填充消息,引导模型从思维链续写、
+   * 并压制拒答。Claude 等原生支持预填充的后端收益明显;很多端点要求「最后一条必须是 user」
+   * 或为纯 OpenAI 端点(预填充不被续写、形同浪费),所以默认不发——关着只是不发那条尾 assistant,
    * 思维链引导仍由 system 检查清单承担,不影响功能。 */
   prefill: boolean;
   /** 排除参数:这些字段名会在构造请求体时从 body 中删除,
@@ -114,6 +114,12 @@ export interface VectorRecallSettings {
    * 早期剧情还没多少旧记忆可召,跳过可省额度/延迟;「带数据建新对话」的旧档不受此限(始终召回)。
    */
   minAiFloors: number;
+  /** 关键词召回:用名册、物品、地点的名字精确匹配本聊天摘要,作为一路与向量检索融合。默认开。 */
+  keywordRoute: boolean;
+  /** 在场角色加权:候选摘要涉及当前在场角色时排序靠前(不改变分档阈值)。默认开。 */
+  presentBoost: boolean;
+  /** 召回保留轮数:上一轮注入的段落在之后 N 轮内,有空位时以摘要形式保留。0=关(默认)。 */
+  stickyTurns: number;
 }
 
 /** 向量记忆设置。embedding 为基准,rerank/queryRewrite 的 url 留空则整体复用 embedding。 */
@@ -146,6 +152,8 @@ export interface UiPrefs {
   showTopBar: boolean;
   /** 在聊天框上方注入「快速回复」式按钮,点击打开棱镜宝书。默认关。 */
   showQuickReply: boolean;
+  /** 开了向量记忆时,在快捷回复栏放一个「召回」按钮:显示上次召回了几段,点开看召回了什么。默认开。 */
+  showRecallQuickReply: boolean;
   /** 在每条 AI 楼层内注入摘要锚点(查看该楼摘要数据 + 标记番外)。默认关。 */
   showFloorPanel: boolean;
   /** 屏幕边缘悬浮球,点击打开棱镜宝书。默认关。 */
@@ -177,6 +185,12 @@ export function normalizeSummaryMaxChars(value: unknown, verbosity: Verbosity = 
   return Math.min(SUMMARY_MAX_CHARS_MAX, Math.max(SUMMARY_MAX_CHARS_MIN, Math.round(value)));
 }
 
+/** 召回保留轮数:0–5 的整数;缺失、非法或输入框暂时为空时按 0(关)。 */
+export function normalizeStickyTurns(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+  return Math.min(5, Math.max(0, Math.floor(value)));
+}
+
 /**
  * 注入设置:各状态块是否注入**主模型**(生成正文的请求)。
  * 只影响 buildStateInjectionText;副 API 摘要始终看到全量状态、照常记录(防重复记录),不受此影响。
@@ -199,6 +213,8 @@ export interface InjectionSections {
   items: boolean;
   /** 场景信息(当前地点+祖先链+其他已知地点);关闭后 NPC/物品随之不注入 */
   scenes: boolean;
+  /** 信息差:提醒在场的不知情角色(依赖 NPC 名册的在场判定;仅控制注入,记录始终开启) */
+  secrets: boolean;
 }
 
 export interface ApiSettings {
@@ -345,6 +361,7 @@ function defaults(): ApiSettings {
       navTapClose: true,
       showTopBar: false,
       showQuickReply: false,
+      showRecallQuickReply: true,
       showFloorPanel: false,
       showOrb: false,
       orbImage: '',
@@ -374,13 +391,16 @@ function defaults(): ApiSettings {
         fullTextCount: 2,
         finalRecallCount: 5,
         minAiFloors: 30,
+        keywordRoute: true,
+        presentBoost: true,
+        stickyTurns: 0,
       },
     },
     channels: [],
     assignments: { summary: '', resummary: '' },
     autoSummaryEnabled: true,
     summaryOnlyMode: false,
-    injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, npcAffinity: true, items: true, scenes: true },
+    injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, npcAffinity: true, items: true, scenes: true, secrets: true },
     keepRecent: 3,
     excludedChars: [],
     excludedWorldNames: [],
@@ -435,6 +455,7 @@ function normalize(raw: unknown): ApiSettings {
     navTapClose: typeof ru.navTapClose === 'boolean' ? ru.navTapClose : d.ui.navTapClose,
     showTopBar: typeof ru.showTopBar === 'boolean' ? ru.showTopBar : d.ui.showTopBar,
     showQuickReply: typeof ru.showQuickReply === 'boolean' ? ru.showQuickReply : d.ui.showQuickReply,
+    showRecallQuickReply: typeof ru.showRecallQuickReply === 'boolean' ? ru.showRecallQuickReply : d.ui.showRecallQuickReply,
     showFloorPanel: typeof ru.showFloorPanel === 'boolean' ? ru.showFloorPanel : d.ui.showFloorPanel,
     showOrb: typeof ru.showOrb === 'boolean' ? ru.showOrb : d.ui.showOrb,
     orbImage: typeof ru.orbImage === 'string' ? ru.orbImage : d.ui.orbImage,
@@ -476,6 +497,7 @@ function normalize(raw: unknown): ApiSettings {
     npcAffinity: typeof ri.npcAffinity === 'boolean' ? ri.npcAffinity : true,
     items: typeof ri.items === 'boolean' ? ri.items : true,
     scenes: typeof ri.scenes === 'boolean' ? ri.scenes : true,
+    secrets: typeof ri.secrets === 'boolean' ? ri.secrets : true,
   };
   // vector 同为嵌套对象(且内含子对象),逐层兜底,老数据缺字段时回退默认。
   // 注:旧结构曾有 vector.channels + {channel,model};扁平化后弃用,逐角色按 url/key/model 兜底,
@@ -496,6 +518,12 @@ function normalize(raw: unknown): ApiSettings {
     Number.isFinite(merged.vector.recall.minAiFloors) && merged.vector.recall.minAiFloors >= 0
       ? Math.floor(merged.vector.recall.minAiFloors)
       : 0;
+  // 关键词召回、在场角色加权:布尔,老数据缺失时按默认(开);保留轮数:0–5 的整数,缺失/非法回退 0
+  merged.vector.recall.keywordRoute =
+    typeof merged.vector.recall.keywordRoute === 'boolean' ? merged.vector.recall.keywordRoute : d.vector.recall.keywordRoute;
+  merged.vector.recall.presentBoost =
+    typeof merged.vector.recall.presentBoost === 'boolean' ? merged.vector.recall.presentBoost : d.vector.recall.presentBoost;
+  merged.vector.recall.stickyTurns = normalizeStickyTurns(merged.vector.recall.stickyTurns);
   // 查询重写附加任务说明开关:布尔,缺失(老数据无此键)回退 false(默认不注入)
   merged.vector.queryRewriteJailbreak =
     typeof merged.vector.queryRewriteJailbreak === 'boolean' ? merged.vector.queryRewriteJailbreak : false;
@@ -617,7 +645,8 @@ function normalizeChannel(c: Partial<ApiChannel>): ApiChannel {
         ? Math.floor(c.timeoutSec)
         : 180,
     stream: typeof c.stream === 'boolean' ? c.stream : false,
-    prefill: typeof c.prefill === 'boolean' ? c.prefill : true, // 后加字段:老数据默认开(保持原行为)
+    // 流式与预填充默认都关(很多 OpenAI 兼容接口不接受末尾的 assistant 预填充);已保存的选择照旧
+    prefill: typeof c.prefill === 'boolean' ? c.prefill : false,
     excludeParams: Array.isArray(c.excludeParams)
       ? c.excludeParams.filter((x): x is string => typeof x === 'string')
       : [],
@@ -999,7 +1028,7 @@ export function newChannel(): ApiChannel {
     maxTokens: 65535,
     timeoutSec: 180,
     stream: false,
-    prefill: true,
+    prefill: false,
     excludeParams: [],
     reasoningEffort: '',
   };

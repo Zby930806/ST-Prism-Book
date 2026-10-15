@@ -25,8 +25,8 @@ async function save() {
 <template>
   <details class="bbs-disclosure bbs-initial-time" aria-label="开场时间设置">
     <summary>开场时间 <span class="bbs-disclosure-meta">{{ derivedMeta.latestStoryTime || '新聊天开始时自动设定' }}</span></summary>
-    <p class="bbs-field-hint">新聊天如果没写时间，会从「故事第1天 08:00」开始，正文和摘要共用这个起点。正文里写明的时间优先；也可以在这里设定你想要的开场时间。</p>
-    <p v-if="fictional" class="bbs-field-hint">这个聊天的起点是自动设定的虚构时间，不是现实日期。</p>
+    <p class="bbs-field-hint">新聊天未写明时间时，从「故事第1天 08:00」开始，正文和摘要共用该起点。正文中写明的时间优先；也可在此设定开场时间。</p>
+    <p v-if="fictional" class="bbs-field-hint">当前聊天的起点是自动设定的虚构时间，不是现实日期。</p>
     <p v-if="issue" class="bbs-field-hint">{{ issue }}</p>
     <form v-else class="bbs-initial-time-form" @submit.prevent="save">
       <input v-model="value" class="bbs-input" maxlength="80" aria-label="开场时间" placeholder="角色设定里的时间，或你想要的开场时间" :disabled="saving" />
