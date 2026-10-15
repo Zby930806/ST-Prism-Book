@@ -112,6 +112,7 @@ export interface LeafView {
   msgIndex: number;
   active: boolean; // 所在消息已隐藏(is_system)
   stale: boolean; // 正文已变、尚未重摘
+  lite?: boolean; // 批量补摘合并生成的简要摘要(只有摘要和时间)
 }
 export const derivedMeta = reactive<{ hasLeaf: boolean; leaves: LeafView[]; pendingFloors: number[]; latestStoryTime: string; rev: number }>({
   hasLeaf: false,
@@ -185,6 +186,7 @@ export function recomputeDerived(): void {
         msgIndex: i,
         active: m.is_system === true,
         stale: !valid,
+        ...(leaf.lite === true ? { lite: true } : {}),
       });
     }
   }

@@ -191,6 +191,18 @@ export function normalizeStickyTurns(value: unknown): number {
   return Math.min(5, Math.max(0, Math.floor(value)));
 }
 
+/** 合并摘要每次最多楼层数:1–30 的整数;缺失或非法按 10。上限防止一次输出几十条摘要被截断。 */
+export function normalizeBatchMaxFloors(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 1) return 10;
+  return Math.min(30, Math.floor(value));
+}
+
+/** 批量补摘中逐层完整摘要的最近楼层数:非负整数;缺失或非法按 20。 */
+export function normalizeBatchFullRecent(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return 20;
+  return Math.min(100000, Math.floor(value));
+}
+
 /**
  * 注入设置:各状态块是否注入**主模型**(生成正文的请求)。
  * 只影响 buildStateInjectionText;副 API 摘要始终看到全量状态、照常记录(防重复记录),不受此影响。
@@ -287,10 +299,12 @@ export interface ApiSettings {
   summaryMaxRetries: number;
   /** 每楼摘要字数要求(含标点),写进内置摘要提示词。只是给模型的要求:写超了照常保存,不因此判失败。 */
   summaryMaxChars: number;
-  /** @deprecated 仅兼容旧设置，完整记忆批处理已不再合并多楼请求。 */
+  /** 批量补摘「较早楼层合并摘要」时，一次请求的原文字数上限(清洗后);超出就分到下一次。 */
   batchMaxChars: number;
-  /** @deprecated 仅兼容旧设置，完整记忆批处理已不再合并多楼请求。 */
+  /** 批量补摘「较早楼层合并摘要」时，一次请求最多合并的楼层数(1–30)。 */
   batchMaxFloors: number;
+  /** 批量补摘「较早楼层合并摘要」时，最近 N 层 AI 回复仍逐层完整摘要(记录状态);更早的才合并。0=全部合并。 */
+  batchFullRecent: number;
   /**
    * 用户自定义「整块删除」标签名(只填标签名,不带尖括号,如 snow)。清洗正文时
    * `<snow>…</snow>` 连同内部内容一并删掉。用于剔除其它插件/世界书写进正文的状态栏、
@@ -418,6 +432,7 @@ function defaults(): ApiSettings {
     summaryMaxChars: SUMMARY_MAX_CHARS_DEFAULT,
     batchMaxChars: 30000,
     batchMaxFloors: 10,
+    batchFullRecent: 20,
     customStripTags: [],
     varsGlobalTemplate: { json: {}, meaning: '', rule: '' },
     varsTemplateByChar: {},
@@ -563,10 +578,8 @@ function normalize(raw: unknown): ApiSettings {
     Number.isFinite(merged.batchMaxChars) && merged.batchMaxChars >= 500
       ? Math.floor(merged.batchMaxChars)
       : 30000;
-  merged.batchMaxFloors =
-    Number.isFinite(merged.batchMaxFloors) && merged.batchMaxFloors >= 1
-      ? Math.floor(merged.batchMaxFloors)
-      : 10;
+  merged.batchMaxFloors = normalizeBatchMaxFloors(merged.batchMaxFloors);
+  merged.batchFullRecent = normalizeBatchFullRecent(merged.batchFullRecent);
   // 自定义清洗标签:容错用户连尖括号/斜杠一起填进来(<snow> / </snow>),只留合法标签名字符;
   // 去空、去重,缺失/非数组回退空数组。
   merged.customStripTags = Array.isArray(merged.customStripTags)
@@ -704,6 +717,7 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.summaryMaxChars = src.summaryMaxChars;
   target.batchMaxChars = src.batchMaxChars;
   target.batchMaxFloors = src.batchMaxFloors;
+  target.batchFullRecent = src.batchFullRecent;
   target.customStripTags = src.customStripTags;
   target.varsGlobalTemplate = src.varsGlobalTemplate;
   target.varsTemplateByChar = src.varsTemplateByChar;

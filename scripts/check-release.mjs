@@ -54,6 +54,6 @@ for (const p of paths) {
   const text = await read(p);
   for (const [kind, pattern] of checks) assert(!pattern.test(text), kind + '（只报告位置，不输出内容）：' + p);
 }
-assert.equal(paths.filter(p => /^docs\/prompts\/.*\.txt$/.test(p)).length, 9, '提示词导出必须包含9份txt');
+assert.equal(paths.filter(p => /^docs\/prompts\/.*\.txt$/.test(p)).length, 10, '提示词导出必须包含10份txt');
 console.log('发布检查通过：' + paths.length + '个受控文件；版本=' + pkg.version);
 console.log('说明：启发式敏感信息检查不等于全面秘密扫描；真实酒馆UI和模型语义需人工验收。');

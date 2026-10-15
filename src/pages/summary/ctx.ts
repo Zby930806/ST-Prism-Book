@@ -21,6 +21,8 @@ export interface SummaryRow {
   msgIndex?: number;
   stale?: boolean;
   imported?: boolean;
+  /** 批量补摘合并生成的简要摘要(只有摘要和时间,未记录状态) */
+  lite?: boolean;
 }
 
 export interface SummaryCtx {

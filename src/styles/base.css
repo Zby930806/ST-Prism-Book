@@ -461,6 +461,16 @@
   padding: 2px 8px;
 }
 
+/* 简要摘要(批量补摘合并生成,未记录状态):淡色小标,只作说明 */
+.bbs-summary-lite {
+  font-size: 11px;
+  color: var(--bbs-ink-soft);
+  background: var(--bbs-surface-2);
+  border: 1px solid var(--bbs-line);
+  border-radius: var(--bbs-radius-sm);
+  padding: 1px 7px;
+}
+
 /* 动作组靠右;平时隐身,hover/聚焦该卡才浮现 */
 .bbs-summary-acts {
   margin-left: auto;

@@ -127,11 +127,12 @@ export function formatDuration(ms: number): string {
 }
 
 /**
- * 批量补摘/重建的剩余时间:按这一次已完成楼层的平均耗时估算;第一楼完成前、或已经做完时返回空串。
- * 只是估算——各楼长短不同,失败重试也会拉长单楼耗时。
+ * 批量补摘/重建的剩余时间:按这一次已完成步数的平均耗时估算;第一步完成前、或已经做完时返回空串。
+ * 逐层补摘一步是一楼(unit 默认「每楼」);合并请求一步含多层,调用方传「每次请求」。
+ * 只是估算——各楼长短不同,失败重试也会拉长单步耗时。
  */
-export function batchEtaText(p: { done: number; total: number; startedAt: number; lastDoneAt: number }): string {
+export function batchEtaText(p: { done: number; total: number; startedAt: number; lastDoneAt: number }, unit = '每楼'): string {
   if (p.done <= 0 || p.done >= p.total || !p.startedAt || p.lastDoneAt <= p.startedAt) return '';
-  const perFloor = (p.lastDoneAt - p.startedAt) / p.done;
-  return `每楼约 ${formatDuration(perFloor)}，还要约 ${formatDuration(perFloor * (p.total - p.done))}`;
+  const perStep = (p.lastDoneAt - p.startedAt) / p.done;
+  return `${unit}约 ${formatDuration(perStep)}，还要约 ${formatDuration(perStep * (p.total - p.done))}`;
 }

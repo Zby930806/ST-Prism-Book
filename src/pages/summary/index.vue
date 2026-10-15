@@ -6,8 +6,8 @@ import { outlineState } from '@/outline/store';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { addSummary, appendOpToLatestLeaf, deleteLeafAt, deleteSummary, deleteSummarySubtrees, editLeafAt, editPlan, editSummary, invalidateSummaryAncestors } from '@/memory/apply';
-import { apiSettings } from '@/api/settings';
-import { batchBackfill, batchState, cancelBatchBackfill, engineState, floorBackfillState, isAiFloor, resummarizeNow, summarizeFloor, summarizeSelected, syncHiddenNow } from '@/memory/engine';
+import { apiSettings, normalizeBatchFullRecent, normalizeBatchMaxFloors } from '@/api/settings';
+import { batchBackfill, batchState, cancelBatchBackfill, engineState, floorBackfillState, isAiFloor, planBatchBackfill, resummarizeNow, summarizeFloor, summarizeSelected, syncHiddenNow } from '@/memory/engine';
 import { estimateInjectionTokenBreakdown, refreshInjection, type ViewNode } from '@/memory/inject';
 import { compactTimeLabel, formatRange, splitTimeLabel } from '@/memory/timeTag';
 import { relativeTimeLabel, weekdayLabel } from '@/memory/timeRel';
@@ -340,12 +340,32 @@ function summarizeOne(floor: number) {
 }
 
 /* ============ 批量补摘 ============
- * 把所有未摘楼层按先后顺序执行完整单楼摘要；前楼提交后再读取下一楼的状态。
- * 先弹确认(显示待摘楼数),执行中显示进度 + 可取消(楼层边界生效)。
+ * 先弹确认:待补摘较多时可选「较早楼层合并摘要」(最近 N 层逐层完整摘要,更早的几层合并为一次请求,
+ * 只写摘要和时间)或「全部逐层摘要」,弹窗里按当前数字算出请求次数。执行中显示进度 + 可取消(当前一步完成后生效)。
  * 运行状态读 engine 的 batchState 单例(非组件本地 ref):关掉棱镜宝书窗口再重开,
  * 进度条与取消按钮能恢复——因为任务在 engine 里继续跑,关窗不取消。 */
 const batchConfirmOpen = ref(false);
 const rebuildConfirmOpen = ref(false);
+/** 待补摘楼层达到这个数才提供合并选项;零星缺口逐层补摘即可。 */
+const BATCH_MERGE_MIN = 30;
+const batchCanMerge = computed(() => pendingFloors.value.length >= BATCH_MERGE_MIN);
+const batchMode = ref<'lite' | 'full'>('lite');
+// 输入框暂时清空时为 ''(v-model.number),按设置里的值计算
+const batchRecentInput = ref<number | ''>(20);
+const batchGroupInput = ref<number | ''>(10);
+const batchRecent = computed(() => normalizeBatchFullRecent(batchRecentInput.value === '' ? apiSettings.batchFullRecent : batchRecentInput.value));
+const batchGroup = computed(() => normalizeBatchMaxFloors(batchGroupInput.value === '' ? apiSettings.batchMaxFloors : batchGroupInput.value));
+const batchPlan = computed(() => {
+  if (!batchConfirmOpen.value || !batchCanMerge.value) return null;
+  void derivedMeta.rev;
+  return planBatchBackfill(getContext()?.chat ?? [], derivedMeta.pendingFloors, { lite: true, fullRecent: batchRecent.value, maxFloors: batchGroup.value });
+});
+const batchLiteText = computed(() => {
+  const plan = batchPlan.value;
+  if (!plan) return '';
+  if (!plan.liteSteps) return '按当前数字没有可合并的较早楼层，将全部逐层摘要。';
+  return `较早的 ${plan.liteFloors} 层合并为 ${plan.liteSteps} 次请求，只记录摘要和时间；其余 ${plan.fullFloors} 层逐层摘要并记录状态。共 ${plan.steps.length} 次摘要请求，另按设置合并为总结。`;
+});
 function openRebuildConfirm() {
   if (!allowMemoryEdit() || engineState.running) return;
   rebuildConfirmOpen.value = true;
@@ -359,20 +379,33 @@ function rebuildChatMemory() {
 function openBatchConfirm() {
   if (!allowMemoryEdit()) return;
   if (engineState.running || !pendingFloors.value.length) return;
+  batchMode.value = 'lite';
+  batchRecentInput.value = apiSettings.batchFullRecent;
+  batchGroupInput.value = apiSettings.batchMaxFloors;
   batchConfirmOpen.value = true;
 }
 function runBatchBackfill() {
   if (!allowMemoryEdit()) return;
   batchConfirmOpen.value = false;
   if (engineState.running) return;
+  const lite = batchCanMerge.value && batchMode.value === 'lite';
+  if (lite) {
+    // 记住这次的数字,下次打开沿用
+    apiSettings.batchFullRecent = batchRecent.value;
+    apiSettings.batchMaxFloors = batchGroup.value;
+  }
   // 不 await:任务在 engine 里跑,状态走 batchState 单例;UI 只读它,不依赖本函数停留
   void batchBackfill({
     // 由旧到新补;pendingFloors 是倒序展示用,这里传升序更稳(引擎内部也会再过滤排序)
     floors: [...derivedMeta.pendingFloors].sort((a, b) => a - b),
+    lite,
   });
 }
-// 剩余时间:每完成一楼更新一次,按这一次已完成楼层的平均耗时估算
-const batchEta = computed(() => batchEtaText(batchState));
+// 剩余时间:每完成一步更新一次,按这一次已完成的平均耗时估算;合并请求一步含多层,按「每次请求」说
+const batchEta = computed(() => batchEtaText(
+  { done: batchState.stepsDone, total: batchState.steps, startedAt: batchState.startedAt, lastDoneAt: batchState.lastDoneAt },
+  batchState.lite ? '每次请求' : '每楼',
+));
 
 /* ============ 立即总结 ============
  * 手动触发一次「检测是否达阈值 → 达到就总结(可连锁多层)」。结果用一句临时提示反馈。 */
@@ -444,6 +477,7 @@ const byId = computed<Map<string, ViewNode>>(() => {
       id: l.id, kind: 'leaf', level: 0, text: l.text,
       timeStart: l.timeStart, timeEnd: l.timeEnd, timeLabel: l.timeLabel,
       createdAt: l.createdAt, childIds: [], msgIndex: l.msgIndex, active: l.active,
+      ...(l.lite ? { lite: true } : {}),
     });
   }
   for (const s of memory.summaries) {
@@ -484,6 +518,7 @@ function toRow(n: ViewNode, map: Map<string, ViewNode>): SummaryRow {
     msgIndex: n.kind === 'leaf' ? n.msgIndex : undefined,
     stale: false,
     imported: n.atomic === true,
+    lite: n.lite === true,
   };
 }
 
@@ -984,6 +1019,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
         <span class="bbs-batch-progress">
           <span class="bbs-pending-spin"></span>
           {{ batchState.mode === 'rebuild' ? '正在重建' : '正在补摘' }} {{ batchState.done }}/{{ batchState.total }}
+          <span v-if="batchState.lite && batchState.stage" class="bbs-batch-stage">{{ batchState.stage === 'lite' ? '较早楼层合并摘要' : '逐层摘要' }}</span>
           <span v-if="batchEta" class="bbs-batch-eta">{{ batchEta }}</span>
           <button class="bbs-batch-cancel" type="button" :disabled="batchState.cancelRequested" @click="cancelBatchBackfill">
             {{ batchState.cancelRequested ? '停止中…' : '取消' }}
@@ -1002,13 +1038,13 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
           class="bbs-btn bbs-btn-sm bbs-batch-btn"
           type="button"
           :disabled="engineState.running || summarizingFloor !== null"
-          title="按楼层顺序逐层补摘（每层请求一次 AI）" aria-label="按楼层顺序逐层补摘（每层请求一次 AI）"
+          title="按楼层顺序批量补摘" aria-label="按楼层顺序批量补摘"
           @click="openBatchConfirm"
         >
           <Icon name="plans" />批量补摘
         </button>
       </div>
-      <p class="bbs-backfill-description">点击楼层号单独补摘，或按顺序批量补摘，每层请求一次 AI。</p>
+      <p class="bbs-backfill-description">点击楼层号单独补摘，或按楼层顺序批量补摘。</p>
       <div class="bbs-pending-chips">
         <button
           v-for="f in pendingWindow.items"
@@ -1027,16 +1063,42 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
 
     <SummaryPager :page="pendingWindow.page" :total="pendingWindow.total" :size="PENDING_PAGE_SIZE" label="待补摘楼层" @update:page="pendingPage = $event" />
 
-    <ConfirmDialog
-      v-if="!editingBlocked"
-      v-model:open="batchConfirmOpen"
-      title="批量补摘"
-      confirmText="开始"
-      @confirm="runBatchBackfill"
-    >
-      共有 {{ pendingFloors.length }} 层楼没有摘要。会按楼层顺序逐层生成摘要，并更新人物、物品、计划等状态，每层请求一次 AI。
-      可中途取消，在当前楼层完成后停止。是否继续？
-    </ConfirmDialog>
+    <!-- 批量补摘确认:待补摘较多时可选较早楼层合并摘要,按当前数字显示请求次数 -->
+    <ModalMask v-if="!editingBlocked" :open="batchConfirmOpen" @close="batchConfirmOpen = false">
+      <div class="bbs-modal bbs-batch-modal" role="dialog" aria-modal="true" aria-label="批量补摘">
+        <header class="bbs-modal-head">
+          <span class="bbs-modal-title">批量补摘</span>
+          <button class="bbs-summary-act" type="button" title="关闭" aria-label="关闭" @click="batchConfirmOpen = false"><Icon name="close" /></button>
+        </header>
+        <p class="bbs-field-hint bbs-batch-intro">共有 {{ pendingFloors.length }} 层楼没有摘要，按楼层顺序处理。可中途取消，在当前一步完成后停止。</p>
+        <template v-if="batchCanMerge">
+          <div class="bbs-kind-toggle bbs-batch-toggle" role="group" aria-label="补摘方式">
+            <button type="button" class="bbs-kind" :class="{ 'is-on': batchMode === 'lite' }" :aria-pressed="batchMode === 'lite'" @click="batchMode = 'lite'">较早楼层合并摘要</button>
+            <button type="button" class="bbs-kind" :class="{ 'is-on': batchMode === 'full' }" :aria-pressed="batchMode === 'full'" @click="batchMode = 'full'">全部逐层摘要</button>
+          </div>
+          <template v-if="batchMode === 'lite'">
+            <p class="bbs-field-hint bbs-batch-plan" role="status">{{ batchLiteText }}</p>
+            <div class="bbs-batch-params">
+              <label class="bbs-modal-field">
+                <span class="bbs-modal-label">逐层摘要的最近楼层数</span>
+                <input v-model.number="batchRecentInput" class="bbs-input" type="number" min="0" step="1" />
+              </label>
+              <label class="bbs-modal-field">
+                <span class="bbs-modal-label">每次合并的楼层数（1–30）</span>
+                <input v-model.number="batchGroupInput" class="bbs-input" type="number" min="1" max="30" step="1" />
+              </label>
+            </div>
+            <p class="bbs-field-hint bbs-batch-warning">合并的楼层只生成摘要，不记录人物、物品、计划等状态；状态从逐层摘要的楼层开始记录。</p>
+          </template>
+          <p v-else class="bbs-field-hint bbs-batch-plan">每层请求一次 AI，记录摘要和人物、物品、计划等状态，共 {{ pendingFloors.length }} 次请求。</p>
+        </template>
+        <p v-else class="bbs-field-hint bbs-batch-plan">按楼层顺序逐层生成摘要，并更新人物、物品、计划等状态，每层请求一次 AI。</p>
+        <footer class="bbs-modal-foot">
+          <button class="bbs-btn" type="button" @click="batchConfirmOpen = false">取消</button>
+          <button class="bbs-btn bbs-btn-primary" type="button" @click="runBatchBackfill">开始</button>
+        </footer>
+      </div>
+    </ModalMask>
 
     <details class="bbs-reader-context">
       <summary><span class="bbs-context-icon"><Icon name="plans" /></span><span>当前局势与计划<small>{{ focus?.situation || '此刻的场面、计划、悬念和创作规划' }}</small></span><Icon name="chevron" class="bbs-context-chevron" /></summary>
@@ -1352,6 +1414,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
               <span v-if="rowRelative(r)" class="bbs-summary-rel">{{ rowRelative(r) }}</span>
               <span class="bbs-summary-loc">{{ floorLabel(r) }}</span>
               <span v-if="rowTime(r)" class="bbs-summary-dateline">{{ rowTime(r) }}</span>
+              <span v-if="r.lite" class="bbs-summary-lite" title="批量补摘时与相邻楼层合并生成，只有摘要和时间，未记录状态">简要</span>
             </template>
             <span v-if="r.stale" class="bbs-summary-stale">待更新</span>
             <!-- 操作键:编辑对任何命中行开放(结构安全;叶子改完向量自动重 embed,总结不进向量库);
@@ -2006,6 +2069,34 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
   font-weight: 400;
   color: var(--bbs-ink-muted);
 }
+/* 当前阶段(合并摘要 / 逐层摘要):与剩余时间同为次要信息 */
+.bbs-batch-stage {
+  font-weight: 500;
+  color: var(--bbs-ink-soft);
+}
+/* 批量补摘确认弹窗:方式切换、计划说明、两个数字并排 */
+.bbs-batch-intro {
+  margin-bottom: 12px;
+}
+.bbs-batch-toggle {
+  margin-bottom: 10px;
+}
+.bbs-batch-plan {
+  margin-bottom: 12px;
+  color: var(--bbs-ink);
+}
+.bbs-batch-params {
+  display: flex;
+  gap: 10px;
+}
+.bbs-batch-params .bbs-modal-field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.bbs-batch-warning {
+  margin-bottom: 14px;
+  color: var(--bbs-warning);
+}
 .bbs-batch-progress .bbs-pending-spin {
   width: 12px;
   height: 12px;
@@ -2582,6 +2673,7 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
  .bbs-select-info,.bbs-select-warn { flex-basis:100%; }
  .bbs-time-pair { flex-direction:column; }
  .bbs-time-col { min-width:0; width:100%; }
+ .bbs-batch-params { flex-direction:column; }
 }
 @media(max-width:360px) {
  .bbs-summary-tools .bbs-btn,.bbs-summary-tools .bbs-add-mini { font-size:11px; }

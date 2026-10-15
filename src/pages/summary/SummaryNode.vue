@@ -38,6 +38,7 @@ const isChild = computed(() => props.depth > 0);
             <span v-if="ctx.rowRelative(row)" class="bbs-summary-rel">{{ ctx.rowRelative(row) }}</span>
             <span class="bbs-summary-loc">{{ ctx.floorLabel(row) }}</span>
             <span v-if="ctx.rowTime(row)" class="bbs-summary-dateline">{{ ctx.rowTime(row) }}</span>
+            <span v-if="row.lite" class="bbs-summary-lite" title="批量补摘时与相邻楼层合并生成，只有摘要和时间，未记录状态">简要</span>
           </template>
           <!-- 操作键:编辑对任何层级开放(结构安全:不改 id、不断链;叶子改完向量索引自动重 embed,
                总结不进向量库、只影响上下文注入);删除仅根行——删深层叶子会级联删整条祖先总结链 -->

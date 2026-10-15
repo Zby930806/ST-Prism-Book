@@ -331,6 +331,11 @@ export interface LeafExtra {
    * collectLeaves 据此跳过它。
    */
   seed?: boolean;
+  /**
+   * 简要叶子:批量补摘时与相邻楼层合并请求生成,只有摘要和时间(delta 至多含 time),不记录物品、人物等状态。
+   * 其余与普通叶子相同(参与总结、注入、召回);重新摘要后按普通叶子保存,标记随之去掉。
+   */
+  lite?: boolean;
   /** 本楼正文与已有记录的矛盾(可选;旧叶子没有) */
   conflicts?: LeafConflict[];
   /** 叶子结构版本 */

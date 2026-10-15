@@ -33,4 +33,18 @@ describe('摘要失败的阅读说明', () => {
     expect(summaryErrorPresentation(failure.message, failure)).toEqual({ title: failure.title, help: failure.hint, details: failure.detail, detailsLabel: '技术细节' });
     expect(summaryErrorPresentation('另一条错误', failure)).toEqual({ title: '另一条错误', help: '', details: '', detailsLabel: '' });
   });
+  it.each([
+    ['漏掉了楼层 #23；材料中的每个楼层都要写一条。', '漏写了其中的楼层'],
+    ['楼层 #7 写了不止一条；每层只写一条。', '写了不止一条'],
+    ['floors 中出现了材料以外的楼层「99」；只为材料中的楼层各写一条。', '楼层号与材料不符'],
+    ['结果的根键 floors 必须是数组。', '没有按要求输出各层摘要的 JSON'],
+  ])('合并摘要未通过校验时说明是哪组楼层、原因和改法：%s', (reason, text) => {
+    const raw = '楼层 #1–#23 合并摘要未保存（这些楼层仍待摘要）。' + reason;
+    const view = summaryErrorPresentation(raw);
+    expect(view.title).toContain('楼层 #1–#23 的合并摘要没有保存');
+    expect(view.title).toContain(text);
+    expect(view.help).toContain('仍待摘要');
+    expect(view.help).toContain('每次合并的楼层数');
+    expect(view.details).toBe(raw);
+  });
 });

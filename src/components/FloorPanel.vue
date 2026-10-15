@@ -683,6 +683,7 @@ function keepCurrentSummary() {
               >
                 {{ leaf.text || '（无摘要正文，点此补写）' }}
               </p>
+              <p v-if="leaf.lite && !omit && !hasAnyDelta" class="bbs-fp-note">此楼摘要在批量补摘时与相邻楼层合并生成，只有摘要和时间，未记录状态变动。</p>
 
               <!-- 变动分组:每类目一张小卡(图标标题 + 标签流);点标签就地编辑(可编辑类)或展开删除 -->
               <div v-if="hasAnyDelta" class="bbs-fp-groups">

@@ -14,6 +14,16 @@ export interface SummaryFailureInfo {
 }
 
 const RECOVERY = '没有摘要的楼层，点上方的「补摘」或在「未摘要楼层」里点楼层号重试；已有摘要想重做，在设置里打开楼层面板，到那一楼重新生成。无需重建整个聊天，反复失败可以换个模型，或展开原因反馈。';
+const MERGE_RECOVERY = '重新批量补摘会从这组楼层继续；反复失败可以在批量补摘的确认框中调小「每次合并的楼层数」，或改用「全部逐层摘要」。';
+
+/** 批量补摘「较早楼层合并摘要」未通过校验的原因。 */
+function mergeReason(error: string): string {
+  if (error.includes('漏掉了楼层')) return '模型漏写了其中的楼层';
+  if (error.includes('不止一条')) return '模型给同一层写了不止一条';
+  if (error.includes('材料以外的楼层')) return '模型写的楼层号与材料不符';
+  if (error.includes('summary 为空')) return '有楼层的摘要是空的';
+  return '模型没有按要求输出各层摘要的 JSON';
+}
 
 function validationReason(error: string): string {
   if (error.includes('conditionPatch')) {
@@ -35,6 +45,10 @@ function validationReason(error: string): string {
 export function summaryErrorPresentation(error: string, failure?: SummaryFailureInfo | null): SummaryFailureView {
   if (failure && failure.message === error) {
     return { title: failure.title, help: failure.hint, details: failure.detail, detailsLabel: '技术细节' };
+  }
+  const merged = error.match(/(楼层 #\d+(?:–#\d+)?) 合并摘要未保存/);
+  if (merged) {
+    return { title: `${merged[1]} 的合并摘要没有保存：${mergeReason(error)}。`, help: '这些楼层仍待摘要。' + MERGE_RECOVERY, details: error, detailsLabel: '查看校验原因' };
   }
   const floor = error.match(/楼层 #(\d+) 摘要未保存/);
   if (!floor && !error.includes('conditionPatch')) return { title: error, help: '', details: '', detailsLabel: '' };

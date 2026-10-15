@@ -83,6 +83,9 @@ describe('批量补摘剩余时间', () => {
     expect(batchEtaText({ done: 2, total: 12, startedAt: 1000, lastDoneAt: 61000 })).toBe('每楼约 30 秒，还要约 5 分钟');
     expect(batchEtaText({ done: 10, total: 1800, startedAt: 1000, lastDoneAt: 251000 })).toBe('每楼约 25 秒，还要约 12 小时 26 分钟');
   });
+  it('合并请求按步数估算，说「每次请求」', () => {
+    expect(batchEtaText({ done: 3, total: 8, startedAt: 1000, lastDoneAt: 181000 }, '每次请求')).toBe('每次请求约 1 分钟，还要约 5 分钟');
+  });
   it('时长说法', () => {
     expect(formatDuration(200)).toBe('1 秒');
     expect(formatDuration(59_400)).toBe('59 秒');
