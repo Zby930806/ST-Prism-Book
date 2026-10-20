@@ -17,7 +17,8 @@ import { getContext } from '@/st/context';
 import { openBook, ui } from '@/state/ui';
 import { notesSettings, notesChannelIssue, settingsIssue } from '@/notes/settings';
 import { notesRun, generateNotes, cancelNotes } from '@/notes/service';
-import { notesState, recordIsCurrent, confirmQuestion, rejectQuestion, notesWriteIssue } from '@/notes/store';
+import { notesState, recordIsCurrent, confirmQuestion, rejectQuestion, notesWriteIssue, deleteNote } from '@/notes/store';
+import { toast } from '@/st/toast';
 import { latestStoryFloor } from '@/notes/source';
 import { floorNote } from '@/notes/floors';
 import type { NoteDecision } from '@/notes/types';
@@ -148,6 +149,34 @@ function generate(force: boolean) {
 function openNotesPage() {
   openBook('notes');
 }
+
+/* ============ 删除 ============ */
+// 行内两步确认:每张卡片是独立的 shadow,没有弹窗宿主(与楼层面板的删除摘要相同)。删除连同这份札记的安排一起删。
+const confirmingDelete = ref(false);
+const linkedDecisions = computed(() => {
+  void notesState.revision;
+  const r = record.value;
+  return r ? notesState.decisions.filter(d => d.noteId === r.id).length : 0;
+});
+watch([() => record.value?.id, expanded], () => { confirmingDelete.value = false; });
+function askDelete() {
+  if (pending.value || notesRun.busy || !record.value) return;
+  confirmingDelete.value = true;
+}
+async function removeNote() {
+  const r = record.value;
+  if (!r || pending.value) return;
+  pending.value = true;
+  try {
+    await deleteNote(r.id);
+    toast(`第 ${props.floor} 楼的札记已删除。`, 'success');
+  } catch (error) {
+    toast(error instanceof Error ? error.message : '札记没有删除，请重试。', 'error');
+  } finally {
+    pending.value = false;
+    confirmingDelete.value = false;
+  }
+}
 </script>
 
 <template>
@@ -212,10 +241,16 @@ function openNotesPage() {
         <p v-if="isLatest && blocker" class="bbs-nc-hint is-warn">{{ blocker }}</p>
         <p v-else-if="isLatest && notesRun.storyBusy" class="bbs-nc-hint">正文生成结束后才能生成札记。</p>
 
-        <div class="bbs-nc-footer">
+        <div v-if="confirmingDelete" class="bbs-nc-footer is-confirm">
+          <span class="bbs-nc-confirm-text">删除这份札记？{{ linkedDecisions ? `其中的 ${linkedDecisions} 条安排会一起删除。` : '' }}</span>
+          <button class="bbs-btn bbs-btn-sm" type="button" :disabled="pending" @click="confirmingDelete = false">取消</button>
+          <button class="bbs-nc-confirm-ok" type="button" :disabled="pending" @click="removeNote"><Icon name="trash" />删除</button>
+        </div>
+        <div v-else class="bbs-nc-footer">
           <button v-if="isLatest && !record" class="bbs-btn bbs-btn-sm bbs-btn-primary" type="button" :disabled="!canGenerate" @click="generate(false)"><Icon name="edit" />生成札记</button>
           <button v-else-if="isLatest" class="bbs-btn bbs-btn-sm" type="button" :disabled="!canGenerate" @click="generate(true)"><Icon name="refresh" />重新生成</button>
           <button class="bbs-btn bbs-btn-sm" type="button" @click="openNotesPage"><Icon name="navigate" />札记页</button>
+          <button v-if="record" class="bbs-nc-delete" type="button" title="删除这份札记" :disabled="pending || notesRun.busy" @click="askDelete"><Icon name="trash" />删除札记</button>
         </div>
       </template>
     </FloorCardShell>
@@ -372,6 +407,52 @@ function openNotesPage() {
   padding-top: 10px;
   border-top: 1px solid var(--bbs-line);
 }
+/* 删除入口:安静的图标+字,靠右;悬停才显危险色(与楼层面板的删除摘要相同) */
+.bbs-nc-delete {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: var(--bbs-control-h-sm);
+  padding: 5px 10px;
+  border: 0;
+  border-radius: var(--bbs-radius-sm);
+  background: transparent;
+  color: var(--bbs-ink-muted);
+  font-size: var(--bbs-fs-meta);
+  cursor: pointer;
+}
+.bbs-nc-delete:hover:not(:disabled) {
+  color: var(--bbs-danger);
+  background: var(--bbs-danger-soft);
+}
+.bbs-nc-delete:disabled {
+  opacity: 0.55;
+}
+.bbs-nc-confirm-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--bbs-fs-meta);
+  color: var(--bbs-ink-soft);
+}
+.bbs-nc-confirm-ok {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: var(--bbs-control-h-sm);
+  padding: 5px 12px;
+  border: 1px solid var(--bbs-danger);
+  border-radius: 9px;
+  background: var(--bbs-danger);
+  color: var(--bbs-danger-ink);
+  font-size: var(--bbs-fs-meta);
+  font-weight: 600;
+  cursor: pointer;
+}
+.bbs-nc-confirm-ok:disabled {
+  opacity: 0.55;
+}
 .bbs-nc-feedback {
   margin: 6px 0 0;
   font-size: var(--bbs-fs-meta);
@@ -406,6 +487,19 @@ function openNotesPage() {
   .bbs-nc-footer .bbs-btn {
     flex: 1 1 auto;
     min-height: 40px;
+    justify-content: center;
+  }
+  .bbs-nc-delete,
+  .bbs-nc-confirm-ok {
+    min-height: 40px;
+  }
+  /* 确认行:提示独占一行,取消与删除等宽并排 */
+  .bbs-nc-footer.is-confirm .bbs-nc-confirm-text {
+    flex-basis: 100%;
+  }
+  .bbs-nc-footer.is-confirm .bbs-btn,
+  .bbs-nc-footer.is-confirm .bbs-nc-confirm-ok {
+    flex: 1 1 0;
     justify-content: center;
   }
 }

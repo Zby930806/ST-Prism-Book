@@ -3,11 +3,11 @@
  * 楼内摘要面板(挂在每条 AI 楼的 shadow 内,由 floorPanel.ts 逐楼挂载)。
  *
  * 形态:一张与摘要页同源的卡片(.bbs-summary-card 语言),外壳见 floor/FloorCardShell.vue。
- *   - 卡片头(锚点):楼号 + 时间 + 召回/不一致/番外标签,次行摘要预览;展开后预览与时间不再重复(下方有正文和可编辑的时间)。
- *     右端展开箭头,右侧只有单楼摘要键(没有摘要时「生成」,已有时「重新生成」)。
+ *   - 卡片头(锚点):楼号 + 时间 + 召回/不一致标签,次行摘要预览;展开后预览与时间不再重复(下方有正文和可编辑的时间)。
+ *     右端展开箭头,右侧是番外键(点一下标为番外 / 取消)和单楼摘要键(没有摘要时「生成」,已有时「重新生成」)。
  *   - 卡片体(抽屉):时间/地点、摘要正文、状态变动(floor/DeltaGroups)、记录冲突(floor/FloorConflicts)、
- *     召回(floor/FloorRecall);页脚是番外开关、带文字的生成/重新生成摘要、删除摘要。
- *     番外放在抽屉里、写明含义,避免手机上误触改变该楼是否参与记忆。
+ *     召回(floor/FloorRecall);页脚是带文字的生成/重新生成摘要、删除摘要。
+ *     本楼没有记录地点变化时,地点一栏显示之前最近一次记录的地点(浅色),点击可为本楼单独设置。
  *
  * 编辑:**逐条就地编辑**。点摘要正文 / 时间 / 地点 / 某条变动,就地展开该单元的输入框,
  *   保存即写、取消即收,其余保持只读。同一时刻只有一个单元在编辑;状态与读写在 floor/useLeafEdit.ts。
@@ -142,10 +142,39 @@ const groups = computed<DeltaTagGroup[]>(() => {
 const hasTags = computed(() => groups.value.some(g => g.tags.length > 0));
 const hasAnyDelta = computed(() => hasTags.value || !!d.value?.location);
 
+/* ============ 地点 ============ */
+// 地点只在变化时记录。本楼没记录时,往前找最近一次记录的地点作为当前地点显示(跳过番外楼和失效摘要)。
+function deltaLocation(delta: StoredDelta | null | undefined): string {
+  const text = typeof delta?.location === 'string' ? delta.location.trim() : '';
+  if (text) return text;
+  const path = Array.isArray(delta?.locationPath) ? delta.locationPath.filter(p => typeof p === 'string' && p.trim()) : [];
+  return path.join(' / ');
+}
+const ownLocation = computed(() => deltaLocation(d.value));
+const inheritedLocation = computed<{ text: string; floor: number } | null>(() => {
+  void props.sig.tick;
+  void derivedMeta.rev;
+  if (ownLocation.value) return null;
+  const chat = getContext()?.chat;
+  if (!chat) return null;
+  for (let i = props.floor - 1; i >= 0; i--) {
+    const m = chat[i];
+    if (m?.extra?.bbs_omit) continue;
+    const text = deltaLocation(getLeaf(m)?.delta);
+    if (text && leafValid(m)) return { text, floor: i };
+  }
+  return null;
+});
+
 /* ============ 就地编辑(状态与读写见 floor/useLeafEdit.ts,子组件 inject 取用) ============ */
 const leafEdit = useLeafEdit({ floor: props.floor, leaf, omit, d });
 provide(LEAF_EDIT, leafEdit);
 const { editKey, edit, setFocus, onTextInput, onFieldKeydown, cancelEdit, editText, saveText, editTime, saveTime, editLoc, saveLoc } = leafEdit;
+// 编辑沿用来的地点时,以它为起点修改
+function editLocation() {
+  editLoc();
+  if (!ownLocation.value && inheritedLocation.value) edit.location = inheritedLocation.value.text;
+}
 
 /* —— 整楼操作 —— */
 // 删除摘要走行内两步确认(面板嵌在 #chat 滚动容器 + 每楼独立 shadow,行内比 Teleport 弹窗更稳、更贴合紧凑面板)
@@ -181,12 +210,6 @@ async function toggleOmit() {
   } finally {
     busy.value = false;
   }
-}
-// 页脚的番外开关:切换没有生效(如记忆处于保护状态)时,开关回到实际状态,不显示成已切换
-async function onOmitSwitch(e: Event) {
-  const input = e.target as HTMLInputElement;
-  await toggleOmit();
-  input.checked = omit.value;
 }
 
 function requestSummary() {
@@ -253,11 +276,20 @@ function keepCurrentSummary() {
           <span v-if="timeLabel && !expanded" class="bbs-fp-head-time"><Icon name="clock" class="bbs-fp-head-icon" />{{ timeLabel }}</span>
           <span v-if="recallChip" class="bbs-fp-head-recall" :class="{ 'is-failed': recallChip.failed }" :title="recall?.statusText">{{ recallChip.text }}</span>
           <span v-if="openConflicts" class="bbs-fp-head-recall is-warn" title="本楼正文与已有记录不一致，展开查看">不一致 {{ openConflicts }}</span>
-          <span v-if="omit" class="bbs-fp-head-tag" title="此楼不参与摘要、总结和注入">番外</span>
         </span>
         <span v-if="!expanded" class="bbs-fp-preview" :class="{ 'is-muted': previewMuted }">{{ previewText }}</span>
       </template>
       <template #actions>
+        <IconButton
+          class="bbs-fp-omitbtn"
+          icon="sparkles"
+          size="sm"
+          label="标为番外"
+          :pressed="omit"
+          :title="omit ? '取消番外（恢复参与记忆）' : '标为番外（此楼不参与摘要、总结和注入）'"
+          :disabled="busy || engineState.running"
+          @click.stop="toggleOmit"
+        />
         <IconButton
           class="bbs-fp-summarybtn"
           size="sm"
@@ -270,7 +302,7 @@ function keepCurrentSummary() {
         </IconButton>
       </template>
 
-      <p v-if="omit" class="bbs-fp-note">此楼已标为番外，以下数据不参与记忆；关闭页脚的「番外」开关即恢复。</p>
+      <p v-if="omit" class="bbs-fp-note">此楼已标为番外，以下数据不参与记忆；取消番外即恢复。</p>
 
       <template v-if="leaf">
         <!-- 时间 / 地点(可点编辑) -->
@@ -308,10 +340,18 @@ function keepCurrentSummary() {
               <button class="bbs-btn bbs-btn-sm bbs-btn-primary" type="button" @click="saveLoc">保存</button>
             </div>
           </div>
-          <button v-else-if="!omit" class="bbs-fp-chip is-btn" type="button" :aria-label="d?.location ? `编辑地点：${d.location}` : undefined" @click="editLoc">
-            <Icon name="location" class="bbs-fp-chip-icon" />{{ d?.location || '设置地点' }}
+          <button
+            v-else-if="!omit"
+            class="bbs-fp-chip is-btn"
+            :class="{ 'is-inherited': !ownLocation && inheritedLocation }"
+            type="button"
+            :title="!ownLocation && inheritedLocation ? `沿用 #${inheritedLocation.floor} 记录的地点，点击为本楼单独设置` : undefined"
+            :aria-label="ownLocation ? `编辑地点：${ownLocation}` : inheritedLocation ? `设置地点，当前沿用 #${inheritedLocation.floor} 的地点：${inheritedLocation.text}` : undefined"
+            @click="editLocation"
+          >
+            <Icon name="location" class="bbs-fp-chip-icon" />{{ ownLocation || inheritedLocation?.text || '设置地点' }}
           </button>
-          <span v-else-if="d?.location" class="bbs-fp-chip"><Icon name="location" class="bbs-fp-chip-icon" />{{ d.location }}</span>
+          <span v-else-if="ownLocation" class="bbs-fp-chip"><Icon name="location" class="bbs-fp-chip-icon" />{{ ownLocation }}</span>
         </div>
 
         <!-- 摘要正文:可编辑时整块是一个按钮(鼠标点按、键盘 Enter/空格都能进入编辑) -->
@@ -347,14 +387,9 @@ function keepCurrentSummary() {
       <!-- 生成本楼前的召回 -->
       <FloorRecall v-if="recall" :recall="recall" />
 
-      <!-- 页脚:番外开关;生成 / 重新生成摘要;删除摘要(行内两步确认:每楼是独立的 shadow,没有弹窗宿主,行内确认更可靠) -->
-      <div class="bbs-fp-footer">
-        <label class="bbs-fp-omit-switch">
-          <input type="checkbox" class="bbs-switch" :checked="omit" :disabled="busy || engineState.running" @change="onOmitSwitch" />
-          <span class="bbs-fp-omit-label">番外</span>
-          <span class="bbs-fp-omit-hint">此楼不参与摘要、总结和注入</span>
-        </label>
-        <div v-if="!omit" class="bbs-fp-footer-actions">
+      <!-- 页脚:生成 / 重新生成摘要;删除摘要(行内两步确认:每楼是独立的 shadow,没有弹窗宿主,行内确认更可靠) -->
+      <div v-if="!omit" class="bbs-fp-footer">
+        <div class="bbs-fp-footer-actions">
           <template v-if="confirmingDelete">
             <span class="bbs-fp-confirm-text">删除此楼摘要？</span>
             <button class="bbs-btn bbs-btn-sm bbs-fp-confirm-cancel" type="button" :disabled="busy" @click="cancelDelete">取消</button>
@@ -419,9 +454,8 @@ function keepCurrentSummary() {
 .bbs-fp-head-icon {
   margin-right: 4px;
 }
-/* 头部小标签(召回、不一致、番外):时间之后的小描边签,空间不够时时间先省略 */
-.bbs-fp-head-recall,
-.bbs-fp-head-tag {
+/* 头部小标签(召回、不一致):时间之后的小描边签,空间不够时时间先省略 */
+.bbs-fp-head-recall {
   flex: 0 0 auto;
   padding: 0 7px;
   border: 1px solid var(--bbs-line);
@@ -538,6 +572,11 @@ function keepCurrentSummary() {
 .bbs-fp-chip.is-btn:hover {
   border-color: var(--bbs-accent);
 }
+/* 沿用之前记录的地点:浅底、次要色,与本楼记录的地点区分 */
+.bbs-fp-chip.is-inherited {
+  background: var(--bbs-surface-2);
+  color: var(--bbs-ink-soft);
+}
 
 /* 正文:只读块与编辑 textarea 共用同一盒模型(消除切换跳动)。
    关键——两者 font-size / line-height / padding / border 必须完全一致,只差背景/可编辑。 */
@@ -593,7 +632,7 @@ function keepCurrentSummary() {
   margin-top: 6px;
 }
 
-/* 页脚:上为番外开关,下为生成 / 重新生成摘要与删除摘要 */
+/* 页脚:生成 / 重新生成摘要与删除摘要 */
 .bbs-fp-footer {
   display: flex;
   flex-direction: column;
@@ -601,24 +640,6 @@ function keepCurrentSummary() {
   margin-top: 14px;
   padding-top: 10px;
   border-top: 1px solid var(--bbs-line);
-}
-/* 番外开关:整行可点(label 包住开关),说明紧跟在后 */
-.bbs-fp-omit-switch {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 8px;
-  min-height: var(--bbs-control-h-sm);
-  cursor: pointer;
-  font-size: var(--bbs-fs-sm);
-  color: var(--bbs-ink);
-}
-.bbs-fp-omit-label {
-  font-weight: 600;
-}
-.bbs-fp-omit-hint {
-  font-size: var(--bbs-fs-meta);
-  color: var(--bbs-ink-muted);
 }
 .bbs-fp-footer-actions {
   display: flex;
@@ -688,7 +709,6 @@ function keepCurrentSummary() {
 /* 手机与触屏:可点的标签和页脚按钮加高到 40px */
 @media (max-width: 640px), (pointer: coarse) {
   .bbs-fp-chip.is-btn,
-  .bbs-fp-omit-switch,
   .bbs-fp-delleaf,
   .bbs-fp-confirm-ok {
     min-height: 40px;

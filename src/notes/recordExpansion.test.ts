@@ -35,6 +35,9 @@ const dependencies: Record<string, unknown> = {
   '@/notes/store': store, '@/notes/prompt': prompt, '@/notes/modelCatalog': modelCatalog,
   // 跨页定位只在设置页跳转时用到；这里不发请求，避免牵出 state/ui 的本机存储。
   '@/state/pageFocus': { pageFocus: Vue.reactive({ section: '' }), takePageFocus: () => false },
+  // 删除札记的确认弹窗和提示：本测试不涉及删除，用空组件与空函数占位。
+  '@/components/ConfirmDialog.vue': { default: { render: () => null } },
+  '@/st/toast': { toast: () => {} },
   '@/components/Icon.vue': { default: { render: () => null } },
   '@/components/PageHeader.vue': { default: { render: () => null } },
 };

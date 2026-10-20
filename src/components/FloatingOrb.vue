@@ -57,10 +57,24 @@ let startX = 0;
 let startY = 0;
 let moved = 0; // 累计位移,用于点击/拖动判定
 
-// 进入视口后把坐标夹进可视范围(换了更小的屏幕/旋转后不至于跑出去)
+// 状态栏与底部手势条的高度(安全区)。页面画到系统栏下面时,悬浮球不停在被盖住、点不到的位置。
+// 只在挂载和窗口尺寸变化时量一次,拖动时直接用。
+const safe = { top: 0, bottom: 0 };
+function measureSafeArea(): void {
+  const probe = document.createElement('div');
+  probe.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;visibility:hidden;pointer-events:none;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)';
+  document.body.append(probe);
+  const cs = getComputedStyle(probe);
+  safe.top = parseFloat(cs.paddingTop) || 0;
+  safe.bottom = parseFloat(cs.paddingBottom) || 0;
+  probe.remove();
+}
+
+// 进入视口后把坐标夹进可视范围(换了更小的屏幕/旋转后不至于跑出去);上沿至少留 4% 或状态栏高度
 function clampToViewport(): void {
-  const maxY = Math.max(0, window.innerHeight - orbH.value);
-  pos.y = Math.min(Math.max(0, pos.y), maxY);
+  const minY = Math.max(safe.top, Math.round(window.innerHeight * 0.04));
+  const maxY = Math.max(minY, window.innerHeight - orbH.value - safe.bottom);
+  pos.y = Math.min(Math.max(minY, pos.y), maxY);
   if (pos.dock === 'none') {
     const maxX = Math.max(0, window.innerWidth - orbW.value);
     pos.x = Math.min(Math.max(0, pos.x), maxX);
@@ -167,10 +181,12 @@ function onKey(e: KeyboardEvent) {
 }
 
 const onResize = () => {
+  measureSafeArea();
   clampToViewport();
   savePos();
 };
 onMounted(() => {
+  measureSafeArea();
   clampToViewport();
   window.addEventListener('resize', onResize);
 });

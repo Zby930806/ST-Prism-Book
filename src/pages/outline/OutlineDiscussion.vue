@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /**
- * 规划讨论：页面内是一张入口卡片，点开后是全屏（桌面为居中大窗）的对话界面。
+ * 规划讨论：页面内是一张入口卡片，点开后是对话界面：桌面为居中大窗；手机上与宝书窗口一样是贴底的抽屉，
+ * 顶部留出一截（不被系统状态栏挡住），可点返回、点上方空白处或按住顶部横条下拉关闭。
  * 对话界面在标题栏下选择参考的版本，底部输入；「生成草稿」从底部弹出设置面板，
  * 确认后按讨论生成草稿。讨论不修改规划，也不注入正文。
  * 对话界面 Teleport 到 modalHost（与其他弹窗相同，避开 iOS 滚动容器内的定位问题）。
@@ -107,6 +108,26 @@ watch(open, value => {
   else { vv.removeEventListener('resize', syncViewport); vv.removeEventListener('scroll', syncViewport); viewport.value = null; }
 });
 const maskStyle = computed(() => viewport.value ? { top: `${viewport.value.top}px`, height: `${viewport.value.height}px` } : undefined);
+
+// 手机：按住顶部横条下拉，超过 110px 松手即关闭（与宝书窗口的抓手相同）
+const dragY = ref(0), dragging = ref(false);
+let dragStart = 0, dragPointer: number | null = null;
+function onGrabDown(event: PointerEvent) {
+  dragPointer = event.pointerId; dragStart = event.clientY; dragging.value = true;
+  try { (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId); } catch { /* 合成事件没有可捕获的指针 */ }
+}
+function onGrabMove(event: PointerEvent) {
+  if (!dragging.value || event.pointerId !== dragPointer) return;
+  dragY.value = Math.max(0, event.clientY - dragStart);
+}
+function onGrabUp(event: PointerEvent) {
+  if (!dragging.value || event.pointerId !== dragPointer) return;
+  dragging.value = false; dragPointer = null;
+  const far = dragY.value > 110;
+  dragY.value = 0;
+  if (far) close();
+}
+const panelStyle = computed(() => dragY.value ? { transform: `translateY(${dragY.value}px)`, transition: dragging.value ? 'none' : undefined } : undefined);
 
 /* —— 更多操作菜单 —— */
 const menuOpen = ref(false);
@@ -286,8 +307,9 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
   <Teleport :to="modalHost" :disabled="!modalHost">
     <Transition name="oc">
       <div v-if="open" class="oc-mask" :style="maskStyle" @mousedown.self="close">
-        <section ref="panelEl" class="oc-panel" :class="{ 'is-max': maximized }" role="dialog" aria-modal="true"
+        <section ref="panelEl" class="oc-panel" :class="{ 'is-max': maximized }" :style="panelStyle" role="dialog" aria-modal="true"
           :aria-labelledby="ids.title" tabindex="-1" @keydown="onDialogKeydown">
+          <div class="oc-grabber" aria-hidden="true" @pointerdown="onGrabDown" @pointermove="onGrabMove" @pointerup="onGrabUp" @pointercancel="onGrabUp"><span></span></div>
           <header class="oc-head" :inert="!!sheet">
             <IconButton icon="back" label="返回规划" @click="close" />
             <span class="oc-avatar" aria-hidden="true"><BrandMark :size="28" /></span>
@@ -417,6 +439,7 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
 .oc-panel { position: relative; display: flex; flex-direction: column; width: min(100%, 760px); height: min(100%, 860px); min-height: 0; overflow: hidden; border: 1px solid var(--bbs-line); border-radius: var(--bbs-radius-win); background: var(--bbs-bg); box-shadow: var(--bbs-shadow); color: var(--bbs-ink); font-family: var(--bbs-font-sans); font-size: 14px; line-height: 1.6; }
 .oc-panel.is-max { width: 100%; height: 100%; }
 .oc-panel:focus { outline: none; }
+.oc-grabber { display: none; }
 
 .oc-head { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--bbs-line); background: var(--bbs-surface); }
 .oc-avatar { width: 38px; height: 38px; }
@@ -502,10 +525,13 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
 .oc-sheet-enter-from .oc-sheet, .oc-sheet-leave-to .oc-sheet { transform: translateY(24px); }
 
 @media (max-width: 640px) {
-  .oc-mask { padding: 0; }
-  .oc-panel, .oc-panel.is-max { width: 100%; height: 100%; border: 0; border-radius: 0; }
+  /* 与宝书窗口的手机抽屉一致：贴底，顶部留 4% 或状态栏高度再加 8px（取较大者），顶部有可下拉关闭的横条 */
+  .oc-mask { padding: 0; align-items: flex-end; }
+  .oc-panel, .oc-panel.is-max { width: 100%; height: 96%; height: calc(100% - max(4%, env(safe-area-inset-top, 0px) + 8px)); border: 0; border-radius: var(--bbs-radius-win) var(--bbs-radius-win) 0 0; transition: transform var(--bbs-dur) var(--bbs-ease); }
+  .oc-grabber { display: flex; flex: 0 0 auto; align-items: center; justify-content: center; height: 18px; background: var(--bbs-surface); cursor: grab; touch-action: none; }
+  .oc-grabber span { width: 30px; height: 3px; border-radius: var(--bbs-radius-pill); background: var(--bbs-line-strong); opacity: .65; }
   .oc-expand, .oc-shortcut { display: none; }
-  .oc-head { padding: 8px 8px 8px 6px; }
+  .oc-head { padding: 2px 8px 8px 6px; }
   .oc-context { padding: 8px 12px; }
   .oc-foot { padding: 8px 12px max(10px, env(safe-area-inset-bottom)); }
   .oc-scrim { padding: 0; }

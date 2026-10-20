@@ -96,6 +96,14 @@ export async function setDecisionStatus(id: string, status: 'pending'|'in_progre
   if (['pending','in_progress'].includes(status) && !next.records.some(r=>r.id===d.noteId && recordSourceIsCurrent(r))) throw new Error('这条安排对应的正文已变化，不能再启用。');
   d.status=status; await persist(next,ctx);
 }
+/** 删除一份札记，连同由它确认的全部安排（安排必须对应存在的札记与问题，见 validData）。 */
+export async function deleteNote(noteId: string): Promise<void> {
+  const ctx=context(), next=snapshot();
+  if (!next.records.some(r=>r.id===noteId)) throw new Error('找不到这份札记，可能已经删除。');
+  next.records=next.records.filter(r=>r.id!==noteId);
+  next.decisions=next.decisions.filter(d=>d.noteId!==noteId);
+  await persist(next,ctx);
+}
 /** 显式导入只读原文，既不删 aftertalk，也不把其中的“已确认”自动当成用户授权。 */
 export async function importLegacyNotes(): Promise<number> {
   const ctx=context(), next=snapshot(); let count=0;

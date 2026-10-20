@@ -1,18 +1,20 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, watch } from 'vue';
+import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import Icon from '@/components/Icon.vue';
 import PageHeader from '@/components/PageHeader.vue';
 import { notesSettings, saveNotesSettings, settingsIssue } from '@/notes/settings';
 import { notesRun, generateNotes, cancelNotes } from '@/notes/service';
 import {
   notesState, recordIsCurrent, recordSourceIsCurrent, confirmQuestion, rejectQuestion,
-  setDecisionStatus, importLegacyNotes,
+  setDecisionStatus, importLegacyNotes, deleteNote,
 } from '@/notes/store';
 import type { NoteRecord, NoteDecision } from '@/notes/types';
 import { ORIGINAL_NOTES_PROMPT } from '@/notes/prompt';
 import { useNotesModelCatalog } from '@/notes/modelCatalog';
 import { getContext } from '@/st/context';
 import { pageFocus, takePageFocus } from '@/state/pageFocus';
+import { toast } from '@/st/toast';
 
 const actionError = ref('');
 const notice = ref('');
@@ -22,6 +24,40 @@ const importResult = ref<number | null>(null);
 const pendingAction = ref(false);
 const startingRun = ref(false);
 const locked = computed(() => pendingAction.value || startingRun.value || notesRun.busy);
+
+/* —— 删除札记：确认后连同由它确认的安排一起删除 —— */
+const deleting = ref(false);
+const deleteTarget = ref<NoteRecord | null>(null);
+const deleteOpen = computed({
+  get: () => !!deleteTarget.value,
+  set: (value: boolean) => { if (!value && !deleting.value) deleteTarget.value = null; },
+});
+const deleteMessage = computed(() => {
+  const record = deleteTarget.value;
+  if (!record) return '';
+  const linked = notesState.decisions.filter(d => d.noteId === record.id);
+  const active = linked.filter(d => d.status === 'pending' || d.status === 'in_progress').length;
+  const tail = linked.length ? `这份札记的 ${linked.length} 条安排会一起删除${active ? `，其中 ${active} 条正在注入正文` : ''}。` : '';
+  return `删除第 ${record.floor} 楼的这份札记，删除后无法恢复。${tail}`;
+});
+function askDeleteRecord(record: NoteRecord) {
+  if (locked.value || deleting.value) return;
+  deleteTarget.value = record;
+}
+async function confirmDeleteRecord() {
+  const record = deleteTarget.value;
+  if (!record || deleting.value) return;
+  deleting.value = true;
+  try {
+    await deleteNote(record.id);
+    toast('札记已删除。', 'success');
+  } catch (error) {
+    toast(error instanceof Error ? error.message : '札记没有删除，请重试。', 'error');
+  } finally {
+    deleting.value = false;
+    deleteTarget.value = null;
+  }
+}
 const apiDraft = reactive({ ...notesSettings.channel });
 const { models, loading: modelsLoading, message: modelsMessage, error: modelsError, pull: pullModels, cancel: cancelModels } = useNotesModelCatalog(apiDraft);
 const modelSearch = ref('');
@@ -369,6 +405,9 @@ function importNotes() {
           </div>
         </div>
         <p v-if="!record.questions.length" class="bbs-field-hint">该札记中没有 Q1–Q4 形式的编号问题，因此没有可确认的方案；原文见上方。</p>
+        <div class="notes-record-foot">
+          <button type="button" class="bbs-btn bbs-btn-sm bbs-btn-danger" :disabled="locked || deleting" @click="askDeleteRecord(record)"><Icon name="trash" />删除札记</button>
+        </div>
       </details>
       <nav v-if="pageCount > 1" class="notes-pagination" aria-label="札记历史分页">
         <button type="button" class="bbs-btn" :disabled="page <= 1" aria-label="上一页札记" @click="page--">上一页</button>
@@ -491,6 +530,8 @@ function importNotes() {
         </div>
       </details>
     </footer>
+
+    <ConfirmDialog v-model:open="deleteOpen" title="删除札记" confirm-text="删除" tone="danger" confirm-icon="trash" :busy="deleting" busy-text="删除中…" @confirm="confirmDeleteRecord">{{ deleteMessage }}</ConfirmDialog>
   </div>
 </template>
 
@@ -530,6 +571,7 @@ function importNotes() {
 .notes-record-title { display:flex; flex-wrap:wrap; align-items:center; gap:4px 8px; font-size:14.5px; font-weight:600; }
 .notes-record-meta { font-size:12px; font-weight:400; color:var(--bbs-ink-muted); }
 .notes-record.is-stale .notes-record-title { color:var(--bbs-ink-soft); }
+.notes-record-foot { display:flex; justify-content:flex-end; margin-top:14px; padding-top:10px; border-top:1px solid var(--bbs-line); }
 .notes-tag { display:inline-block; padding:0 8px; border-radius:var(--bbs-radius-pill); font-size:11.5px; font-weight:500; line-height:1.8; }
 .notes-tag.is-new { background:var(--bbs-accent-soft); color:var(--bbs-accent); }
 .notes-tag.is-stale { background:var(--bbs-warning-soft); color:var(--bbs-warning); }

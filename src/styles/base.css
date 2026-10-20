@@ -557,11 +557,14 @@ textarea.bbs-modal-autogrow { resize: none; min-height: 0; max-height: 140px; ov
 
   .bbs-window {
     max-width: 100%;
-    /* 直接用视口高,不依赖父级百分比链 */
+    /* 直接用视口高,不依赖父级百分比链。顶部留 4%;页面画到状态栏下面时(安全区不为 0)
+       改留状态栏高度再加 8px,抓手和关闭键不被状态栏盖住。不支持 env()/max() 的浏览器用前两行。 */
     height: 96vh;
     height: 96dvh;
+    height: calc(100dvh - max(4dvh, env(safe-area-inset-top, 0px) + 8px));
     max-height: 96vh;
     max-height: 96dvh;
+    max-height: calc(100dvh - max(4dvh, env(safe-area-inset-top, 0px) + 8px));
     border: 0;
     /* 仅顶部圆角:贴底的抽屉观感 */
     border-radius: 18px 18px 0 0;
@@ -570,8 +573,15 @@ textarea.bbs-modal-autogrow { resize: none; min-height: 0; max-height: 140px; ov
   /* 手机把空间留给文本；仍由 body 单一滚动 */
   .bbs-body { padding: 20px 22px 28px; }
 
-  .bbs-modal-mask { padding: 12px; }
-  .bbs-modal { max-height: 90dvh; }
+  /* 弹窗上下避开状态栏和底部手势条;弹窗再高也不超出留白后的区域,标题栏和关闭键始终露在状态栏下方 */
+  .bbs-modal-mask {
+    padding: 12px;
+    padding: max(12px, env(safe-area-inset-top, 0px) + 8px) 12px max(12px, env(safe-area-inset-bottom, 0px) + 8px);
+  }
+  .bbs-modal {
+    max-height: 90dvh;
+    max-height: min(90dvh, 100%);
+  }
 }
 @media (max-width: 360px) { .bbs-body { padding-left: 17px; padding-right: 17px; } }
 
