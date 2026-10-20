@@ -2,13 +2,15 @@ import { reactive } from 'vue';
 import { getContext, type STContext } from '@/st/context';
 import { captureOutlineSource, outlineInputUnchanged, sameOutlineChat, type OutlineSource } from './source';
 
-export type DiscussionMessage = { role: 'user' | 'assistant'; content: string };
+/** at：发送或收到的时间（毫秒时间戳）。prism.15 起记录；更早的讨论没有这一项。 */
+export type DiscussionMessage = { role: 'user' | 'assistant'; content: string; at?: number };
 export const DISCUSSION_DATA_KEY = 'prism_book_outline_discussion';
 export const discussionState = reactive<{
   messages: DiscussionMessage[]; revision: number; saving: boolean; issue: string;
 }>({ messages: [], revision: 0, saving: false, issue: '' });
 
-type DiscussionData = { version: 1; messages: DiscussionMessage[] };
+// 第 1 版只有 role、content；第 2 版的消息可带 at。没有时间时仍写第 1 版，旧版本照常读取。
+type DiscussionData = { version: 1 | 2; messages: DiscussionMessage[] };
 type Pending = { written: DiscussionData; fingerprint: string | undefined; previous: unknown; hadPrevious: boolean };
 const pending = new WeakMap<STContext['chatMetadata'], Pending>();
 let loaded: OutlineSource | undefined;
@@ -16,7 +18,9 @@ let storedFingerprint: string | undefined;
 let protectedData = false;
 // 不把公开 reactive 对象作为下一次写入的数据源，避免视图意外修改持久化历史。
 let messages: DiscussionMessage[] = [];
-const copyMessages = (value: DiscussionMessage[]) => value.map(message => ({ ...message }));
+const copyMessages = (value: DiscussionMessage[]): DiscussionMessage[] => value.map(({ role, content, at }) =>
+  at === undefined ? { role, content } : { role, content, at });
+const dataVersion = (value: DiscussionMessage[]): 1 | 2 => value.some(message => message.at !== undefined) ? 2 : 1;
 const fingerprint = (value: unknown): string | undefined => {
   try { return JSON.stringify(value); } catch { return '[不可序列化的讨论数据]'; }
 };
@@ -36,11 +40,14 @@ function exactKeys(value: unknown, keys: string[]): value is Record<string, unkn
     Reflect.ownKeys(value).length === keys.length &&
     keys.every(key => Object.prototype.hasOwnProperty.call(value, key));
 }
+function validTime(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
 function validContent(value: unknown, limit: number): value is string {
   return typeof value === 'string' && value.length >= 1 && value.length <= limit && !!value.trim();
 }
 function decode(value: unknown): DiscussionData {
-  if (!exactKeys(value, ['version', 'messages']) || value.version !== 1 || !Array.isArray(value.messages))
+  if (!exactKeys(value, ['version', 'messages']) || (value.version !== 1 && value.version !== 2) || !Array.isArray(value.messages))
     throw new DiscussionError(READ_ONLY);
   const raw = value.messages;
   if (raw.length > 24 || raw.length % 2 !== 0 || Reflect.ownKeys(raw).length !== raw.length + 1)
@@ -49,13 +56,15 @@ function decode(value: unknown): DiscussionData {
   let total = 0;
   for (let index = 0; index < raw.length; index++) {
     const message: unknown = raw[index], role = index % 2 === 0 ? 'user' : 'assistant';
-    if (!exactKeys(message, ['role', 'content']) || message.role !== role ||
-        !validContent(message.content, role === 'user' ? 4000 : 8000)) throw new DiscussionError(READ_ONLY);
+    const timed = value.version === 2 && exactKeys(message, ['role', 'content', 'at']);
+    if (!(timed || exactKeys(message, ['role', 'content'])) || message.role !== role ||
+        !validContent(message.content, role === 'user' ? 4000 : 8000) || (timed && !validTime(message.at)))
+      throw new DiscussionError(READ_ONLY);
     total += message.content.length;
     if (total > 48000) throw new DiscussionError(READ_ONLY);
-    decoded.push({ role, content: message.content });
+    decoded.push(timed ? { role, content: message.content, at: message.at as number } : { role, content: message.content });
   }
-  return { version: 1, messages: decoded };
+  return { version: value.version, messages: decoded };
 }
 
 /** 兼容尚无 sidecar 的旧聊天；读取永远不迁移、不保存、不改旧大纲 key。 */
@@ -111,7 +120,7 @@ async function persist(next: DiscussionData, ctx: STContext): Promise<void> {
   const source = captureOutlineSource(ctx), session = loaded, revision = discussionState.revision;
   const metadata = ctx.chatMetadata, previousFingerprint = storedFingerprint;
   const record: Pending = {
-    written: { version: 1, messages: copyMessages(next.messages) }, fingerprint: undefined,
+    written: { version: dataVersion(next.messages), messages: copyMessages(next.messages) }, fingerprint: undefined,
     previous: metadata[DISCUSSION_DATA_KEY],
     hadPrevious: Object.prototype.hasOwnProperty.call(metadata, DISCUSSION_DATA_KEY),
   };
@@ -159,8 +168,10 @@ async function persist(next: DiscussionData, ctx: STContext): Promise<void> {
   }
 }
 
+/** times：提问与收到回复的时间，记在两条消息上（只用于显示，不发给模型）。 */
 export async function appendDiscussionTurn(
   question: string, answer: string, expectedRevision: number, source: OutlineSource,
+  times?: { question: number; answer: number },
 ): Promise<void> {
   const ctx = editable();
   if (discussionState.revision !== expectedRevision || !outlineInputUnchanged(source, true))
@@ -168,12 +179,16 @@ export async function appendDiscussionTurn(
   if (!validContent(question, 4000)) throw new DiscussionError('讨论问题须为1到4000字，不能仅含空白。');
   if (!validContent(answer, 8000)) throw new DiscussionError('讨论回复须为1到8000字，不能仅含空白。');
   const next = copyMessages(messages);
-  next.push({ role: 'user', content: question }, { role: 'assistant', content: answer });
+  const timed = !!times && validTime(times.question) && validTime(times.answer);
+  next.push(
+    timed ? { role: 'user', content: question, at: times!.question } : { role: 'user', content: question },
+    timed ? { role: 'assistant', content: answer, at: times!.answer } : { role: 'assistant', content: answer },
+  );
   const total = next.reduce((sum, message) => sum + message.content.length, 0);
   // 存储不是请求上下文窗口：超限必须由用户决定清空，不能静默淘汰旧问答。
   if (next.length > 24) throw new DiscussionError('讨论最多保存12轮（24条消息），请先确认清空讨论后再继续；已有记录未改动。');
   if (total > 48000) throw new DiscussionError('讨论总内容不能超过48000字，请缩短本轮内容或先确认清空讨论；已有记录未改动。');
-  await persist({ version: 1, messages: next }, ctx);
+  await persist({ version: dataVersion(next), messages: next }, ctx);
 }
 
 /** 仅由 UI 明确确认后调用；空记录仍以 version 1 sidecar 保存。 */

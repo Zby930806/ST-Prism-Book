@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue';
 import OutlineDiscussion from './OutlineDiscussion.vue';
 import { getContext } from '@/st/context';
 import type { ApiChannel } from '@/api/settings';
@@ -16,6 +16,7 @@ import {
   setOutlineChapter, reconfirmOutline, outlineSourceCurrent,
 } from '@/outline/store';
 import { useNotesModelCatalog } from '@/notes/modelCatalog';
+import { pageFocus, takePageFocus } from '@/state/pageFocus';
 
 type Editor = Omit<OutlineContent, 'constraints' | 'chapters'> & {
   constraints: string;
@@ -273,6 +274,33 @@ function saveApi() {
     notice.value = '规划 API 设置已保存。';
   } catch (cause) { Object.assign(outlineSettings, previous); error.value = errorText(cause); }
 }
+/* —— 从规划讨论跳到草稿编辑器或规划 API 设置：展开所在的折叠区，滚动到位并移交焦点 —— */
+const workbenchEl = ref<HTMLDetailsElement | null>(null);
+const editorHeading = ref<HTMLElement | null>(null);
+const apiEl = ref<HTMLDetailsElement | null>(null);
+async function revealInWorkbench(target: () => HTMLElement | null | undefined) {
+  if (workbenchEl.value) workbenchEl.value.open = true;
+  await nextTick();
+  const el = target();
+  el?.scrollIntoView({ block: 'start', behavior: 'auto' });
+  el?.focus({ preventScroll: true });
+}
+function showDraftEditor() {
+  return revealInWorkbench(() => editorHeading.value);
+}
+function showApiSettings() {
+  apiOpen.value = true;
+  return revealInWorkbench(() => apiEl.value?.querySelector('summary'));
+}
+// 从设置页「札记与规划 API」卡片跳转过来：先展开所在的「创作规划」行（摘要页的非受控 details），再展开规划 API 设置。
+const plannerEl = ref<HTMLElement | null>(null);
+watch(() => pageFocus.section, async () => {
+  if (!takePageFocus('outline-api')) return;
+  await nextTick();
+  for (let row = plannerEl.value?.parentElement?.closest('details'); row; row = row.parentElement?.closest('details')) row.open = true;
+  requestAnimationFrame(() => { void showApiSettings(); });
+}, { immediate: true });
+
 const canGenerate = computed(() => engineEnabled.value && !locked.value && !protectedSettings.value && !configurationIssue.value
   && !!brief.value.trim() && brief.value.length <= 8000 && Number.isInteger(chapterCount.value) && chapterCount.value >= 1 && chapterCount.value <= 12);
 async function startGeneration(confirmed = false) {
@@ -295,7 +323,7 @@ async function startGeneration(confirmed = false) {
 </script>
 
 <template>
-  <div class="outline-planner">
+  <div ref="plannerEl" class="outline-planner">
     <div class="feedback" aria-live="polite">
       <p v-if="notice" role="status">{{ notice }}</p>
       <p v-if="outlineRun.status" role="status">{{ outlineRun.status }}</p>
@@ -374,8 +402,8 @@ async function startGeneration(confirmed = false) {
       </details>
     </section>
 
-    <OutlineDiscussion :disabled="locked" :unsaved="dirty" :configuration-issue="configurationIssue" :api-dirty="apiDirty" />
-    <details class="bbs-disclosure is-card planner-workbench">
+    <OutlineDiscussion :disabled="locked" :unsaved="dirty" :configuration-issue="configurationIssue" :api-dirty="apiDirty" @view-draft="showDraftEditor" @open-api="showApiSettings" />
+    <details ref="workbenchEl" class="bbs-disclosure is-card planner-workbench">
       <summary>{{ active ? '修改或重新生成规划' : '生成规划草稿' }}<span v-if="dirty" class="bbs-disclosure-meta">有未保存的修改</span></summary>
       <p class="hint">写下你希望故事怎么发展，模型会结合当前剧情给出分阶段的草稿；你可以修改，确认加入计划后才生效。</p>
       <section class="planner-section" aria-label="生成规划草稿">
@@ -397,7 +425,7 @@ async function startGeneration(confirmed = false) {
       </section>
 
       <section v-if="editor" class="planner-section" aria-label="未确认的规划草稿编辑器">
-        <h3>规划草稿 <span class="hint">{{ dirty ? '有未保存的修改' : '已保存，尚未加入计划' }}</span></h3>
+        <h3 ref="editorHeading" tabindex="-1">规划草稿 <span class="hint">{{ dirty ? '有未保存的修改' : '已保存，尚未加入计划' }}</span></h3>
         <p v-if="!draftCurrent" class="bbs-callout is-warning">草稿生成后剧情有变动，请核对后重新保存再加入计划。</p>
         <fieldset :disabled="locked">
           <label>规划标题<input v-model="editor.title" class="bbs-input" :maxlength="L.title" /></label>
@@ -424,7 +452,7 @@ async function startGeneration(confirmed = false) {
         </div>
       </section>
 
-      <details class="bbs-disclosure planner-api" :open="apiOpen" @toggle="apiOpen = ($event.target as HTMLDetailsElement).open">
+      <details ref="apiEl" class="bbs-disclosure planner-api" :open="apiOpen" @toggle="apiOpen = ($event.target as HTMLDetailsElement).open">
         <summary>规划 API 设置 <span class="bbs-disclosure-meta">{{ outlineSettings.apiMode === 'notes' ? '用札记的 API' : '专用 API' }}</span></summary>
         <p class="hint">默认使用札记中填写的 API（无需启用札记功能），也可为规划单独设置。修改后点击保存生效；密钥保存在酒馆的扩展设置中，分享设置备份前需删除。</p>
         <form @submit.prevent="saveApi">

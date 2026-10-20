@@ -1,0 +1,105 @@
+/*
+ * 楼层面板就地编辑表单(时间、地点、各条变动共用)。
+ * 由 FloorPanel.vue 与 floor/DeltaTagEditor.vue 以 <style scoped src="./floor/editForm.css"> 各自引入,
+ * 两处表单外观保持一致;不是全局样式。
+ *
+ * 结构:淡底描边卡片,内含「字段行(标签 + 输入)」纵向排列,底部一条删除 / 取消 / 保存。
+ */
+.bbs-fp-editform {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: var(--bbs-radius-sm);
+  border: 1px solid var(--bbs-accent);
+  background: var(--bbs-surface);
+}
+/* 字段行:标签顶端对齐(输入框可能多行,标签仍贴首行) */
+.bbs-fp-nrow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+/* 标签列宽容得下四个字(如「内心好感」),不折行 */
+.bbs-fp-nlabel {
+  flex: 0 0 auto;
+  width: 50px;
+  padding-top: 8px; /* 与字段首行文字对齐 */
+  font-size: var(--bbs-fs-meta);
+  color: var(--bbs-ink-soft);
+}
+/* 字段输入:用 textarea 实现「单行输入、多行显示」——内容长时自动换行、随内容长高;
+   回车被 onFieldKeydown 拦截,输入语义仍是单行。底用 surface-2:在 surface 表单卡上沉一档。
+   min-height 写明控件高度:全局 textarea.bbs-input 的 90px 下限是给多行文本框的,单行字段不用。 */
+.bbs-fp-nfield {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: var(--bbs-control-h);
+  padding: 7px 9px;
+  font-size: var(--bbs-fs-sm);
+  font-family: var(--bbs-font-sans);
+  line-height: 1.5;
+  background: var(--bbs-surface-2);
+  resize: none;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* 数量仍是普通 number input,单行即可 */
+.bbs-fp-nfield-num {
+  resize: none;
+}
+/* 好感等下拉选择:用 BbsSelect 自带的边框、底色与控件高度,只占满剩余宽度 */
+.bbs-fp-nselect {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* 不可编辑标签删除态:只读回显要删除的内容 */
+.bbs-fp-editreadonly {
+  margin: 0;
+  font-size: var(--bbs-fs-sm);
+  color: var(--bbs-ink-soft);
+  word-break: break-word;
+}
+/* 底部操作条:删除靠左(低调,hover 显红),取消/保存靠右成组 */
+.bbs-fp-editfoot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+.bbs-fp-editfoot-spacer {
+  flex: 1 1 auto;
+}
+.bbs-fp-editfoot .bbs-btn-sm {
+  padding: 5px 12px;
+  font-size: var(--bbs-fs-meta);
+}
+.bbs-fp-editdel {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: var(--bbs-control-h-sm);
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--bbs-radius-sm);
+  background: transparent;
+  color: var(--bbs-ink-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    color var(--bbs-dur) var(--bbs-ease),
+    background var(--bbs-dur) var(--bbs-ease);
+}
+.bbs-fp-editdel:hover {
+  color: var(--bbs-danger);
+  background: var(--bbs-danger-soft);
+}
+
+/* 手机与触屏:表单里的按钮加高到 40px */
+@media (max-width: 640px), (pointer: coarse) {
+  .bbs-fp-editdel {
+    min-height: 40px;
+  }
+}

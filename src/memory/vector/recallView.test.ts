@@ -33,6 +33,19 @@ describe('召回结果的显示', () => {
     expect(recallStatusText(d)).toBe('召回完成，没有达到阈值的内容，本次未注入。');
   });
 
+  it('部分段落放不进召回预算：写明注入段数和未注入段数', () => {
+    const d = debug({ status: '召回完成', rerank: [hit('a', 'full'), hit('b', 'cut'), hit('c', 'brief'), hit('d', 'drop')] });
+    expect(recallButtonLabel(d).text).toBe('召回 2');
+    expect(recalledItems(d).map(i => i.preview)).toEqual(['a 的摘要', 'c 的摘要']);
+    expect(recallStatusText(d)).toBe('召回 2 段，已注入本次生成。另有 1 段超出召回预算，未注入。');
+  });
+
+  it('达标的段落都放不进召回预算：说明原因和设置位置', () => {
+    const d = debug({ status: '召回完成:超出注入预算,本回合未注入', rerank: [hit('a', 'cut'), hit('b', 'cut'), hit('c', 'drop')] });
+    expect(recallButtonLabel(d).text).toBe('召回 0');
+    expect(recallStatusText(d)).toBe('召回完成，达到阈值的 2 段超出召回预算，本次未注入。可在「设置 → 注入设置」中调高「记忆注入预算」。');
+  });
+
   it('没召回时不列旧的段落，说明原因', () => {
     const d = debug({ status: '未召回:楼层未达起召门槛或全在窗口内', rerank: [hit('旧', 'full')] });
     expect(recallPhase(d)).toBe('skipped');
@@ -59,5 +72,7 @@ describe('召回结果的显示', () => {
     expect(skipped?.items).toEqual([]);
     expect(skipped?.statusText).toBe('未召回：没有检索到相关内容。');
     expect(floorRecallView(record({ status: '失败:超时' }))?.phase).toBe('failed');
+    const partial = floorRecallView(record({ items: [{ source: '#5', storyTime: '', tier: 'brief', preview: '旧事' }], cut: 2 }));
+    expect(partial?.statusText).toBe('召回 1 段，已注入本次生成。另有 2 段超出召回预算，未注入。');
   });
 });

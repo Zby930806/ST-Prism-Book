@@ -2,7 +2,7 @@
  * 召回结果的显示逻辑:快捷回复栏的「召回」按钮、召回速览弹层和楼层面板共用。纯函数。
  * 上次召回读调试快照(recallDebug);楼层面板读存在消息里的召回记录(floorRecall.ts)。
  */
-import type { RecallDebug } from './debug';
+import { RECALL_DONE_OVER_BUDGET, type RecallDebug } from './debug';
 import type { FloorRecallRecord } from './floorRecall';
 
 export type RecallPhase = 'none' | 'running' | 'done' | 'skipped' | 'failed';
@@ -44,6 +44,11 @@ export function recalledItems(d: RecallDebug): RecallPeekItem[] {
     }));
 }
 
+/** 达到阈值、但放不进召回预算而没有注入的段数。 */
+export function recallCutCount(d: RecallDebug): number {
+  return recallPhase(d) === 'done' ? d.rerank.filter(h => h.tier === 'cut').length : 0;
+}
+
 const SKIP_REASONS: Array<[string, string]> = [
   ['未召回:楼层未达起召门槛或全在窗口内', '未召回：AI 楼数未达到「开始召回的 AI 楼数」，或相关内容仍在最近楼层的全文范围内。'],
   ['未召回:查询重写未产出 query', '未召回：查询重写没有生成检索问题。'],
@@ -51,8 +56,17 @@ const SKIP_REASONS: Array<[string, string]> = [
   ['未召回:已取消或保护状态变化', '未召回：召回已取消（例如切换了聊天）。'],
 ];
 
+const RAISE_BUDGET = '可在「设置 → 注入设置」中调高「记忆注入预算」。';
+
+/** 召回完成时的说明:注入了几段,有没有因为预算没放进去的。 */
+function doneSentence(base: string, count: number, cut: number): string {
+  if (count) return `召回 ${count} 段，已注入本次生成。` + (cut ? `另有 ${cut} 段超出召回预算，未注入。` : '');
+  if (base === RECALL_DONE_OVER_BUDGET) return `召回完成，达到阈值的${cut ? ` ${cut} 段` : '内容'}超出召回预算，本次未注入。${RAISE_BUDGET}`;
+  return '召回完成，没有达到阈值的内容，本次未注入。';
+}
+
 /** 把状态文案和注入段数换成一句说明。 */
-function statusSentence(status: string, count: number): string {
+function statusSentence(status: string, count: number, cut = 0): string {
   const cached = status.endsWith('(复用缓存)');
   const base = cached ? status.slice(0, -'(复用缓存)'.length) : status;
   const cacheNote = cached ? '上下文与上次相同，复用了上次的结果。' : '';
@@ -62,7 +76,7 @@ function statusSentence(status: string, count: number): string {
     case 'running':
       return '正在召回，完成后开始生成回复。';
     case 'done':
-      return (count ? `召回 ${count} 段，已注入本次生成。` : '召回完成，没有达到阈值的内容，本次未注入。') + cacheNote;
+      return doneSentence(base, count, cut) + cacheNote;
     case 'failed':
       return `召回失败：${base.replace(/^失败[:：]\s*/, '')}。本次生成未注入召回内容。`;
     default: {
@@ -74,7 +88,7 @@ function statusSentence(status: string, count: number): string {
 
 /** 上次召回的一句说明。 */
 export function recallStatusText(d: RecallDebug): string {
-  return statusSentence(d.status, recalledItems(d).length);
+  return statusSentence(d.status, recalledItems(d).length, recallCutCount(d));
 }
 
 /** 快捷回复栏按钮上的字和悬停说明。 */
@@ -100,5 +114,5 @@ export function floorRecallView(rec: FloorRecallRecord | null): FloorRecallView 
   const items = phase === 'done'
     ? rec.items.map((it, i) => ({ key: String(i), source: it.source, storyTime: it.storyTime, tier: it.tier, tierLabel: tierLabel(it.tier), preview: it.preview }))
     : [];
-  return { phase, statusText: statusSentence(rec.status, items.length), items };
+  return { phase, statusText: statusSentence(rec.status, items.length, phase === 'done' ? rec.cut ?? 0 : 0), items };
 }

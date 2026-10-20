@@ -1,7 +1,7 @@
 <script setup lang="ts" generic="T extends string">
 import Icon from '@/components/Icon.vue';
 import { modalHost } from '@/state/ui';
-import { computed, onBeforeUnmount, ref } from 'vue';
+import { computed, onBeforeUnmount, ref, useId } from 'vue';
 
 /**
  * 自绘下拉选择(替代原生 <select>):触发器与弹出菜单都跟随 --bbs-* 主题,
@@ -32,6 +32,9 @@ const menu = ref<HTMLElement | null>(null);
 const menuStyle = ref<Record<string, string>>({});
 /** 键盘/悬停高亮项索引 */
 const activeIndex = ref(0);
+/** 菜单与选项的 id：触发器用 aria-controls / aria-activedescendant 指向它们，读屏能报出高亮项。 */
+const listId = useId();
+const optionId = (i: number) => `${listId}-opt-${i}`;
 
 const current = computed(() => props.options.find(o => o.value === props.modelValue) ?? null);
 
@@ -151,8 +154,11 @@ onBeforeUnmount(() => closeMenu());
       ref="trigger"
       class="bbs-select-trigger"
       type="button"
+      role="combobox"
       aria-haspopup="listbox"
       :aria-expanded="open"
+      :aria-controls="open ? listId : undefined"
+      :aria-activedescendant="open ? optionId(activeIndex) : undefined"
       :aria-label="ariaLabel"
       @click="toggle"
       @keydown="onTriggerKeydown"
@@ -165,9 +171,10 @@ onBeforeUnmount(() => closeMenu());
     </button>
 
     <Teleport :to="modalHost" :disabled="!modalHost">
-      <ul v-if="open" ref="menu" class="bbs-select-menu" role="listbox" :style="menuStyle">
+      <ul v-if="open" :id="listId" ref="menu" class="bbs-select-menu" role="listbox" :aria-label="ariaLabel" :style="menuStyle">
         <li
           v-for="(option, i) in options"
+          :id="optionId(i)"
           :key="option.value"
           class="bbs-select-option"
           :class="{ 'is-active': i === activeIndex, 'is-selected': option.value === modelValue }"
@@ -201,8 +208,9 @@ onBeforeUnmount(() => closeMenu());
   justify-content: space-between;
   gap: 8px;
   width: 100%;
+  min-height: var(--bbs-control-h);
   padding: 7px 10px;
-  border: 1px solid var(--bbs-line-strong);
+  border: 1px solid var(--bbs-control-border);
   border-radius: var(--bbs-radius-sm);
   background: var(--bbs-surface);
   color: var(--bbs-ink);

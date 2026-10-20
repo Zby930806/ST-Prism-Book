@@ -130,10 +130,10 @@ const windowStyle = computed(() => {
               <div class="bbs-brand"><BrandMark :size="36" /><div class="bbs-brand-copy"><span class="bbs-brand-name">棱镜宝书</span><span class="bbs-brand-tagline">PRISM BOOK</span></div></div>
               <div class="bbs-head-actions">
                 <span class="bbs-version">{{ PLUGIN_VERSION }}</span>
-                <button class="bbs-icon-btn" type="button" :title="`切换主题:${nextTheme.label}`" :aria-label="`切换主题:${nextTheme.label}`" @click="cycleTheme">
+                <button class="bbs-head-btn" type="button" :title="`切换主题:${nextTheme.label}`" :aria-label="`切换主题:${nextTheme.label}`" @click="cycleTheme">
                   <Icon :name="nextTheme.icon" />
                 </button>
-                <button class="bbs-icon-btn" type="button" title="关闭棱镜宝书" aria-label="关闭棱镜宝书" @click="closeBook">
+                <button class="bbs-head-btn" type="button" title="关闭棱镜宝书" aria-label="关闭棱镜宝书" @click="closeBook">
                   <Icon name="close" />
                 </button>
               </div>
@@ -155,58 +155,94 @@ const windowStyle = computed(() => {
 </template>
 
 <style scoped>
-/* —— 移动端抓手:桌面隐藏 —— */
-.bbs-grabber {
-  display: none;
-}
-
+/* —— 题首：轻量书脊式，品牌退后，让当前阅读内容成为视觉重心 —— */
 .bbs-head {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 24px;
-  background: var(--bbs-surface);
+  padding: 16px 28px;
+  background: var(--bbs-bg);
   border-bottom: 1px solid var(--bbs-line);
-  flex: 0 0 auto;
+}
+
+.bbs-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.bbs-brand-copy {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
 }
 
 .bbs-brand-name {
-  font-weight: 650;
-  font-size: 18px;
-  letter-spacing: -0.01em;
+  font-family: var(--bbs-font-reading);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: .08em;
   color: var(--bbs-ink);
+}
+
+.bbs-brand-tagline {
+  font-size: 9px;
+  letter-spacing: .2em;
+  color: var(--bbs-ink-muted);
 }
 
 .bbs-head-actions {
   display: flex;
+  align-items: center;
   gap: 8px;
 }
-.bbs-icon-btn {
-  width: 38px;
-  height: 38px;
+
+.bbs-version {
+  margin-right: 6px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: var(--bbs-radius-pill);
+  font-family: var(--bbs-font-mono);
+  font-size: 10px;
+  color: var(--bbs-ink-muted);
+}
+
+/* 题首按钮（切换主题、关闭）：圆形、无底色，悬停时显出浅底。与各页的 .bbs-icon-btn 区分。 */
+.bbs-head-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: 40px;
+  height: 40px;
   border: 0;
-  border-radius: var(--bbs-radius-sm);
-  background: var(--bbs-surface-2);
+  border-radius: 50%;
+  background: transparent;
   color: var(--bbs-ink-soft);
+  font-size: 17px;
   cursor: pointer;
-  font-size: 15px;
   transition:
     color var(--bbs-dur) var(--bbs-ease),
     background var(--bbs-dur) var(--bbs-ease);
 }
-.bbs-icon-btn:hover {
+.bbs-head-btn:hover {
   color: var(--bbs-ink);
-  background: var(--bbs-line-strong);
+  background: var(--bbs-surface-2);
 }
-.bbs-icon-btn:focus-visible {
+.bbs-head-btn:focus-visible {
   outline: 2px solid var(--bbs-accent);
   outline-offset: 2px;
 }
 
-/* —— 过渡:遮罩淡入淡出,窗口靠遮罩的过渡 class 联动(见下) —— */
+/* —— 移动端抓手：桌面隐藏 —— */
+.bbs-grabber {
+  display: none;
+}
+
+/* —— 过渡：遮罩淡入淡出，窗口靠遮罩的过渡 class 联动（见下） —— */
 .bbs-fade-enter-active,
 .bbs-fade-leave-active {
   transition: opacity var(--bbs-dur) var(--bbs-ease);
@@ -216,9 +252,9 @@ const windowStyle = computed(() => {
   opacity: 0;
 }
 
-/* 窗口进出场:由遮罩 Transition 的 class 作后代选择器驱动(窗口自身不再套 Transition——
-   父子 v-if 同时翻转时子 Transition 的 leave 不触发,实测窗口会无动画直接被移除)。
-   进出场两端同款 transform → 对称。PC 微升+略放大；触屏和窄屏仅切换可见状态。 */
+/* 窗口进出场：由遮罩 Transition 的 class 作后代选择器驱动（窗口自身不再套 Transition——
+   父子 v-if 同时翻转时子 Transition 的 leave 不触发，实测窗口会无动画直接被移除）。
+   进出场两端同款 transform，前后对称。PC 微升并略放大；触屏和窄屏仅切换可见状态。 */
 .bbs-fade-enter-from .bbs-window,
 .bbs-fade-leave-to .bbs-window {
   opacity: 0;
@@ -240,43 +276,48 @@ const windowStyle = computed(() => {
   transform: translateY(-6px);
 }
 
-/* 窗口过渡:进出场(transform+opacity)与拖动回弹(transform)共用;
-   拖动跟手时由内联 style 的 transition:none 覆盖,松手回弹再走这条。 */
+/* 窗口过渡：进出场（transform + opacity）与拖动回弹（transform）共用；
+   拖动跟手时由内联 style 的 transition:none 覆盖，松手回弹再走这条。 */
 .bbs-window {
   transition:
     transform var(--bbs-dur) var(--bbs-ease),
     opacity var(--bbs-dur) var(--bbs-ease);
 }
 
-/* ============ 移动端:保留抓手与真实下拉手势 ============ */
+/* ============ 移动端：保留抓手与真实下拉手势；题首收紧 ============ */
 @media (max-width: 640px) {
   .bbs-grabber {
     display: flex;
+    flex: 0 0 auto;
     align-items: center;
     justify-content: center;
-    flex: 0 0 auto;
-    height: 26px;
+    height: 18px;
     cursor: grab;
     touch-action: none;
   }
   .bbs-grabber-bar {
-    width: 40px;
-    height: 4px;
+    width: 30px;
+    height: 3px;
     border-radius: var(--bbs-radius-pill);
     background: var(--bbs-line-strong);
+    opacity: .65;
   }
   .bbs-head {
-    padding: 4px 16px 12px;
+    padding: 0 16px 9px;
+    border-bottom: 0;
   }
+  .bbs-brand-copy { gap: 9px; }
+  .bbs-brand-name { font-size: 16px; }
+  .bbs-brand-tagline { font-size: 8px; letter-spacing: .16em; }
+  .bbs-head-actions { gap: 5px; }
+  .bbs-version { display: none; }
 }
 
-.bbs-brand{display:flex;align-items:center;gap:12px;min-width:0}.bbs-brand-copy{display:flex;flex-direction:column;gap:2px;min-width:0}.bbs-brand-tagline{font-size:10px;letter-spacing:.06em;color:var(--bbs-ink-muted)}.bbs-brand-tagline span{margin:0 4px;color:var(--bbs-ink-muted)}.bbs-head-actions{align-items:center}.bbs-version{font-family:var(--bbs-font-mono);font-size:10px;color:var(--bbs-ink-muted);border:1px solid var(--bbs-line);border-radius:var(--bbs-radius-pill);padding:3px 8px;margin-right:6px}
-@media(max-width:640px){.bbs-brand{gap:7px}.bbs-brand-name{font-size:17px}.bbs-brand-tagline{font-size:9px;letter-spacing:0}.bbs-version{display:none}.bbs-head-actions{gap:5px}.bbs-icon-btn{width:38px;height:38px}.bbs-head{background:var(--bbs-bg);padding:0 14px 10px;}.bbs-grabber{height:20px}}
 /* 移动端不再滑动整张长内容页或延迟退场；不覆盖 windowStyle 的拖动位移。
    桌面减少动效同样直接到终态，避免 0.001ms 的循环/延迟仍被调度。 */
 @media (max-width: 640px), (hover: none) and (pointer: coarse), (prefers-reduced-motion: reduce) {
   .bbs-window,
-  .bbs-icon-btn,
+  .bbs-head-btn,
   .bbs-fade-enter-active,
   .bbs-fade-leave-active,
   .bbs-page-enter-active,
@@ -292,22 +333,5 @@ const windowStyle = computed(() => {
     opacity: 1;
     transform: none;
   }
-}
-/* 轻量书脊式题首：品牌退后，让当前阅读内容成为视觉重心。 */
-.bbs-head { padding: 16px 28px; background: var(--bbs-bg); border-bottom: 1px solid var(--bbs-line); }
-.bbs-brand { gap: 10px; }
-.bbs-brand-copy { flex-direction: row; align-items: baseline; gap: 12px; }
-.bbs-brand-name { font-family: var(--bbs-font-reading); font-size: 17px; font-weight: 600; letter-spacing: .08em; }
-.bbs-brand-tagline { font-size: 9px; letter-spacing: .2em; }
-.bbs-icon-btn { background: transparent; border-radius: 50%; width: 40px; height: 40px; font-size: 17px; }
-.bbs-icon-btn:hover { background: var(--bbs-surface-2); }
-.bbs-version { border: 0; }
-@media(max-width:640px) {
-  .bbs-head { padding: 0 16px 9px; border-bottom: 0; }
-  .bbs-brand-copy { gap: 9px; }
-  .bbs-brand-name { font-size: 16px; }
-  .bbs-brand-tagline { font-size: 8px; letter-spacing: .16em; }
-  .bbs-grabber { height: 18px; }
-  .bbs-grabber-bar { width: 30px; height: 3px; opacity: .65; }
 }
 </style>

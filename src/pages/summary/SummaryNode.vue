@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** 单张卡片：父页统一展开并分页，不挂载隐藏后代，不创建递归组件。 */
 import Icon from '@/components/Icon.vue';
+import IconButton from '@/components/IconButton.vue';
 import { computed, inject } from 'vue';
 import type { ViewNode } from '@/memory/inject';
 import { SUMMARY_CTX, type SummaryCtx } from './ctx';
@@ -43,12 +44,8 @@ const isChild = computed(() => props.depth > 0);
           <!-- 操作键:编辑对任何层级开放(结构安全:不改 id、不断链;叶子改完向量索引自动重 embed,
                总结不进向量库、只影响上下文注入);删除仅根行——删深层叶子会级联删整条祖先总结链 -->
           <span class="bbs-summary-acts">
-            <button class="bbs-summary-act" type="button" :title="row.imported ? '编辑导入的旧总结' : row.kind === 'comp' ? '编辑总结' : '编辑摘要'" :aria-label="row.imported ? '编辑导入的旧总结' : row.kind === 'comp' ? '编辑总结' : '编辑摘要'" @click="ctx.openEdit(row)">
-              <Icon name="edit" />
-            </button>
-            <button v-if="!isChild" class="bbs-summary-act bbs-summary-del" type="button" :title="row.imported ? '删除导入的旧总结' : row.kind === 'comp' ? '删除总结（下层会重新显示）' : '删除摘要'" :aria-label="row.imported ? '删除导入的旧总结' : row.kind === 'comp' ? '删除总结（下层会重新显示）' : '删除摘要'" @click="ctx.onDelete(row)">
-              <Icon name="trash" />
-            </button>
+            <IconButton icon="edit" :label="row.imported ? '编辑导入的旧总结' : row.kind === 'comp' ? '编辑总结' : '编辑摘要'" @click="ctx.openEdit(row)" />
+            <IconButton v-if="!isChild" icon="trash" tone="danger" :label="row.imported ? '删除导入的旧总结' : row.kind === 'comp' ? '删除总结（下层会重新显示）' : '删除摘要'" @click="ctx.onDelete(row)" />
           </span>
         </header>
         <p class="bbs-summary-text">{{ row.text }}</p>

@@ -12,6 +12,7 @@ import type { NoteRecord, NoteDecision } from '@/notes/types';
 import { ORIGINAL_NOTES_PROMPT } from '@/notes/prompt';
 import { useNotesModelCatalog } from '@/notes/modelCatalog';
 import { getContext } from '@/st/context';
+import { pageFocus, takePageFocus } from '@/state/pageFocus';
 
 const actionError = ref('');
 const notice = ref('');
@@ -43,6 +44,17 @@ function openApi() {
   apiOpen.value = true;
   void nextTick(() => apiPanel.value?.scrollIntoView?.({ block: 'start', behavior: 'smooth' }));
 }
+// 从设置页「札记与规划 API」卡片跳转过来：展开「独立 API 设置」，滚动到位并把焦点放在标题上。
+// 等页面切换时窗口回到顶部之后再滚动，否则会被盖掉。
+watch(() => pageFocus.section, async () => {
+  if (!takePageFocus('notes-api')) return;
+  apiOpen.value = true;
+  await nextTick();
+  requestAnimationFrame(() => {
+    apiPanel.value?.scrollIntoView?.({ block: 'start', behavior: 'auto' });
+    apiPanel.value?.querySelector('summary')?.focus({ preventScroll: true });
+  });
+}, { immediate: true });
 const page = ref(1);
 const PAGE_SIZE = 5;
 const orderedRecords = computed(() => [...notesState.records].sort((a, b) => b.createdAt - a.createdAt));
@@ -153,7 +165,7 @@ function channelIssue(channel: typeof apiDraft): string {
 }
 const configurationIssue = computed(() => channelIssue(notesSettings.channel));
 const canGenerate = computed(() => notesSettings.enabled && !configurationIssue.value && !locked.value);
-const prefsSummary = computed(() => `自动生成${notesSettings.autoGenerate ? '开' : '关'} · 注入${notesSettings.injectConfirmed ? '开' : '关'}`);
+const prefsSummary = computed(() => `自动生成${notesSettings.autoGenerate ? '开' : '关'} · 注入${notesSettings.injectConfirmed ? '开' : '关'} · 聊天中显示${notesSettings.showInChat ? '开' : '关'}`);
 
 function saveApi() {
   report('api');
@@ -176,8 +188,9 @@ const flagNotices = {
   enabled: ['双子札记已启用。', '双子札记已关闭。'],
   autoGenerate: ['已打开自动生成。', '已关闭自动生成。'],
   injectConfirmed: ['已确认的安排将注入正文。', '已确认的安排不再注入正文。'],
+  showInChat: ['札记卡片将显示在聊天中。', '札记卡片不再显示在聊天中。'],
 } as const;
-function changeFlag(key: 'enabled' | 'autoGenerate' | 'injectConfirmed', event: Event) {
+function changeFlag(key: 'enabled' | 'autoGenerate' | 'injectConfirmed' | 'showInChat', event: Event) {
   const input = event.target as HTMLInputElement;
   const previous = notesSettings[key];
   report(key === 'enabled' ? 'panel' : 'prefs');
@@ -447,6 +460,10 @@ function importNotes() {
         <label class="notes-switch-row">
           <span><strong>注入已确认安排</strong><small>{{ !notesSettings.injectConfirmed && !notesSettings.enabled ? '需先启用双子札记。' : '将待兑现、进行中的安排注入正文。' }}</small></span>
           <input type="checkbox" class="bbs-switch" :checked="notesSettings.injectConfirmed" :disabled="locked || (!notesSettings.injectConfirmed && !notesSettings.enabled)" aria-label="注入已确认的有效安排" @change="changeFlag('injectConfirmed', $event)" />
+        </label>
+        <label class="notes-switch-row">
+          <span><strong>在聊天中显示札记</strong><small>在最新一条回复和有札记的楼层下方显示札记卡片，可直接生成、查看和确认。</small></span>
+          <input type="checkbox" class="bbs-switch" :checked="notesSettings.showInChat" :disabled="locked" aria-label="在聊天中显示札记卡片" @change="changeFlag('showInChat', $event)" />
         </label>
         <p class="bbs-field-hint">使用过原版札记时，需关闭悬浮球中的札记自动生成，以及预设中要求正文输出 aftertalk 的条目，以免重复。</p>
         <div class="notes-grid">

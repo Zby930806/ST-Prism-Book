@@ -80,6 +80,16 @@ export interface STContext {
     role?: number,
     filter?: unknown,
   ) => void;
+  /**
+   * 主界面的连接状态。来源 script.js 的 online_status → st-context.js 的 onlineStatus。
+   * 文本补全、KoboldAI 下多为当前模型名;聊天补全下是「Valid」「Status check bypassed」之类的状态文字,
+   * 不是模型名(聊天补全的模型名用 getChatCompletionModel 取)。未连接时为 no_connection。
+   */
+  onlineStatus?: string;
+  /** 主界面当前使用的 API 类型:openai(聊天补全)、textgenerationwebui(文本补全)、kobold、novel 等。 */
+  mainApi?: string;
+  /** 聊天补全当前选中的模型名(按当前补全来源取对应字段)。ST 1.12.13 起提供。 */
+  getChatCompletionModel?: (settings?: unknown) => string | null | undefined;
   /** 执行斜杠命令(如 /hide 0-3)。ST 稳定 API。 */
   executeSlashCommandsWithOptions?: (command: string, options?: Record<string, unknown>) => Promise<unknown>;
   /**
@@ -165,6 +175,26 @@ export function getContext(): STContext | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * 主界面当前使用的模型名;取不到返回空串。
+ * 聊天补全读 getChatCompletionModel(onlineStatus 在这里只是「Valid」等状态文字);
+ * 文本补全、KoboldAI 等读 onlineStatus,其中多为模型名。
+ */
+export function mainApiModelName(ctx: STContext | null = getContext()): string {
+  if (!ctx) return '';
+  if (ctx.mainApi === 'openai') {
+    try {
+      const model = ctx.getChatCompletionModel?.();
+      if (typeof model === 'string' && model.trim()) return model.trim();
+    } catch {
+      /* 来源未知时 ST 会报错,按取不到处理 */
+    }
+    return '';
+  }
+  const status = typeof ctx.onlineStatus === 'string' ? ctx.onlineStatus.trim() : '';
+  return status === 'no_connection' ? '' : status;
 }
 
 /**

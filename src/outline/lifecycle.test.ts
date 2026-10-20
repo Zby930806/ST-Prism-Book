@@ -152,8 +152,10 @@ describe('大纲双向讨论与显式修订', () => {
     completion.mockResolvedValueOnce('<think>不应显示</think>可以让角色先核实消息，不必立即同意。');
     expect(await sendOutlineDiscussion('这里是否过于配合？', 'active')).toBe(true);
     expect(discussionState.messages).toEqual([
-      { role: 'user', content: '这里是否过于配合？' }, { role: 'assistant', content: '可以让角色先核实消息，不必立即同意。' },
+      { role: 'user', content: '这里是否过于配合？', at: expect.any(Number) },
+      { role: 'assistant', content: '可以让角色先核实消息，不必立即同意。', at: expect.any(Number) },
     ]);
+    expect(discussionState.messages[0].at!).toBeLessThanOrEqual(discussionState.messages[1].at!);
     expect(ctx.chatMetadata[DISCUSSION_DATA_KEY]).toBeDefined();
     expect(saved()).toEqual(before); expect(ctx.chat).toEqual(chat); expect(buildOutlineInjection()).toBe(injection);
     const firstInput = completion.mock.calls[0][1];
@@ -164,6 +166,8 @@ describe('大纲双向讨论与显式修订', () => {
     completion.mockResolvedValueOnce('也可以暂缓答复，取决于她已有的顾虑。');
     expect(await sendOutlineDiscussion('能否再慢一点？', 'active')).toBe(true);
     expect(completion.mock.calls[1][1]).toContainEqual({ role: 'assistant', content: '可以让角色先核实消息，不必立即同意。' });
+    // 时间只用于显示，不发给模型。
+    expect(completion.mock.calls[1][1].every(message => !('at' in message))).toBe(true);
     expect(discussionState.messages).toHaveLength(4);
     expect(saved()).toEqual(before);
   });

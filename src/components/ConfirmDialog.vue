@@ -114,14 +114,5 @@ function confirm() {
 .bbs-modal-foot-spacer {
   flex: 1 1 auto;
 }
-/* 危险操作按钮:描边低调,hover 才显红,避免误触 */
-.bbs-btn-danger {
-  color: var(--bbs-danger);
-  border-color: var(--bbs-line-strong);
-}
-.bbs-btn-danger:hover {
-  color: var(--bbs-danger);
-  border-color: var(--bbs-danger);
-  background: var(--bbs-danger-soft);
-}
+/* 危险按钮 .bbs-btn-danger 在 base.css 统一定义。 */
 </style>

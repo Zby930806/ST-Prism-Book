@@ -9,7 +9,11 @@ import { sourceHash, sameChat, latestStoryFloor } from './source';
 import { noteText, parseQuestions } from './protocol';
 import { stripThinkBlocks } from '@/memory/timeTag';
 import { buildNotesContext } from './context';
-export const notesRun = reactive({ busy:false, draft:'', error:'', errorDetail:'', status:'' });
+/**
+ * floor:最近一次生成针对的楼层(进行中或刚结束),聊天里的札记卡片据此在对应楼层显示进度和结果;
+ * 生成前的检查没通过时为 null。storyBusy:正文正在生成,这期间不能生成札记。
+ */
+export const notesRun = reactive({ busy:false, draft:'', error:'', errorDetail:'', status:'', floor:null as number|null, storyBusy:false });
 export const NOTES_INJECT_KEY = 'prism_book_notes_confirmed';
 const NOTES_SETTINGS_PATH = '札记 → 独立 API 设置';
 /** 这些是札记自己写的说明,可以原样展示;其余异常可能带上游原文,只给分类后的说明。 */
@@ -26,7 +30,10 @@ let generationBusy=false, autoAllowed=false, rendered=false, bound=false;
 let timer: ReturnType<typeof setTimeout> | undefined;
 let dispose: (()=>void) | undefined;
 export function cancelNotes(): void {
-  runId++; stillCurrent=undefined; controller?.abort(); controller=undefined; notesRun.busy=false; notesRun.draft=''; notesRun.status='已取消，原有札记没有变动。';
+  // 正文每次开始生成都会调用这里;没有札记在生成时不写「已取消」,免得界面上出现没发生过的取消
+  const wasBusy=notesRun.busy;
+  runId++; stillCurrent=undefined; controller?.abort(); controller=undefined; notesRun.busy=false; notesRun.draft='';
+  if (wasBusy) notesRun.status='已取消，原有札记没有变动。';
 }
 export function buildConfirmedInjection(): string {
   if (!notesSettings.enabled || !notesSettings.injectConfirmed || settingsIssue.value || !engineActiveHere()) return '';
@@ -41,7 +48,7 @@ export function refreshNotesInjection(): void {
 }
 export async function generateNotes(force=false): Promise<void> {
   if (notesRun.busy) return;
-  notesRun.error=''; notesRun.errorDetail=''; notesRun.status=''; notesRun.draft='';
+  notesRun.error=''; notesRun.errorDetail=''; notesRun.status=''; notesRun.draft=''; notesRun.floor=null;
   let own=0;
   try {
     if (!notesSettings.enabled) throw new Error('请先打开「启用双子札记」。');
@@ -51,6 +58,7 @@ export async function generateNotes(force=false): Promise<void> {
     const ctx=getContext(); if (!ctx || !ctx.getCurrentChatId()) throw new Error('请先打开一个已保存的聊天。');
     const storageIssue=notesWriteIssue(); if (storageIssue) throw new Error(storageIssue);
     const floor=latestStoryFloor(ctx); if (floor<0) throw new Error('当前聊天还没有可以写札记的正文。');
+    notesRun.floor=floor;
     const hash=sourceHash(ctx,floor), allHash=sourceHash(ctx,ctx.chat.length-1), count=ctx.chat.length, chatId=ctx.getCurrentChatId();
     if (!force && notesState.records.some(r=>r.floor===floor && r.sourceHash===hash)) { notesRun.status='这段正文已经有札记了；想要另一版请点「重新生成」。'; return; }
     const revision=notesState.revision;
@@ -95,15 +103,15 @@ export function bindNotesLifecycle(): void {
   const handlers: Array<[string,(...args:any[])=>void]>=[];
   const on=(name:string,fn:(...args:any[])=>void)=>{const event=ctx.eventTypes[name]; if(event){ctx.eventSource.on(event,fn); handlers.push([event,fn]);}};
   const clearTimer=()=>{if(timer)clearTimeout(timer);timer=undefined;};
-  on('CHAT_CHANGED',()=>{clearTimer();cancelNotes();generationBusy=false;autoAllowed=false;loadNotes();notesRun.status='';notesRun.error='';notesRun.errorDetail='';refreshNotesInjection();});
+  on('CHAT_CHANGED',()=>{clearTimer();cancelNotes();generationBusy=false;notesRun.storyBusy=false;autoAllowed=false;loadNotes();notesRun.status='';notesRun.error='';notesRun.errorDetail='';notesRun.floor=null;refreshNotesInjection();});
   on('GENERATION_STARTED',(type:unknown,_options:unknown,dryRun?:boolean)=>{
     if (dryRun || type==='quiet' || type==='impersonate') return;
-    clearTimer();cancelNotes();generationBusy=true;rendered=false;autoAllowed=type==null || ['normal','regenerate','swipe','continue'].includes(String(type));refreshNotesInjection();
+    clearTimer();cancelNotes();generationBusy=true;notesRun.storyBusy=true;rendered=false;autoAllowed=type==null || ['normal','regenerate','swipe','continue'].includes(String(type));refreshNotesInjection();
   });
   on('CHARACTER_MESSAGE_RENDERED',(_floor:unknown,type:unknown)=>{if(autoAllowed && type!=='quiet' && type!=='impersonate' && type!=='first_message')rendered=true;});
-  on('GENERATION_STOPPED',()=>{clearTimer();generationBusy=false;autoAllowed=false;rendered=false;});
+  on('GENERATION_STOPPED',()=>{clearTimer();generationBusy=false;notesRun.storyBusy=false;autoAllowed=false;rendered=false;});
   on('GENERATION_ENDED',()=>{
-    const eligible=autoAllowed && rendered;autoAllowed=false;rendered=false;generationBusy=false;
+    const eligible=autoAllowed && rendered;autoAllowed=false;rendered=false;generationBusy=false;notesRun.storyBusy=false;
     if (!eligible || !notesSettings.enabled || !notesSettings.autoGenerate || !engineActiveHere()) return;
     const source=getContext(); if(!source)return; const chatId=source.getCurrentChatId(), count=source.chat.length, hash=sourceHash(source,count-1);
     clearTimer(); timer=setTimeout(()=>{timer=undefined;if(notesSettings.enabled && notesSettings.autoGenerate && engineActiveHere() && sameChat(source) && getContext()?.getCurrentChatId()===chatId && source.chat.length===count && sourceHash(source,count-1)===hash)void generateNotes();},500);

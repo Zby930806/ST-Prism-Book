@@ -63,8 +63,11 @@ describe('摘要树有界视图（仅合成数据）', () => {
 // 样式约束直接验证页面 scoped CSS，避免全局主题已清理而局部又恢复模糊。
 describe('摘要页局部渲染约束', () => {
   it('scoped 样式无模糊、装饰渐变或变量驱动的大阴影', async () => {
-    const { readFile } = await import('node:fs/promises');
-    for (const name of ['index.vue', 'SummaryNode.vue', 'SummaryPager.vue']) {
+    const { readFile, readdir } = await import('node:fs/promises');
+    // 摘要页拆成多个组件，逐个检查本目录下的全部 .vue。
+    const names = (await readdir(new URL('.', import.meta.url))).filter(n => n.endsWith('.vue'));
+    expect(names).toEqual(expect.arrayContaining(['index.vue', 'SummaryNode.vue', 'SummaryPager.vue', 'SituationSection.vue']));
+    for (const name of names) {
       const source = await readFile(new URL(name, import.meta.url), 'utf8');
       const css = source.slice(source.indexOf('<style'));
       expect(css).not.toMatch(/backdrop-filter|blur\(|gradient\(|box-shadow:\s*var\(/);

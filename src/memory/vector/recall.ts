@@ -1,4 +1,4 @@
-import { fitMemoryUnits, estimateTokens, slotBudget } from '../budget';
+import { BUDGET_NOTICE, estimateTokens, slotBudget } from '../budget';
 /**
  * 阻塞式向量召回:生成主回复前,按用户输入 + 近期上下文检索相关旧记忆,注入主对话。
  *
@@ -9,7 +9,7 @@ import { fitMemoryUnits, estimateTokens, slotBudget } from '../budget';
  *     纯按 embedding 得分取前 rerankCandidates 条(不套阈值)。
  *  3. rerank 候选(用 INTENT 作 query;渠道未配则降级:跳过 rerank,用 embedding 序)。
  *  4. 分档:全文档(rerank≥阈值,取前 fullTextCount,发原文 mes_full)/ 摘要档(embedding≥阈值,发 document)。
- *  5. 按 leaf_id 去重 + 排除当前窗口内已全文的叶子 → 拼注入文本 → setExtensionPrompt。
+ *  5. 按 leaf_id 去重 + 排除当前窗口内已全文的叶子 → 放进召回预算(原文放不下改发摘要)→ 拼注入文本 → setExtensionPrompt。
  *
  * 失败/未配置全程静默降级(清空注入槽),向量是增强项,绝不阻断生成。
  */
@@ -33,6 +33,8 @@ import { normalizeRecallInjectionDepth } from './depth';
 import { RECALL_CACHE_STORAGE_KEY } from './cache';
 import {
   previewOf,
+  RECALL_DONE_NONE_PASSED,
+  RECALL_DONE_OVER_BUDGET,
   resetRecallDebug,
   restoreRecallDebug,
   setRecallEmbedding,
@@ -165,7 +167,8 @@ function recallParamFingerprint(cfg: typeof apiSettings.vector.recall): string {
     cfg.keywordRoute === true,
     cfg.presentBoost === true,
     cfg.stickyTurns ?? 0,
-    "prompt-v2",
+    // 拼注入文本的规则变了就换标记,让旧缓存失效(v3:原文放不下改发摘要,不注入空框)
+    "prompt-v3",
   ].join(',');
 }
 
@@ -471,12 +474,12 @@ async function executeRecall(run: RecallRun, cfg: typeof apiSettings.vector.reca
     const pool: RankedHit[] = stickyTurns > 0
       ? [...ranked, ...stickyCandidates(run.chatId, exclude, new Set(ranked.map(h => h.leafId)))]
       : ranked;
-    const { text, tiers } = buildRecallText(pool, cfg, selfScope, latestStoryTime(chat));
+    const { text, tiers, cut, downgraded } = buildRecallText(pool, cfg, selfScope, latestStoryTime(chat));
     assertRecallCurrent(run);
-    recordRerankDebug(pool, tiers, selfScope);
+    recordRerankDebug(pool, tiers, selfScope, cut, downgraded);
     inject(text);
     setRecallInjected(text);
-    setRecallStatus(text ? '召回完成' : '召回完成:无内容达标,本回合未注入');
+    setRecallStatus(text ? '召回完成' : cut.size ? RECALL_DONE_OVER_BUDGET : RECALL_DONE_NONE_PASSED);
     assertRecallCurrent(run);
     updateSticky(run.chatId, pool, tiers, stickyTurns);
     if (cacheKey) saveRecallCache({ key: cacheKey, text, debug: snapshotRecallDebug() });
@@ -494,11 +497,16 @@ async function executeRecall(run: RecallRun, cfg: typeof apiSettings.vector.reca
   }
 }
 
-/** 把分档结果写入调试快照:按 leaf_id 去重(保留首条),tier 取 buildRecallText 标记,缺省 drop。 */
+/**
+ * 把分档结果写入调试快照:按 leaf_id 去重(保留首条),tier 取 buildRecallText 标记;
+ * 达标却放不进预算的记为 cut,其余缺省 drop。
+ */
 function recordRerankDebug(
   ranked: RankedHit[],
   tiers: Map<string, 'full' | 'brief'>,
   selfScope: string | null,
+  cut: Set<string>,
+  downgraded: Set<string>,
 ): void {
   const seen = new Set<string>();
   const hits: RecallDebugRerankHit[] = [];
@@ -509,7 +517,8 @@ function recordRerankDebug(
       leafId: h.leafId,
       rerankScore: h.rerankScore,
       similarity: h.similarity,
-      tier: tiers.get(h.leafId) ?? 'drop',
+      tier: tiers.get(h.leafId) ?? (cut.has(h.leafId) ? 'cut' : 'drop'),
+      ...(downgraded.has(h.leafId) ? { downgraded: true } : {}),
       source: sourceLabel(h, selfScope),
       storyTime: compactTimeLabel((h.storyTime || '').trim()),
       preview: previewOf(h.document),
@@ -590,6 +599,27 @@ async function rerankCandidates<T extends VecHit>(query: string, hits: T[], run:
   }
 }
 
+/** 选中要注入的一段:选定的档,以及原文放不进预算时改发的摘要。 */
+interface RecallPick {
+  hit: RankedHit;
+  tier: 'full' | 'brief';
+  /** 全文档的原文段落(摘要档没有) */
+  full?: string;
+  /** 这一条的摘要段落;摘要为空时为空串 */
+  brief: string;
+}
+
+/** buildRecallText 的结果:注入文本,以及每条候选最后的去向(供调试面板和保留轮数使用)。 */
+export interface RecallTextResult {
+  text: string;
+  /** 实际注入的段落及其档(含原文放不下、改发摘要的) */
+  tiers: Map<string, 'full' | 'brief'>;
+  /** 达到阈值、但原文和摘要都放不进召回预算,没有注入 */
+  cut: Set<string>;
+  /** 达到全文档、原文放不进召回预算,改发了摘要 */
+  downgraded: Set<string>;
+}
+
 /**
  * 按分档规则拼注入文本:
  *  - 全文档:rerankScore ≥ rerankThreshold,取前 fullTextCount,发 mes_full(无则退 document)。
@@ -597,59 +627,87 @@ async function rerankCandidates<T extends VecHit>(query: string, hits: T[], run:
  *    关键词命中的段落没有可信的相似度,改看 rerank:rerank 分达到全文阈值一半即可(rerank 不可用时直接放行);
  *    上一轮保留的段落(route=sticky)排在最后,只在有空位时以摘要补入。
  *  - 总数 ≤ finalRecallCount;按 leaf_id 去重(已在后端跨 scope 合并,这里再兜底)。
- *
- * 返回拼好的注入文本 + 每条被采纳叶子的分档(full/brief),供调试面板标注 tier。
+ *  - 放进召回预算(记忆注入预算的召回份额):原文放不下时改发这一条的摘要,摘要也放不下才不注入。
  */
 export function buildRecallText(
   ranked: RankedHit[],
   cfg: typeof apiSettings.vector.recall,
   selfScope: string | null,
   now: string,
-): { text: string; tiers: Map<string, 'full' | 'brief'> } {
+): RecallTextResult {
   const seen = new Set<string>();
-  const tiers = new Map<string, 'full' | 'brief'>();
-  const fullChunks: string[] = [];
-  const briefChunks: string[] = [];
-  const fullIds: string[] = [];
-  const briefIds: string[] = [];
+  const picks: RecallPick[] = [];
   let fullUsed = 0;
 
   for (const h of ranked) {
     if (seen.size >= cfg.finalRecallCount) break;
     if (seen.has(h.leafId)) continue;
 
+    const doc = (h.document || '').trim();
+    // 摘要档无内嵌时间,补 【(相对) 区间】头
+    const brief = doc ? fmtChunk(h, doc, false, selfScope, now) : '';
     const isFull = h.route !== 'sticky' && h.rerankScore >= cfg.rerankThreshold && fullUsed < cfg.fullTextCount;
     if (isFull) {
       // 全文档优先发 mesFull(原文,过 cleanBody 清洗后已含内嵌起止时间),无则退 document
       const cleanFull = h.mesFull ? cleanBody(h.mesFull).trim() : '';
-      const useMesFull = !!cleanFull;
-      const body = cleanFull || (h.document || '').trim();
+      const body = cleanFull || doc;
       if (!body) continue;
       seen.add(h.leafId);
-      tiers.set(h.leafId, 'full');
       fullUsed++;
       // mesFull 自带 (起始时间…)/(结束时间…),不再加 【】头避免时间重复;退到 document 时才补头
-      fullIds.push(h.leafId);
-      fullChunks.push(fmtChunk(h, body, useMesFull, selfScope, now));
+      picks.push({ hit: h, tier: 'full', full: fmtChunk(h, body, !!cleanFull, selfScope, now), brief });
     } else if (briefEligible(h, cfg)) {
-      const body = (h.document || '').trim();
-      if (!body) continue;
+      if (!brief) continue;
       seen.add(h.leafId);
-      tiers.set(h.leafId, 'brief');
-      briefIds.push(h.leafId);
-      briefChunks.push(fmtChunk(h, body, false, selfScope, now)); // 摘要档无内嵌时间,补 【(相对) 区间】头
+      picks.push({ hit: h, tier: 'brief', brief });
     }
     // 两档都不达标:丢弃
   }
+  return fitRecallPicks(picks);
+}
 
-  const chunks = [...fullChunks, ...briefChunks];
-  if (!chunks.length) return { text: '', tiers };
+/**
+ * 把选中的段落放进召回预算:全文档在前、摘要档在后,各按重排顺序。
+ * 全部放得下就原样注入;放不下时逐条放,原文放不下改发这一条的摘要(排在摘要档最前),
+ * 摘要也放不下才不注入,并在末尾附预算提示。一段都放不下时不注入,不留只有说明文字的空框。
+ */
+function fitRecallPicks(picks: RecallPick[]): RecallTextResult {
+  const result: RecallTextResult = { text: '', tiers: new Map(), cut: new Set(), downgraded: new Set() };
+  if (!picks.length) return result;
+  const limit = slotBudget('recall');
   // 首尾私密简报框定,避免主模型把召回回忆当成要复述/输出的模板
-  const fitted = fitMemoryUnits(chunks, 'recall', `${MEMORY_BRIEFING_NOTE}\n[相关回忆]`, MEMORY_BRIEFING_END);
-  const ids = [...fullIds, ...briefIds];
-  const kept = new Set(fitted.indices.map(i => ids[i]));
-  for (const id of tiers.keys()) if (!kept.has(id)) tiers.delete(id);
-  return { text: fitted.text, tiers };
+  const render = (units: string[], omitted: boolean) =>
+    [`${MEMORY_BRIEFING_NOTE}\n[相关回忆]`, ...units, omitted ? BUDGET_NOTICE : '', MEMORY_BRIEFING_END].filter(Boolean).join('\n\n');
+  const fits = (units: string[], omitted: boolean) => estimateTokens(render(units, omitted)) <= limit;
+  const ordered = [...picks.filter(p => p.tier === 'full'), ...picks.filter(p => p.tier === 'brief')];
+
+  const preferred = ordered.map(p => (p.tier === 'full' ? p.full! : p.brief));
+  if (fits(preferred, false)) {
+    for (const p of ordered) result.tiers.set(p.hit.leafId, p.tier);
+    result.text = render(preferred, false);
+    return result;
+  }
+  // 逐条放时为预算提示留出位置
+  const full: string[] = [];
+  const fallback: string[] = [];
+  const brief: string[] = [];
+  const kept = () => [...full, ...fallback, ...brief];
+  for (const p of ordered) {
+    const id = p.hit.leafId;
+    if (p.tier === 'full' && fits([...kept(), p.full!], true)) {
+      full.push(p.full!);
+      result.tiers.set(id, 'full');
+    } else if (p.brief && fits([...kept(), p.brief], true)) {
+      (p.tier === 'full' ? fallback : brief).push(p.brief);
+      result.tiers.set(id, 'brief');
+      if (p.tier === 'full') result.downgraded.add(id);
+    } else {
+      result.cut.add(id);
+    }
+  }
+  const units = kept();
+  if (units.length) result.text = render(units, result.cut.size > 0);
+  return result;
 }
 
 /**

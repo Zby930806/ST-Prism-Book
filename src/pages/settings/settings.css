@@ -1,0 +1,240 @@
+/*
+ * 设置页共享样式：两个以上卡片或弹窗共用的部件（字段、开关行、数字行、复选框、名单药丸、弹窗尺寸等）。
+ *
+ * 不用 scoped：子组件里的元素不带页面的 data-v 属性。每条选择器前加一个类作前缀——
+ * .prism-settings（页面根节点）或 .prism-settings-modal（设置页弹窗的 .bbs-modal 根节点），
+ * 与原先 scoped 写法多出的那个属性选择器特异度相同，层叠结果不变。
+ * 由 index.vue 最先导入，排在各卡片的 scoped 样式之前：卡片里同特异度的局部调整总能覆盖这里。
+ * 只在一个组件里用到的样式写在该组件自己的 scoped 样式里。
+ */
+
+/* —— 字段：标签 + 控件 + 说明 —— */
+.prism-settings .bbs-field {
+  margin-bottom: 18px;
+}
+.prism-settings .bbs-field:last-child {
+  margin-bottom: 0;
+}
+.prism-settings .bbs-field-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.prism-settings .bbs-field-label {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.6;
+  color: var(--bbs-ink);
+  overflow-wrap: anywhere;
+}
+
+/* 卡片内的操作条：左侧标签，右侧按钮（渠道、排除名单） */
+.prism-settings .bbs-channel-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+/* 输入框 + 右侧图标按钮（密钥显示、拉取模型，用共享 IconButton），渠道弹窗与向量端点共用 */
+:is(.prism-settings, .prism-settings-modal) .bbs-model-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+:is(.prism-settings, .prism-settings-modal) .bbs-model-row .bbs-input {
+  flex: 1;
+}
+
+/* —— 设置行：开关行与数字行（SettingRow 渲染，也用于渠道弹窗里的开关） —— */
+:is(.prism-settings, .prism-settings-modal) :is(.bbs-switch-row, .bbs-num-row) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-height: 46px;
+  padding: 8px 0;
+}
+:is(.prism-settings, .prism-settings-modal) .bbs-checkbox {
+  /* flex 行里长文本会把固定宽高的复选框挤扁 → 禁止收缩,保持标准方形 */
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  accent-color: var(--bbs-accent);
+  cursor: pointer;
+}
+.prism-settings .bbs-num {
+  max-width: 110px;
+  text-align: right;
+}
+
+/* 向量端点折叠头与「索引维护」标题行共用 */
+.prism-settings .bbs-vec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+/* —— 输入框 + 添加按钮一行（条目名过滤、清洗标签） —— */
+.prism-settings .bbs-striptag-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+.prism-settings .bbs-striptag-bar .bbs-input {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+.prism-settings .bbs-striptag-bar .bbs-btn {
+  flex: none;
+}
+
+/* —— 名单药丸：已排除的名字、条目规则、清洗标签，点 × 移出 —— */
+.prism-settings .bbs-exclude-chips {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.prism-settings .bbs-exclude-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 0 0 0 12px;
+  border-radius: var(--bbs-radius-pill);
+  background: var(--bbs-accent-soft);
+  color: var(--bbs-accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+.prism-settings .bbs-exclude-chip-name {
+  min-width: 0;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.prism-settings .bbs-exclude-chip-x {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+}
+.prism-settings .bbs-exclude-chip-x:hover {
+  background: var(--bbs-surface);
+}
+@media (max-width: 640px), (pointer: coarse) {
+  .prism-settings .bbs-exclude-chip { min-height: 40px; }
+  .prism-settings .bbs-exclude-chip-x { width: 40px; height: 40px; }
+}
+
+/* —— 停用状态：控件停用时同一行的标签改为次要色（停用输入框的浅底与次要色文字由 base.css 的 .bbs-input:disabled 提供），
+   不降整体透明度，保证文字对比度。 —— */
+.prism-settings :is(.bbs-switch-row, .bbs-num-row):has(> :disabled) > .bbs-field-label {
+  color: var(--bbs-ink-muted);
+}
+
+/* —— 详细说明：长说明只露一句要点，其余收在这里（SettingRow 的 details）。 —— */
+.prism-settings .prism-hint-more {
+  margin: -8px 0 12px;
+}
+.prism-settings .prism-hint-more > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  color: var(--bbs-accent);
+  font-size: 12px;
+  font-weight: 550;
+  list-style: none;
+  cursor: pointer;
+}
+.prism-settings .prism-hint-more > summary::-webkit-details-marker { display: none; }
+.prism-settings .prism-hint-more > summary::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  margin: 0 0 2px 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+}
+.prism-settings .prism-hint-more[open] > summary::after { margin: 3px 0 0 2px; transform: rotate(-135deg); }
+.prism-settings .prism-hint-more > .bbs-field-hint { margin: 0; }
+@media (max-width: 640px), (pointer: coarse) {
+  .prism-settings .prism-hint-more > summary { min-height: 40px; }
+}
+
+/* ============ 移动端:折叠区内部正文整体收一号,与窄屏标题节奏统一 ============ */
+@media (max-width: 640px) {
+  .prism-settings .bbs-field-label {
+    font-size: 13px;
+  }
+}
+
+/* —— 卡片开头的说明与行内结果提示 —— */
+.prism-settings .prism-card-intro {
+  margin: 0 0 16px;
+  padding: 0 0 14px;
+  border-bottom: 1px solid var(--bbs-line);
+  color: var(--bbs-ink-soft);
+  font-size: 12.5px;
+  line-height: 1.8;
+}
+.prism-settings .prism-inline-notice { margin: 8px 0 0; font-size: 12.5px; }
+.prism-settings :is(.bbs-switch-row, .bbs-num-row) > .bbs-field-label { min-width: 0; flex: 1 1 auto; }
+.prism-settings .bbs-switch-row > .bbs-input:not([type='checkbox']) { flex: 0 1 240px; width: 48%; min-width: 0; }
+.prism-settings .bbs-num-row > .bbs-num { flex: 0 0 110px; width: 110px; }
+:is(.prism-settings, .prism-settings-modal) .bbs-model-row > .bbs-input { width: 0; min-width: 0; }
+:is(.prism-settings, .prism-settings-modal) .bbs-modal-field > .bbs-modal-label { line-height: 1.6; }
+
+/* —— 设置页弹窗（渠道、提示词、排除名单）：宽度不超过可用宽度；.bbs-modal-wide 必须排在 .bbs-modal 之后。 —— */
+.prism-settings-modal .bbs-modal-foot-spacer {
+  flex: 1 1 auto;
+}
+.bbs-modal.prism-settings-modal { min-width: 0; max-width: min(100%, 520px); }
+.bbs-modal-wide.prism-settings-modal { max-width: min(100%, 680px); }
+.prism-settings-modal .bbs-modal-head { gap: 12px; }
+.prism-settings-modal .bbs-modal-title { min-width: 0; overflow-wrap: anywhere; }
+.prism-settings-modal .bbs-modal-foot { flex-wrap: wrap; gap: 8px; }
+.bbs-modal.prism-settings-modal .bbs-input { min-width: 0; max-width: 100%; }
+.bbs-modal.prism-settings-modal :is(button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--bbs-accent);
+  outline-offset: 3px;
+}
+
+@container prism-settings (max-width: 520px) {
+  .prism-settings :is(.bbs-switch-row, .bbs-num-row) { gap: 12px; }
+  .prism-settings .bbs-switch-row:has(> .bbs-input:not([type='checkbox'])) { align-items: stretch; flex-direction: column; }
+  .prism-settings .bbs-switch-row > .bbs-input:not([type='checkbox']) { flex: initial; width: 100%; }
+  .prism-settings .bbs-num-row > .bbs-num { width: 88px; flex-basis: 88px; }
+}
+@media (max-width: 420px) {
+  .bbs-modal.prism-settings-modal { padding: 16px; }
+  .prism-settings-modal .bbs-modal-head { top: -16px; margin: -16px -16px 0; padding: 16px 16px 12px; }
+  .prism-settings-modal .bbs-modal-foot .bbs-modal-foot-spacer { display: none; }
+  .prism-settings-modal .bbs-modal-foot .bbs-btn { flex: 1 1 auto; justify-content: center; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bbs-modal.prism-settings-modal * { transition: none !important; }
+}

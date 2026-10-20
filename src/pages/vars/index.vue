@@ -7,8 +7,11 @@
  * 值永远每聊天独立(从各聊天叶子的 varOps 重放);改模板不需摘要,改「当前值」需要有摘要(写最新叶子)。
  */
 import Icon from '@/components/Icon.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SegmentedControl from '@/components/SegmentedControl.vue';
 import PageHeader from '@/components/PageHeader.vue';
-import ModalMask from '@/components/ModalMask.vue';
+import ModalShell from '@/components/ModalShell.vue';
+import StatRow from '@/components/StatRow.vue';
 import JsonTreeEditor from '@/components/JsonTreeEditor.vue';
 import { currentCharKey } from '@/api/settings';
 import { mergeTemplates, setVarsRoot } from '@/memory/apply';
@@ -21,6 +24,15 @@ import { computed, ref, watch } from 'vue';
 const hasLeaf = computed(() => derivedMeta.hasLeaf);
 // rev 每次重算派生(含切聊天/切角色)自增,借它让「是否有角色」「当前状态」随之刷新
 const charAvailable = computed(() => { void derivedMeta.rev; return currentCharKey() !== null; });
+/** 作用范围选项：角色层在群聊或未进入角色时不可选。withHint 为 true 时带第二行说明。 */
+function tierOptions(withHint: boolean) {
+  return TIER_ORDER.map(t => ({
+    value: t,
+    label: TIER_META[t].label,
+    hint: withHint ? TIER_META[t].hint : undefined,
+    disabled: t === 'char' && !charAvailable.value,
+  }));
+}
 
 const TIER_META: Record<VarTier, { label: string; hint: string }> = {
   global: { label: '全局', hint: '所有角色所有聊天共享初始模板' },
@@ -28,6 +40,10 @@ const TIER_META: Record<VarTier, { label: string; hint: string }> = {
   chat: { label: '聊天', hint: '仅当前聊天' },
 };
 const TIER_ORDER: VarTier[] = ['global', 'char', 'chat'];
+const MODE_OPTIONS: { value: 'tree' | 'source'; label: string }[] = [
+  { value: 'tree', label: '结构' },
+  { value: 'source', label: '源码' },
+];
 
 /** 解析成 JSON 对象(根须是对象);失败返回 null。 */
 function parseObj(text: string): Record<string, JsonValue> | null {
@@ -62,7 +78,7 @@ function openEditState() {
 function saveState() {
   const json = parseObj(stateEdit.value);
   if (!json) { stateEditErr.value = 'JSON 无效或根不是对象 {…}'; return; }
-  if (!setVarsRoot(json)) { stateEditErr.value = '保存失败：要先有摘要才能写入。'; return; }
+  if (!setVarsRoot(json)) { stateEditErr.value = '保存失败：需先有摘要才能写入。'; return; }
   refreshInjection();
   editStateOpen.value = false;
 }
@@ -100,7 +116,7 @@ function switchMode(m: 'tree' | 'source') {
   if (m === editorMode.value) return;
   if (m === 'tree') {
     const obj = parseObj(editorJson.value);
-    if (!obj) { jsonError.value = '源码 JSON 不对，改好后才能切到结构视图。'; return; }
+    if (!obj) { jsonError.value = '源码 JSON 无效，修正后才能切换到结构视图。'; return; }
     editorTree.value = obj;
     jsonError.value = '';
   } else {
@@ -156,7 +172,7 @@ async function copyExport() {
     await navigator.clipboard.writeText(exportText.value);
     toast('已复制到剪贴板', 'success');
   } catch {
-    toast('复制失败，请在框里手动选中复制。', 'error');
+    toast('复制失败，请在文本框中手动选中并复制。', 'error');
   }
 }
 function downloadExport() {
@@ -177,7 +193,7 @@ function onImportFile(e: Event) {
 }
 function applyImport() {
   let parsed: unknown;
-  try { parsed = JSON.parse(importText.value); } catch { toast('JSON 格式不对，解析失败，请检查。', 'error'); return; }
+  try { parsed = JSON.parse(importText.value); } catch { toast('JSON 格式有误，解析失败，请检查。', 'error'); return; }
   // 接受 {json,meaning,rule} 包裹(兼容旧 guide → 并入 rule),或裸对象(当作 json)
   let json: Record<string, JsonValue> = {};
   let meaning = '';
@@ -193,7 +209,7 @@ function applyImport() {
       json = o as Record<string, JsonValue>; // 裸对象
     }
   }
-  if (!Object.keys(json).length && !meaning.trim() && !rule.trim()) { toast('没解析到可导入的结构', 'error'); return; }
+  if (!Object.keys(json).length && !meaning.trim() && !rule.trim()) { toast('未解析到可导入的结构', 'error'); return; }
   let tier = importTier.value;
   if (tier === 'char' && !charAvailable.value) tier = 'chat';
   const cur = memory.varTemplates[tier];
@@ -209,28 +225,25 @@ function applyImport() {
 </script>
 
 <template>
-  <section class="bbs-page">
+  <section class="bbs-page bbs-ledger">
     <PageHeader icon="vars" title="变量" description="自定义变量的当前值，以及它们的初始结构和变化规则（模板）。">
       <template #actions>
         <button class="bbs-btn" type="button" :disabled="!hasAnyTemplate" title="导出模板（分享）" @click="openExport"><Icon name="upload" />导出模板</button>
         <button class="bbs-btn" type="button" title="导入模板" @click="openImport"><Icon name="download" />导入模板</button>
       </template>
     </PageHeader>
-    <div class="bbs-ledger-meta">
-      <span><strong>{{ Object.keys(memory.vars).length }}</strong>个当前顶层字段</span>
-      <span class="bbs-ledger-note">当前值按聊天独立保存</span>
-    </div>
+    <StatRow label="变量概览" :items="[{ value: Object.keys(memory.vars).length, label: '个当前顶层字段' }]" note="当前值按聊天独立保存" />
 
     <!-- 当前状态：读取面板与模板编辑明确分区。 -->
     <section class="bbs-var-state" aria-labelledby="bbs-vars-state-heading">
     <div class="bbs-var-blockhead">
       <div class="bbs-var-section-title"><h2 id="bbs-vars-state-heading" class="bbs-var-sub">当前状态</h2></div>
-      <button class="bbs-mini-btn" type="button" :disabled="!hasLeaf" title="手动编辑整份 JSON" @click="openEditState">
+      <button class="bbs-btn bbs-btn-sm" type="button" :disabled="!hasLeaf" title="手动编辑整份 JSON" @click="openEditState">
         <Icon name="edit" />编辑
       </button>
     </div>
     <pre v-if="hasState" class="bbs-json-view" tabindex="0" aria-label="当前变量 JSON 状态">{{ stateJson }}</pre>
-    <div v-else class="bbs-var-emptyline"><Icon name="vars" /><div><h3>暂无变量</h3><p>可在下方定义初始模板，也可由 AI 在剧情中自行创建（如势力、关系）。</p></div></div>
+    <EmptyState v-else compact icon="vars" title="暂无变量" text="可在下方定义初始模板，也可由 AI 在剧情中自行创建（如势力、关系）。" />
     <p v-if="!hasLeaf" class="bbs-modal-hint bbs-var-statehint">生成摘要后才能修改当前值；当前显示的是初始状态。下方模板可随时修改。</p>
     </section>
 
@@ -238,41 +251,22 @@ function applyImport() {
     <section class="bbs-var-template" aria-labelledby="bbs-vars-template-heading">
     <div class="bbs-var-blockhead bbs-var-tmplhead">
       <div class="bbs-var-section-title"><h2 id="bbs-vars-template-heading" class="bbs-var-sub">初始模板与说明</h2></div>
-      <span class="bbs-var-scope">聊天 &gt; 角色 &gt; 全局</span>
     </div>
     <p class="bbs-modal-hint bbs-var-tmpltip">
-      初始结构 + 给 AI 的说明。三层合并（聊天 &gt; 角色 &gt; 全局）作为重放起点，AI 在剧情里用命令增删改。改初始值会影响整条聊天的当前值。
+      初始结构与给 AI 的说明。三层按「聊天 &gt; 角色 &gt; 全局」合并为重放起点，AI 在剧情中通过命令增删改。
     </p>
 
-    <div class="bbs-typegrid bbs-var-tierpick" aria-label="选择模板作用范围">
-      <button
-        v-for="t in TIER_ORDER"
-        :key="t"
-        class="bbs-typebtn"
-        :class="{ on: editorTier === t }"
-        :aria-pressed="editorTier === t"
-        type="button"
-        :disabled="t === 'char' && !charAvailable"
-        @click="switchTier(t)"
-      >
-        <span class="bbs-tier-name">{{ TIER_META[t].label }}</span><small>{{ TIER_META[t].hint }}</small>
-      </button>
-    </div>
-    <span class="bbs-modal-hint">
-      {{ editorTier === 'char' && !charAvailable ? '当前无单一角色（群聊/未进入），暂不能编辑角色层' : TIER_META[editorTier].hint }}
-    </span>
+    <SegmentedControl class="bbs-var-tierpick" :model-value="editorTier" :options="tierOptions(true)" label="选择模板作用范围" block @update:model-value="switchTier" />
+    <span v-if="editorTier === 'char' && !charAvailable" class="bbs-modal-hint">当前无单一角色（群聊或未进入角色），暂不能编辑角色层。</span>
 
     <div class="bbs-modal-field">
       <div class="bbs-jte-fieldhead">
-        <span class="bbs-modal-label">初始结构（可留空让 AI 从零建）</span>
-        <div class="bbs-mode-toggle" aria-label="模板编辑模式">
-          <button class="bbs-mode-btn" :class="{ on: editorMode === 'tree' }" :aria-pressed="editorMode === 'tree'" type="button" @click="switchMode('tree')">结构</button>
-          <button class="bbs-mode-btn" :class="{ on: editorMode === 'source' }" :aria-pressed="editorMode === 'source'" type="button" @click="switchMode('source')">源码</button>
-        </div>
+        <span class="bbs-modal-label">初始结构（可留空，由 AI 创建）</span>
+        <SegmentedControl :model-value="editorMode" :options="MODE_OPTIONS" label="模板编辑模式" @update:model-value="switchMode" />
       </div>
       <div v-if="editorMode === 'tree'" class="bbs-jte-wrap">
         <JsonTreeEditor v-model="editorTree" />
-        <p v-if="!Object.keys(editorTree).length" class="bbs-jte-empty">空结构。点「加字段」搭出想追踪的结构，或留空让 AI 在剧情里自建。</p>
+        <p v-if="!Object.keys(editorTree).length" class="bbs-jte-empty">空结构。使用「加字段」建立需要追踪的结构，或留空由 AI 在剧情中创建。</p>
       </div>
       <textarea v-else v-model="editorJson" class="bbs-input bbs-json-edit" aria-label="初始结构 JSON 源码" spellcheck="false" rows="7"></textarea>
       <span v-if="jsonError" class="bbs-json-err">{{ jsonError }}</span>
@@ -288,7 +282,7 @@ function applyImport() {
       ></textarea>
     </label>
     <label class="bbs-modal-field">
-      <span class="bbs-modal-label">变化规则（何时怎么改、可否新建；只发摘要 AI，不进正文，避免正文复述变量）</span>
+      <span class="bbs-modal-label">变化规则（何时修改、能否新建；只发给摘要 AI，不进入正文，避免正文复述变量）</span>
       <textarea
         v-model="editorRule"
         class="bbs-input bbs-modal-textarea"
@@ -312,155 +306,66 @@ function applyImport() {
     </section>
 
     <!-- 编辑当前值 -->
-    <ModalMask :open="editStateOpen" @close="editStateOpen = false">
-      <div class="bbs-modal" role="dialog" aria-modal="true" aria-label="编辑当前变量值">
-        <header class="bbs-modal-head">
-          <span class="bbs-modal-title">编辑当前值</span>
-          <button class="bbs-item-act" type="button" title="关闭" @click="editStateOpen = false"><Icon name="close" /></button>
-        </header>
-        <p class="bbs-modal-hint">直接改整份 JSON，保存即写进最新摘要楼层（删该楼可回退）。</p>
-        <textarea v-model="stateEdit" aria-label="编辑当前变量 JSON" class="bbs-input bbs-json-edit bbs-io-area" spellcheck="false"></textarea>
-        <span v-if="stateEditErr" class="bbs-json-err">{{ stateEditErr }}</span>
-        <footer class="bbs-modal-foot">
-          <button class="bbs-btn" type="button" @click="editStateOpen = false">取消</button>
-          <button class="bbs-btn bbs-btn-primary" type="button" @click="saveState">保存</button>
-        </footer>
-      </div>
-    </ModalMask>
+    <ModalShell :open="editStateOpen" title="编辑当前值" @close="editStateOpen = false">
+      <p class="bbs-modal-hint">编辑完整 JSON，保存后写入最新摘要所在楼层（删除该楼层可撤销）。</p>
+      <textarea v-model="stateEdit" aria-label="编辑当前变量 JSON" class="bbs-input bbs-json-edit bbs-io-area" spellcheck="false"></textarea>
+      <span v-if="stateEditErr" class="bbs-json-err">{{ stateEditErr }}</span>
+      <template #footer>
+        <button class="bbs-btn" type="button" @click="editStateOpen = false">取消</button>
+        <button class="bbs-btn bbs-btn-primary" type="button" @click="saveState">保存</button>
+      </template>
+    </ModalShell>
 
     <!-- 导出 -->
-    <ModalMask :open="exportOpen" @close="exportOpen = false">
-      <div class="bbs-modal" role="dialog" aria-modal="true" aria-label="导出变量模板">
-        <header class="bbs-modal-head">
-          <span class="bbs-modal-title">导出变量模板</span>
-          <button class="bbs-item-act" type="button" title="关闭" @click="exportOpen = false"><Icon name="close" /></button>
-        </header>
-        <p class="bbs-modal-hint">三层合并后的初始结构 + 说明（不含具体值）。复制发给别人即可分享。</p>
-        <textarea class="bbs-input bbs-json-edit bbs-io-area" aria-label="导出的变量模板 JSON" readonly :value="exportText"></textarea>
-        <footer class="bbs-modal-foot">
-          <button class="bbs-btn" type="button" @click="downloadExport"><Icon name="download" />下载文件</button>
-          <button class="bbs-btn bbs-btn-primary" type="button" @click="copyExport"><Icon name="check" />复制</button>
-        </footer>
-      </div>
-    </ModalMask>
+    <ModalShell :open="exportOpen" title="导出变量模板" @close="exportOpen = false">
+      <p class="bbs-modal-hint">三层合并后的初始结构与说明（不含具体值），复制后即可分享。</p>
+      <textarea class="bbs-input bbs-json-edit bbs-io-area" aria-label="导出的变量模板 JSON" readonly :value="exportText"></textarea>
+      <template #footer>
+        <button class="bbs-btn" type="button" @click="downloadExport"><Icon name="download" />下载文件</button>
+        <button class="bbs-btn bbs-btn-primary" type="button" @click="copyExport"><Icon name="copy" />复制</button>
+      </template>
+    </ModalShell>
 
     <!-- 导入 -->
-    <ModalMask :open="importOpen" @close="importOpen = false">
-      <div class="bbs-modal" role="dialog" aria-modal="true" aria-label="导入变量模板">
-        <header class="bbs-modal-head">
-          <span class="bbs-modal-title">导入变量模板</span>
-          <button class="bbs-item-act" type="button" title="关闭" @click="importOpen = false"><Icon name="close" /></button>
-        </header>
-        <label class="bbs-modal-field">
-          <span class="bbs-modal-label">粘贴模板 JSON</span>
-          <textarea v-model="importText" class="bbs-input bbs-json-edit bbs-io-area" spellcheck="false" placeholder="把分享来的变量模板 JSON 粘到这里，或用下面的文件选择"></textarea>
-        </label>
-        <label class="bbs-modal-field">
-          <span class="bbs-modal-label">或从文件导入</span>
-          <input class="bbs-input" type="file" accept="application/json,.json" @change="onImportFile" />
-        </label>
-        <div class="bbs-modal-field">
-          <span class="bbs-modal-label">导入到哪层</span>
-          <div class="bbs-typegrid">
-            <button
-              v-for="t in TIER_ORDER"
-              :key="t"
-              class="bbs-typebtn"
-              :class="{ on: importTier === t }"
-              type="button"
-              :disabled="t === 'char' && !charAvailable"
-              @click="importTier = t"
-            >
-              {{ TIER_META[t].label }}
-            </button>
-          </div>
-          <span class="bbs-modal-hint">合并进该层模板（顶层同名字段会被覆盖）；说明会追加。</span>
-        </div>
-        <footer class="bbs-modal-foot">
-          <button class="bbs-btn" type="button" @click="importOpen = false">取消</button>
-          <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!importText.trim()" @click="applyImport">导入</button>
-        </footer>
+    <ModalShell :open="importOpen" title="导入变量模板" @close="importOpen = false">
+      <label class="bbs-modal-field">
+        <span class="bbs-modal-label">粘贴模板 JSON</span>
+        <textarea v-model="importText" class="bbs-input bbs-json-edit bbs-io-area" spellcheck="false" placeholder="粘贴分享的变量模板 JSON，或在下方选择文件"></textarea>
+      </label>
+      <label class="bbs-modal-field">
+        <span class="bbs-modal-label">或从文件导入</span>
+        <input class="bbs-input" type="file" accept="application/json,.json" @change="onImportFile" />
+      </label>
+      <div class="bbs-modal-field">
+        <span class="bbs-modal-label">导入到哪一层</span>
+        <SegmentedControl v-model="importTier" :options="tierOptions(false)" label="导入到哪一层" block />
+        <span class="bbs-modal-hint">合并到该层模板，顶层同名字段将被覆盖；说明追加在原有说明之后。</span>
       </div>
-    </ModalMask>
+      <template #footer>
+        <button class="bbs-btn" type="button" @click="importOpen = false">取消</button>
+        <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!importText.trim()" @click="applyImport">导入</button>
+      </template>
+    </ModalShell>
   </section>
 </template>
 
 <style scoped>
 
-/* 页面本身保持文档流，滚动交给书页容器；不把工具栏与说明再套成卡片。 */
-.bbs-page { display: flex; flex-direction: column; height: auto; min-width: 0; min-height: 100%; color: var(--bbs-ink); }
-.bbs-page, .bbs-page * { box-sizing: border-box; }
-.bbs-page .bbs-input { min-width: 0; max-width: 100%; }
-.bbs-page button { font-family: inherit; }
-.bbs-page button:focus-visible, .bbs-page input:focus-visible, .bbs-page textarea:focus-visible { outline: 2px solid var(--bbs-accent); outline-offset: 3px; }
-.bbs-page button:disabled { cursor: not-allowed; }
-.bbs-page .bbs-btn { min-height: 38px; gap: 6px; white-space: normal; }
-.bbs-ledger-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin: 18px 0; padding: 0 0 14px; border-bottom: 1px solid var(--bbs-line); font-size: 12px; line-height: 1.6; color: var(--bbs-ink-muted); }
-.bbs-ledger-meta strong { margin-right: 4px; font-size: 19px; font-variant-numeric: tabular-nums; font-weight: 650; color: var(--bbs-ink); }
-.bbs-ledger-note { margin-left: auto; color: var(--bbs-accent); }
-.bbs-search { display: flex; align-items: center; gap: 9px; flex: 1 1 200px; min-width: 0; color: var(--bbs-ink-muted); }
-.bbs-search > .bbs-input { flex: 1; width: 100%; }
-.bbs-filterbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 18px; }
-.bbs-filter-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
-.bbs-filter-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface-2); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
-.bbs-filter-tab[aria-pressed='true'] { background: var(--bbs-accent-soft); border-color: var(--bbs-accent); color: var(--bbs-accent); }
-.bbs-filter-tab span { font-variant-numeric: tabular-nums; font-size: 11px; }
-.bbs-item-act { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--bbs-ink-soft); cursor: pointer; font-size: 15px; }
-.bbs-item-act:hover:not(:disabled) { background: var(--bbs-surface-2); border-color: var(--bbs-line); color: var(--bbs-accent); }
-.bbs-item-del:hover:not(:disabled) { background: var(--bbs-danger-soft); color: var(--bbs-danger); border-color: var(--bbs-danger); }
-.bbs-empty { display: flex; flex: none; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 230px; padding: 34px 16px; margin: 12px 0; text-align: center; background: transparent; }
-.bbs-empty-icon { display: inline-flex; align-items: center; justify-content: center; width: 54px; height: 54px; border-radius: 18px; background: var(--bbs-accent-soft); color: var(--bbs-accent); font-size: 25px; }
-.bbs-empty h3 { margin: 5px 0 0; color: var(--bbs-ink); font-size: 16px; font-weight: 650; }
-.bbs-empty p { max-width: 360px; margin: 0; color: var(--bbs-ink-muted); font-size: 13px; line-height: 1.8; }
-.bbs-empty .bbs-btn { margin-top: 6px; }
-.bbs-modal { min-width: 0; overflow-wrap: anywhere; }
-.bbs-modal-head, .bbs-modal-foot { flex-wrap: wrap; }
-.bbs-modal-textarea { resize: vertical; min-height: 80px; font-family: inherit; }
-.bbs-modal-check { flex-direction: row; align-items: center; gap: 9px; cursor: pointer; }
-.bbs-modal-check input { flex-shrink: 0; }
-@media (max-width: 480px) {
-  .bbs-ledger-meta { gap: 6px 14px; margin: 16px 0; }
-  .bbs-ledger-note { flex-basis: 100%; margin-left: 0; }
-  .bbs-search { flex-basis: 100%; }
-  .bbs-filterbar { gap: 10px; }
-  .bbs-item-act { width: 40px; height: 40px; }
-  .bbs-page .bbs-btn { min-height: 42px; }
-  .bbs-filter-tab { min-height: 40px; }
-  .bbs-empty { min-height: 210px; padding: 26px 10px; }
-}
+/* 页面外壳（统计行、搜索、筛选、图标按钮、空状态）在 base.css 的 .bbs-ledger 中统一定义。 */
 
 .bbs-var-state, .bbs-var-template { min-width: 0; }
 .bbs-var-blockhead { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
 .bbs-var-section-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .bbs-var-sub { margin: 0; font-size: 16px; font-weight: 650; color: var(--bbs-ink); }
-.bbs-mini-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 6px 12px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface-2); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
-.bbs-mini-btn:hover:not(:disabled) { border-color: var(--bbs-accent); background: var(--bbs-accent-soft); color: var(--bbs-accent); }
-.bbs-mini-btn:disabled { opacity: .5; }
 .bbs-json-view { margin: 0; width: 100%; min-width: 0; padding: 18px; border: 1px solid var(--bbs-line); border-left: 3px solid var(--bbs-accent); border-radius: 12px; background: var(--bbs-surface-2); color: var(--bbs-ink-soft); font-family: var(--bbs-font-mono); font-size: 12px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 150px; max-height: 50vh; overflow: auto; tab-size: 2; }
 .bbs-json-view:focus-visible { outline: 2px solid var(--bbs-accent); outline-offset: 3px; }
-.bbs-var-emptyline { display: flex; align-items: flex-start; gap: 14px; padding: 20px 0; font-size: 22px; color: var(--bbs-accent); }
-.bbs-var-emptyline > div { min-width: 0; }
-.bbs-var-emptyline h3 { margin: 0 0 7px; font-size: 14px; font-weight: 600; color: var(--bbs-ink); }
-.bbs-var-emptyline p { margin: 0; font-size: 12px; color: var(--bbs-ink-muted); line-height: 1.8; }
 .bbs-var-statehint { margin: 12px 0 0; }
 .bbs-var-template { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--bbs-line); }
-.bbs-var-scope { font-size: 11px; color: var(--bbs-ink-muted); }
 .bbs-var-tmpltip { margin: 0 0 18px; }
 .bbs-modal-hint { display: block; font-size: 12px; line-height: 1.8; color: var(--bbs-ink-muted); overflow-wrap: anywhere; }
-.bbs-typegrid { display: flex; flex-wrap: wrap; gap: 8px; }
-.bbs-typebtn { flex: 1 1 0; min-width: 0; min-height: 40px; padding: 10px 12px; border: 1px solid var(--bbs-line); border-radius: 10px; background: var(--bbs-surface); color: var(--bbs-ink-soft); font-size: 13px; font-weight: 600; cursor: pointer; overflow-wrap: anywhere; }
-.bbs-typebtn:hover:not(:disabled) { border-color: var(--bbs-accent); }
-.bbs-typebtn.on { background: var(--bbs-accent-soft); border-color: var(--bbs-accent); color: var(--bbs-accent); }
-.bbs-typebtn:disabled { opacity: .5; }
 .bbs-var-tierpick { margin-bottom: 10px; }
-.bbs-var-tierpick .bbs-typebtn { text-align: left; }
-.bbs-tier-name { display: block; margin-bottom: 5px; font-size: 14px; }
-.bbs-typebtn small { display: block; font-size: 10px; line-height: 1.65; font-weight: 400; color: var(--bbs-ink-muted); }
 .bbs-var-template > .bbs-modal-field { margin-top: 22px; }
 .bbs-jte-fieldhead { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
-.bbs-mode-toggle { display: inline-flex; flex-shrink: 0; padding: 3px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface-2); }
-.bbs-mode-btn { padding: 6px 12px; min-height: 32px; border: 0; border-radius: 6px; background: transparent; color: var(--bbs-ink-muted); font-size: 12px; cursor: pointer; }
-.bbs-mode-btn.on { background: var(--bbs-accent); color: var(--bbs-accent-ink); }
 .bbs-jte-wrap { min-width: 0; max-width: 100%; padding: 14px; border: 1px solid var(--bbs-line); border-radius: 12px; background: var(--bbs-surface); box-shadow: var(--bbs-card-shadow); }
 .bbs-jte-empty { margin: 10px 0 0; font-size: 12px; color: var(--bbs-ink-muted); line-height: 1.8; }
 .bbs-json-edit { display: block; width: 100%; resize: vertical; min-height: 150px; font-family: var(--bbs-font-mono); font-size: 12px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -480,9 +385,6 @@ function applyImport() {
 @media (max-width: 640px) { .bbs-var-guide-grid { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 480px) {
   .bbs-json-view { padding: 13px; font-size: 11px; }
-  .bbs-typebtn { padding: 9px 7px; }
-  .bbs-typebtn small { font-size: 10px; }
-  .bbs-mini-btn, .bbs-mode-btn { min-height: 40px; }
   .bbs-jte-wrap { padding: 10px; }
   .bbs-jte-wrap :deep(.bbs-jte-row) { display: grid; grid-template-columns: minmax(0, 1fr) 78px 36px; gap: 6px; }
   .bbs-jte-wrap :deep(.bbs-jte-key), .bbs-jte-wrap :deep(.bbs-jte-idx) { grid-column: 1; min-width: 0; width: 100%; }

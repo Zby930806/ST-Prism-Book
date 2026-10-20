@@ -4,6 +4,7 @@
  * 只负责展示和发出选择;写入与否由调用方交给 engine 的 applyFloorPreview / discardFloorPreview。
  * 变动标签与楼层面板共用 memory/deltaTags,两处说法一致。
  */
+import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { DELTA_OP_LABEL, deltaTagGroups } from '@/memory/deltaTags';
 import type { FloorPreview } from '@/memory/engine';
@@ -67,7 +68,7 @@ function keep() {
       <div class="prism-compare-cols">
         <section v-for="side in sides" :key="side.key" class="prism-compare-col" :class="`is-${side.key}`" :aria-label="side.label">
           <h3 class="prism-compare-label">{{ side.label }}<span class="prism-compare-count">{{ side.chars }} 字</span></h3>
-          <p v-if="side.time" class="prism-compare-meta">🕑 {{ side.time }}</p>
+          <p v-if="side.time" class="prism-compare-meta"><Icon name="clock" class="prism-compare-icon" />{{ side.time }}</p>
           <p class="prism-compare-text" :class="{ 'is-muted': !side.text }">{{ side.text || '（没有摘要正文）' }}</p>
           <div class="prism-compare-changes">
             <p v-if="side.location" class="prism-compare-meta">地点：{{ side.location }}</p>
@@ -75,7 +76,7 @@ function keep() {
               <span class="prism-compare-group-title">{{ g.title }}</span>
               <ul>
                 <li v-for="t in g.tags" :key="t.key" :class="`op-${t.op}`">
-                  <span class="prism-compare-op">{{ DELTA_OP_LABEL[t.op] }}</span>
+                  <span class="bbs-op-badge prism-compare-op" :class="`is-${t.op}`">{{ DELTA_OP_LABEL[t.op] }}</span>
                   <span class="prism-compare-tag">
                     <span>{{ t.text }}</span>
                     <span v-if="t.sub" class="prism-compare-sub">{{ t.sub }}</span>
@@ -161,6 +162,10 @@ function keep() {
   color: var(--bbs-ink-muted);
   overflow-wrap: anywhere;
 }
+.prism-compare-icon {
+  margin-right: 4px;
+  vertical-align: -0.15em;
+}
 .prism-compare-text {
   margin: 0;
   font-size: 13.5px;
@@ -207,29 +212,9 @@ function keep() {
   line-height: 1.6;
   color: var(--bbs-ink);
 }
-/* 徽标颜色与楼层面板一致:新增=强调、移除=危险、了结/重启=提醒、更新/迁移=中性 */
+/* 徽标外观在 base.css 的 .bbs-op-badge（与楼层面板共用），这里只管与右侧文字的对齐 */
 .prism-compare-op {
-  flex: 0 0 auto;
   margin-top: 2px;
-  padding: 0 6px;
-  border-radius: var(--bbs-radius-sm);
-  font-size: 10.5px;
-  font-weight: 600;
-  color: var(--bbs-ink-soft);
-  background: var(--bbs-surface-2);
-}
-.op-add .prism-compare-op {
-  color: var(--bbs-accent);
-  background: var(--bbs-accent-soft);
-}
-.op-remove .prism-compare-op {
-  color: var(--bbs-danger);
-  background: var(--bbs-danger-soft);
-}
-.op-resolve .prism-compare-op,
-.op-reopen .prism-compare-op {
-  color: var(--bbs-warning);
-  background: var(--bbs-warning-soft);
 }
 .prism-compare-tag {
   min-width: 0;

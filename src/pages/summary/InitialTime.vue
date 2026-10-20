@@ -29,7 +29,7 @@ async function save() {
     <p v-if="fictional" class="bbs-field-hint">当前聊天的起点是自动设定的虚构时间，不是现实日期。</p>
     <p v-if="issue" class="bbs-field-hint">{{ issue }}</p>
     <form v-else class="bbs-initial-time-form" @submit.prevent="save">
-      <input v-model="value" class="bbs-input" maxlength="80" aria-label="开场时间" placeholder="角色设定里的时间，或你想要的开场时间" :disabled="saving" />
+      <input v-model="value" class="bbs-input" maxlength="80" aria-label="开场时间" placeholder="角色设定中的时间，或自定的开场时间" :disabled="saving" />
       <button class="bbs-btn" type="submit" :disabled="saving || !value.trim()">{{ saving ? '保存中…' : '保存' }}</button>
     </form>
     <p v-if="error" class="bbs-callout is-danger" role="alert">{{ error }}</p>

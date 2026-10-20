@@ -5,6 +5,8 @@ import { ref } from 'vue';
 const props = withDefaults(
   defineProps<{
     title: string;
+    /** 可选副标题：标题下方一行次要色小字（如端点的当前模型），收起时也显示 */
+    meta?: string;
     /** 初始是否展开 */
     open?: boolean;
   }>(),
@@ -19,7 +21,12 @@ const expanded = ref(props.open);
 <template>
   <section class="bbs-collapsible" :class="{ 'is-open': expanded }">
     <button class="bbs-collapsible-head" type="button" :aria-expanded="expanded" @click="expanded = !expanded">
-      <span class="bbs-collapsible-title">{{ title }}</span>
+      <!-- 有副标题时标题与副标题上下两行；没有时结构与原来相同 -->
+      <span v-if="meta" class="bbs-collapsible-heading">
+        <span class="bbs-collapsible-title">{{ title }}</span>
+        <span class="bbs-collapsible-meta">{{ meta }}</span>
+      </span>
+      <span v-else class="bbs-collapsible-title">{{ title }}</span>
       <Icon name="chevron" class="bbs-collapsible-chevron" />
     </button>
     <div class="bbs-collapsible-outer" :inert="!expanded" :aria-hidden="!expanded">
@@ -62,6 +69,21 @@ const expanded = ref(props.open);
 .bbs-collapsible-head:focus-visible {
   outline: 2px solid var(--bbs-accent);
   outline-offset: -2px;
+}
+/* 副标题（meta）：标题下方一行次要色小字，长文字换行不截断 */
+.bbs-collapsible-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin-right: 12px;
+}
+.bbs-collapsible-meta {
+  font-size: var(--bbs-fs-meta);
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--bbs-ink-muted);
+  overflow-wrap: anywhere;
 }
 
 .bbs-collapsible-chevron {

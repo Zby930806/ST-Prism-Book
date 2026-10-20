@@ -13,18 +13,16 @@ import { createApp, reactive, type App } from 'vue';
 import FloorPanel from '@/components/FloorPanel.vue';
 import { getContext } from '@/st/context';
 import { guardEditableArrowKeys } from '@/st/keyboard';
+import { attachSharedStyles, ensureSharedSheet, SHADOW_HOST_CLASS } from '@/st/shadowStyles';
 import { isRealAiReply } from '@/memory/engine';
 import { apiSettings, engineActiveHere } from '@/api/settings';
 import { watch } from 'vue';
-import { versionedAssetUrl } from '@/version';
 
 const HOST_CLASS = 'bbs-fp-host';
 const MARK_ATTR = 'data-bbs-fp'; // 标在 .mes 上,防重复注入
 
 let enabled = false;
 let observer: MutationObserver | null = null;
-let sharedSheet: CSSStyleSheet | null = null;
-let cssHref = '';
 const bound = new Set<string>(); // 已绑定的事件名(幂等)
 
 // 共享刷新信号:任何会改变楼层叶子/番外态的事件都 +1,组件据此重读 chat。
@@ -38,58 +36,6 @@ interface Mounted {
   app: App;
 }
 const mountedByFloor = new Map<number, Mounted>();
-
-/* ============ 共享样式表 ============ */
-
-function resolveCssHref(): string {
-  if (cssHref) return cssHref;
-  try {
-    cssHref = versionedAssetUrl('./index.css', import.meta.url);
-  } catch {
-    cssHref = '';
-  }
-  return cssHref;
-}
-
-/** 异步构造一份共享样式表(仅一次)。失败静默,注入时回退 <link>。 */
-async function ensureSharedSheet(): Promise<void> {
-  if (sharedSheet || typeof CSSStyleSheet === 'undefined') return;
-  const href = resolveCssHref();
-  if (!href) return;
-  try {
-    const res = await fetch(href);
-    const text = await res.text();
-    const sheet = new CSSStyleSheet();
-    sheet.replaceSync(text);
-    sharedSheet = sheet;
-    // 已挂载的补采用(首屏可能先于样式表就绪注入)
-    for (const host of document.querySelectorAll(`.${HOST_CLASS}`)) {
-      const root = (host as HTMLElement).shadowRoot;
-      if (root && !root.adoptedStyleSheets.includes(sheet)) {
-        root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
-      }
-    }
-  } catch {
-    /* 回退 <link>,见 attachStyles */
-  }
-}
-
-function attachStyles(root: ShadowRoot): void {
-  if (sharedSheet) {
-    if (!root.adoptedStyleSheets.includes(sharedSheet)) {
-      root.adoptedStyleSheets = [...root.adoptedStyleSheets, sharedSheet];
-    }
-    return;
-  }
-  const href = resolveCssHref();
-  if (href && !root.querySelector('link[data-bbs-fp-css]')) {
-    const link = document.createElement('link');
-    link.rel = 'stylesheet';
-    link.href = href;
-    link.setAttribute('data-bbs-fp-css', '');
-    root.appendChild(link);
-  }
-}
 
 /* ============ 注入 / 清理 ============ */
 
@@ -116,11 +62,11 @@ function injectFloor(idx: number): void {
   el.querySelectorAll(`.${HOST_CLASS}`).forEach(n => n.remove());
 
   const host = document.createElement('div');
-  host.className = HOST_CLASS;
+  host.className = `${HOST_CLASS} ${SHADOW_HOST_CLASS}`;
   host.setAttribute('data-bbs-fp-floor', String(idx));
   const root = host.attachShadow({ mode: 'open' });
   guardEditableArrowKeys(root);
-  attachStyles(root);
+  attachSharedStyles(root);
   const container = document.createElement('div');
   root.appendChild(container);
 
@@ -130,7 +76,10 @@ function injectFloor(idx: number): void {
   app.mount(container);
 
   const mesText = el.querySelector('.mes_text');
-  if (mesText) mesText.insertAdjacentElement('afterend', host);
+  // 札记卡片(notesPanel.ts)也挂在正文后面;楼层面板固定排在它前面,两者挂载先后不影响顺序
+  const notesHost = el.querySelector('.bbs-notes-host');
+  if (notesHost) notesHost.insertAdjacentElement('beforebegin', host);
+  else if (mesText) mesText.insertAdjacentElement('afterend', host);
   else el.appendChild(host);
 
   mountedByFloor.set(idx, { host, app });

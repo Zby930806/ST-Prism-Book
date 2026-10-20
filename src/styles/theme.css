@@ -7,6 +7,11 @@
   --bbs-gap: 20px; --bbs-page-pad: clamp(18px,3vw,32px);
   --bbs-win-max-w: 1060px; --bbs-win-max-h: 88vh;
   --bbs-ease: cubic-bezier(.22,.61,.36,1); --bbs-dur: .16s;
+  /* 尺度令牌：新写的样式只用这些值。字号 7 档；间距 4 的倍数；圆角另有 xs；控件与图标按钮高度。 */
+  --bbs-fs-badge: 11px; --bbs-fs-meta: 12px; --bbs-fs-sm: 13px; --bbs-fs-body: 14px; --bbs-fs-title: 16px; --bbs-fs-section: 20px; --bbs-fs-page: 26px;
+  --bbs-space-1: 4px; --bbs-space-2: 8px; --bbs-space-3: 12px; --bbs-space-4: 16px; --bbs-space-5: 20px; --bbs-space-6: 24px; --bbs-space-8: 32px;
+  --bbs-radius-xs: 6px;
+  --bbs-control-h: 36px; --bbs-control-h-sm: 32px; --bbs-icon-btn: 36px;
   --bbs-card-shadow: none;
   --bbs-shadow: 0 8px 24px -12px #11182033, 0 2px 6px #11182014;
   --bbs-orb-shadow: drop-shadow(0 2px 4px #11182026);
@@ -14,10 +19,10 @@
 .bbs-root[data-theme='day'] {
   color-scheme: light;
   --bbs-bg: #FAF9F6; --bbs-surface: #FFFFFF; --bbs-surface-2: #F0EEE9;
-  --bbs-ink: #272923; --bbs-ink-soft: #62655E; --bbs-ink-muted: #74766F;
+  --bbs-ink: #272923; --bbs-ink-soft: #62655E; --bbs-ink-muted: #6B6D66;
   --bbs-accent: #A64E2B; --bbs-accent-soft: #F7EDE5; --bbs-accent-ink: #FFFFFF;
-  --bbs-line: #E7E5DF; --bbs-line-strong: #C6C6BB;
-  --bbs-danger: #A73529; --bbs-danger-soft: #F7EAE7;
+  --bbs-line: #E7E5DF; --bbs-line-strong: #C6C6BB; --bbs-control-border: #86877E;
+  --bbs-danger: #A73529; --bbs-danger-soft: #F7EAE7; --bbs-danger-ink: #FFFFFF;
   --bbs-warning: #7C5816; --bbs-warning-soft: #F5EEDC;
   --bbs-overlay: #11182080;
 }
@@ -26,8 +31,8 @@
   --bbs-bg: #151A22; --bbs-surface: #1C232D; --bbs-surface-2: #232C38;
   --bbs-ink: #EDEEEB; --bbs-ink-soft: #C0C5CB; --bbs-ink-muted: #A0A9B6;
   --bbs-accent: #EDB18D; --bbs-accent-soft: #382D2B; --bbs-accent-ink: #34271F;
-  --bbs-line: #323B47; --bbs-line-strong: #657080;
-  --bbs-danger: #EEA59A; --bbs-danger-soft: #432E2B;
+  --bbs-line: #323B47; --bbs-line-strong: #657080; --bbs-control-border: #6E7989;
+  --bbs-danger: #EEA59A; --bbs-danger-soft: #432E2B; --bbs-danger-ink: #2A1A17;
   --bbs-warning: #DEC18B; --bbs-warning-soft: #3D3525;
   --bbs-overlay: #080C10AD;
   --bbs-shadow: 0 8px 24px -12px #00000066, 0 2px 6px #00000026;
@@ -38,8 +43,8 @@
   --bbs-bg: #F7F5F1; --bbs-surface: #FFFDFA; --bbs-surface-2: #EEEBE5;
   --bbs-ink: #302F2B; --bbs-ink-soft: #625E55; --bbs-ink-muted: #70695F;
   --bbs-accent: #596B7B; --bbs-accent-soft: #E9EDF0; --bbs-accent-ink: #FFFFFF;
-  --bbs-line: #E1DDD5; --bbs-line-strong: #B6AFA3;
-  --bbs-danger: #A73529; --bbs-danger-soft: #F7EAE7;
+  --bbs-line: #E1DDD5; --bbs-line-strong: #B6AFA3; --bbs-control-border: #8A8378;
+  --bbs-danger: #A73529; --bbs-danger-soft: #F7EAE7; --bbs-danger-ink: #FFFFFF;
   --bbs-warning: #7C5816; --bbs-warning-soft: #F5EEDC;
   --bbs-overlay: #211F1A80;
 }
@@ -48,8 +53,8 @@
   --bbs-bg: #F4F6F4; --bbs-surface: #FFFFFF; --bbs-surface-2: #ECEFEC;
   --bbs-ink: #28312C; --bbs-ink-soft: #56625A; --bbs-ink-muted: #626E65;
   --bbs-accent: #426E5B; --bbs-accent-soft: #E8F0EB; --bbs-accent-ink: #FFFFFF;
-  --bbs-line: #DCE3DD; --bbs-line-strong: #A9B7AD;
-  --bbs-danger: #A73529; --bbs-danger-soft: #F7EAE7;
+  --bbs-line: #DCE3DD; --bbs-line-strong: #A9B7AD; --bbs-control-border: #7F8D83;
+  --bbs-danger: #A73529; --bbs-danger-soft: #F7EAE7; --bbs-danger-ink: #FFFFFF;
   --bbs-warning: #7C5816; --bbs-warning-soft: #F5EEDC;
   --bbs-overlay: #14201980;
 }
@@ -68,13 +73,20 @@
   --bbs-accent-ink: var(--SmartThemeBlurTintColor, #FFFFFF);
   --bbs-line: var(--SmartThemeBorderColor, #E7E5DF);
   --bbs-line-strong: color-mix(in srgb, var(--SmartThemeBorderColor, #E7E5DF) 70%, var(--SmartThemeBodyColor, #272923));
+  /* 输入框、开关等控件的边框，需与底色有 3:1 以上的差别。 */
+  --bbs-control-border: color-mix(in srgb, var(--SmartThemeBorderColor, #E7E5DF) 45%, var(--SmartThemeBodyColor, #272923));
   /* 危险/警告仍保留各自语义底色，文字以宿主正文为主，兼顾明暗宿主。 */
   --bbs-danger: color-mix(in srgb, var(--SmartThemeBodyColor, #272923) 80%, #A73529);
   --bbs-danger-soft: color-mix(in srgb, #A73529 12%, var(--SmartThemeChatTintColor, #FFFFFF));
+  --bbs-danger-ink: var(--SmartThemeBlurTintColor, #FFFFFF);
   --bbs-warning: color-mix(in srgb, var(--SmartThemeBodyColor, #272923) 80%, #7C5816);
   --bbs-warning-soft: color-mix(in srgb, #7C5816 12%, var(--SmartThemeChatTintColor, #FFFFFF));
   --bbs-overlay: #00000073;
   --bbs-shadow: 0 8px 24px -12px var(--SmartThemeShadowColor, #11182033);
+}
+/* 窄屏和触屏（含横屏平板）：控件与图标按钮加高，便于点按。 */
+@media (max-width: 640px), (pointer: coarse) {
+  .bbs-root { --bbs-control-h: 40px; --bbs-icon-btn: 40px; }
 }
 /* 在各主题之后覆盖，避免深色/ST 的高特异性令牌重新开启移动端阴影。 */
 @media (max-width: 640px), (hover: none) and (pointer: coarse) {

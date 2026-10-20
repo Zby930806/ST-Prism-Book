@@ -30,15 +30,15 @@ function onNavClick(id: string) {
       class="bbs-nav-item"
       :class="{ 'is-active': ui.activePage === p.id }"
       type="button"
-      :title="p.label"
-      :aria-label="p.label"
+      :title="showUpdateDot(p.id) ? `${p.label}（有可用更新）` : p.label"
+      :aria-label="showUpdateDot(p.id) ? `${p.label}（有可用更新）` : p.label"
       :aria-current="ui.activePage === p.id ? 'page' : undefined"
       @click="onNavClick(p.id)"
     >
       <span class="bbs-nav-icon-wrap">
         <Icon :name="p.id" class="bbs-nav-icon" />
         <!-- 有可用更新:设置项亮红点角标 -->
-        <span v-if="showUpdateDot(p.id)" class="bbs-nav-dot" aria-label="有可用更新"></span>
+        <span v-if="showUpdateDot(p.id)" class="bbs-nav-dot" aria-hidden="true"></span>
       </span>
       <!-- 所有导航位置保留中文标签；窄屏采用上下图文，避免仅凭图标辨识 -->
       <span class="bbs-nav-label">{{ p.label }}</span>

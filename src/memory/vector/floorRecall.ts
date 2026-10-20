@@ -12,7 +12,7 @@ import { apiSettings, engineActiveHere } from '@/api/settings';
 import { memoryWriteIssue } from '../store';
 import { isRealAiReply } from '../engine';
 import { recallDebug, recallDebugWrites, snapshotRecallDebug, type RecallDebug } from './debug';
-import { recalledItems, recallPhase } from './recallView';
+import { recalledItems, recallCutCount, recallPhase } from './recallView';
 
 export const FLOOR_RECALL_KEY = 'bbs_recall';
 const MAX_ITEMS = 50;
@@ -37,6 +37,8 @@ export interface FloorRecallRecord {
   status: string;
   /** 实际注入的段落;没召回或失败时为空 */
   items: FloorRecallItem[];
+  /** 达到阈值、但放不进召回预算而没有注入的段数(没有时省略;旧记录没有) */
+  cut?: number;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -49,12 +51,14 @@ function msgSwipe(m: STMessage): number {
 
 /** 从调试快照生成楼层记录。 */
 export function floorRecallFromDebug(d: RecallDebug, swipe: number): FloorRecallRecord {
+  const cut = recallCutCount(d);
   return {
     v: 1,
     at: d.at || Date.now(),
     swipe,
     status: d.status,
     items: recalledItems(d).map(({ source, storyTime, tier, preview }) => ({ source, storyTime, tier, preview })),
+    ...(cut ? { cut } : {}),
   };
 }
 
@@ -75,7 +79,8 @@ export function readFloorRecall(m: STMessage | undefined): FloorRecallRecord | n
       preview: typeof it.preview === 'string' ? it.preview : '',
     });
   }
-  return { v: 1, at: typeof raw.at === 'number' ? raw.at : 0, swipe, status: raw.status, items };
+  const cut = typeof raw.cut === 'number' && Number.isInteger(raw.cut) && raw.cut > 0 ? raw.cut : 0;
+  return { v: 1, at: typeof raw.at === 'number' ? raw.at : 0, swipe, status: raw.status, items, ...(cut ? { cut } : {}) };
 }
 
 /* ============ 生成 → 回复的归属 ============ */

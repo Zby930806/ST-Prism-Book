@@ -2,36 +2,39 @@
 /**
  * 楼内摘要面板(挂在每条 AI 楼的 shadow 内,由 floorPanel.ts 逐楼挂载)。
  *
- * 形态:一张与摘要页同源的卡片(.bbs-summary-card 语言)。
- *   - 卡片头(锚点):严格单行 —— 楼号 + 摘要预览 + 番外键 + 单楼摘要键。
- *   - 卡片体(抽屉):grid 0fr↔1fr 高度过渡(同 SummaryNode.vue,内容常驻不脱流,无闪烁)。
- *     变动按类型分组、以「标签流」横向排列。
+ * 形态:一张与摘要页同源的卡片(.bbs-summary-card 语言),外壳见 floor/FloorCardShell.vue。
+ *   - 卡片头(锚点):楼号 + 时间 + 召回/不一致/番外标签,次行摘要预览;展开后预览与时间不再重复(下方有正文和可编辑的时间)。
+ *     右端展开箭头,右侧只有单楼摘要键(没有摘要时「生成」,已有时「重新生成」)。
+ *   - 卡片体(抽屉):时间/地点、摘要正文、状态变动(floor/DeltaGroups)、记录冲突(floor/FloorConflicts)、
+ *     召回(floor/FloorRecall);页脚是番外开关、带文字的生成/重新生成摘要、删除摘要。
+ *     番外放在抽屉里、写明含义,避免手机上误触改变该楼是否参与记忆。
  *
- * 编辑:**逐条就地编辑**。点摘要正文 / 时间 / 地点 / 某条变动标签,就地展开该单元的输入框,
- *   保存即写、取消即收,其余保持只读。同一时刻只有一个单元在编辑(editKey)。
- *   写走 apply.ts 的 editLeafFull(整体重放),targeted 修改由 commitDelta 克隆-改-回写完成。
+ * 编辑:**逐条就地编辑**。点摘要正文 / 时间 / 地点 / 某条变动,就地展开该单元的输入框,
+ *   保存即写、取消即收,其余保持只读。同一时刻只有一个单元在编辑;状态与读写在 floor/useLeafEdit.ts。
  *
  * 数据:chat 非 reactive。leaf 返回浅拷贝(新引用)+ 追踪 sig.tick / derivedMeta.rev,
  *   任何来源(ST 事件、主界面摘要、楼内编辑)的变化都能刷新。
  */
-import { computed, nextTick, reactive, ref, shallowRef, watch } from 'vue';
+import { computed, provide, ref, shallowRef, watch } from 'vue';
 import Icon from '@/components/Icon.vue';
-import BbsSelect from '@/components/BbsSelect.vue';
-import { NPC_AFFINITY_FIELDS, affinityLevelFromInput } from '@/memory/npcRelations';
+import IconButton from '@/components/IconButton.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
-import RecallList from '@/components/RecallList.vue';
 import RegenerateCompare from '@/components/RegenerateCompare.vue';
+import FloorCardShell from '@/components/floor/FloorCardShell.vue';
+import DeltaGroups from '@/components/floor/DeltaGroups.vue';
+import FloorConflicts from '@/components/floor/FloorConflicts.vue';
+import FloorRecall from '@/components/floor/FloorRecall.vue';
+import { LEAF_EDIT, useLeafEdit } from '@/components/floor/useLeafEdit';
 import { getContext, type STMessage } from '@/st/context';
 import { toast } from '@/st/toast';
-import { getLeaf, leafValid, deleteLeafAt, editLeafFull } from '@/memory/apply';
-import { DELTA_OP_LABEL, deltaTagGroups, type DeltaTag, type DeltaTagGroup } from '@/memory/deltaTags';
+import { getLeaf, leafValid, deleteLeafAt } from '@/memory/apply';
+import { deltaTagGroups, type DeltaTagGroup } from '@/memory/deltaTags';
 import { applyFloorPreview, discardFloorPreview, engineState, floorBackfillState, previewRegenerateFloor, setFloorOmit, summarizeFloor, type FloorPreview } from '@/memory/engine';
 import { derivedMeta } from '@/memory/store';
-import { setConflictStatus } from '@/memory/continuity';
 import { readFloorRecall } from '@/memory/vector/floorRecall';
 import { floorRecallView } from '@/memory/vector/recallView';
 import { ui } from '@/state/ui';
-import type { LeafExtra, StoredDelta, VarOp, JsonValue } from '@/memory/types';
+import type { LeafExtra, StoredDelta } from '@/memory/types';
 
 const props = defineProps<{ floor: number; sig: { tick: number } }>();
 
@@ -82,12 +85,10 @@ const recallChip = computed(() => {
 // 正文与记录不一致(摘要时标出,记录保持原样);番外楼不显示
 const conflicts = computed(() => (omit.value || !valid.value ? [] : (leaf.value?.conflicts ?? [])));
 const openConflicts = computed(() => conflicts.value.filter(c => !c.status || c.status === 'open').length);
-const CONFLICT_STATE: Record<string, string> = { pending: '下一次生成时提醒', reminded: '已提醒正文模型', ignored: '已忽略' };
-function changeConflict(index: number, status: 'pending' | 'ignored' | 'open') {
-  if (!setConflictStatus(props.floor, index, status)) toast('记忆处于保护状态，这次没有修改。', 'error');
-}
 
 const expanded = ref(false);
+// 抽屉 id：每楼面板在各自的 shadow 内，楼号即可保证唯一
+const drawerId = `bbs-fp-drawer-${props.floor}`;
 const busy = ref(false);
 const regenerateConfirmOpen = ref(false);
 // 重新摘要先对比:新结果放在这里等用户选,选之前不写入
@@ -105,15 +106,21 @@ const summarizingHere = computed(() => {
 });
 const summaryActionDisabled = computed(() => busy.value || engineState.running || omit.value || !!comparePreview.value);
 const summaryActionTitle = computed(() => {
-  if (omit.value) return '番外楼不参与摘要,请先取消番外';
+  if (omit.value) return '番外楼不参与摘要，请先取消番外';
   if (summarizingHere.value) return `正在生成楼层 #${props.floor} 的摘要`;
   return valid.value ? `重新生成楼层 #${props.floor} 的摘要` : `生成楼层 #${props.floor} 的摘要`;
+});
+// 单楼摘要的图标与按钮文字:没有摘要时「生成」(摘要图标),已有摘要时「重新生成」(刷新图标)
+const summaryIcon = computed(() => (valid.value ? 'refresh' : 'summary'));
+const summaryActionText = computed(() => {
+  if (summarizingHere.value) return '生成中…';
+  return valid.value ? '重新生成摘要' : '生成摘要';
 });
 
 const previewText = computed(() => {
   if (omit.value) return '不计入记忆';
   if (valid.value && leaf.value?.text) return leaf.value.text;
-  return valid.value ? '(无摘要正文)' : '待摘要';
+  return valid.value ? '（无摘要正文）' : '待摘要';
 });
 const previewMuted = computed(() => omit.value || !(valid.value && leaf.value?.text));
 
@@ -126,370 +133,19 @@ const timeLabel = computed(() => {
   return s || e || l.timeLabel?.trim() || '';
 });
 
-/* ============ 变动 → 标签行(带定位信息,供就地编辑用) ============ */
-// 标签的构建逻辑和重新摘要的对比弹窗共用,见 memory/deltaTags。
-const opLabel = DELTA_OP_LABEL;
-type Tag = DeltaTag;
-
-// 角色可编辑的文本字段注册表:统一驱动「展示副文本 / 编辑载入 / 保存 / 按需渲染输入框」,
-// 一处定义,避免多处重复且保证一致。key=NpcDelta 字段名,draft=edit 草稿字段名,label=展示/占位。
-const NPC_FIELDS = [
-  { key: 'title', draft: 'title', label: '身份' },
-  { key: 'age', draft: 'npcAge', label: '年龄' },
-  { key: 'relation', draft: 'relation', label: '关系' },
-  { key: 'affinityNote', draft: 'affinityNote', label: '好感说明' },
-  { key: 'outfit', draft: 'outfit', label: '着装' },
-  { key: 'condition', draft: 'condition', label: '状态' },
-  { key: 'desc', draft: 'npcDesc', label: '外貌' },
-  { key: 'personality', draft: 'personality', label: '性格' },
-  { key: 'ties', draft: 'ties', label: '人际' },
-  { key: 'location', draft: 'npcLoc', label: '位置' },
-] as const;
-
-// 分组渲染表(模板里循环用)。计划标签要反查别楼的计划内容,所以另外追踪 derivedMeta.rev。
+/* ============ 变动分组 ============ */
+// 标签的构建逻辑和重新摘要的对比弹窗共用,见 memory/deltaTags。计划标签要反查别楼的计划内容,所以另外追踪 derivedMeta.rev。
 const groups = computed<DeltaTagGroup[]>(() => {
   void derivedMeta.rev;
   return deltaTagGroups(d.value, props.floor);
 });
-// 正在编辑的变量命令(供模板按 op 类型决定显示哪些字段:值/增量/键)
-const editingVarOp = computed<VarOp | null>(() => {
-  const key = editKey.value;
-  if (!key || !key.startsWith('var:')) return null;
-  return d.value?.varOps?.[Number(key.split(':')[2])] ?? null;
-});
-// 值 ↔ 输入框互转:字符串原样;数字/布尔/对象转 JSON 文本。解析反之:先试 JSON,失败当纯字符串。
-// 故 "敌对"→字符串、"60"→数字、"true"→布尔、'{"a":1}'→对象,round-trip 稳定。
-function varValueToInput(v: JsonValue | undefined): string {
-  if (v === undefined) return '';
-  if (typeof v === 'string') return v;
-  try { return JSON.stringify(v); } catch { return String(v); }
-}
-function parseVarValue(text: string): JsonValue {
-  const t = text.trim();
-  if (t === '') return '';
-  try { return JSON.parse(t); } catch { return text; }
-}
+const hasTags = computed(() => groups.value.some(g => g.tags.length > 0));
+const hasAnyDelta = computed(() => hasTags.value || !!d.value?.location);
 
-const hasAnyDelta = computed(() => groups.value.some(g => g.tags.length > 0) || !!d.value?.location);
-
-/* ============ 就地编辑 ============ */
-// 当前正在编辑的单元:'text' | 'time' | 'loc' | tag.key(如 'item:add:0');null=无
-const editKey = ref<string | null>(null);
-// 单元编辑草稿(按需填,不同单元用不同字段)。
-// npc 字段独立(title/outfit/condition/npcDesc/personality/npcLoc),不再拿 desc 兼作 title——
-// 之前角色编辑只暴露名字+身份,着装/状态/外貌/性格/位置能看不能改,故补齐。
-const edit = reactive<{
-  text: string; timeStart: string; timeEnd: string; location: string;
-  name: string; qty: string; desc: string; content: string;
-  title: string; npcAge: string; relation: string; ties: string; outfit: string; condition: string; npcDesc: string; personality: string; npcLoc: string;
-  affinityInner: string; affinityOuter: string; affinityNote: string;
-  varPath: string; varKey: string; varValue: string; varDelta: string;
-}>({
-  text: '',
-  timeStart: '',
-  timeEnd: '',
-  location: '',
-  name: '',
-  qty: '',
-  desc: '',
-  content: '',
-  title: '',
-  npcAge: '',
-  relation: '',
-  affinityInner: '',
-  affinityOuter: '',
-  affinityNote: '',
-  ties: '',
-  outfit: '',
-  condition: '',
-  npcDesc: '',
-  personality: '',
-  npcLoc: '',
-  varPath: '',
-  varKey: '',
-  varValue: '',
-  varDelta: '',
-});
-
-// 叶子消失 / 番外时退出编辑
-watch([omit, leaf], () => {
-  if (editKey.value && (omit.value || !leaf.value)) editKey.value = null;
-});
-
-// 触屏判定:移动端进入编辑不自动聚焦——自动 focus 会立刻弹出输入法,挡住界面。
-// 让用户主动点输入框才弹,更舒服(与主界面摘要弹窗同款取舍)。
-const isTouch = typeof window !== 'undefined' && window.matchMedia?.('(hover: none)').matches;
-
-// 用函数 ref(而非字符串 ref):字符串 ref 出现在 v-for 内会被 Vue 收集成**数组**,
-// focusEl.value 变数组、没有 .focus() → 报「focus is not a function」。函数 ref 只在元素
-// 挂载时被调用一次,稳稳拿到单个元素。
-const focusEl = ref<HTMLInputElement | HTMLTextAreaElement | null>(null);
-function setFocus(el: unknown) {
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) focusEl.value = el;
-}
-function beginEdit(key: string) {
-  if (omit.value || !leaf.value) return;
-  focusEl.value = null; // 清掉上一次编辑的(已卸载)输入框引用,避免 focus 到游离节点
-  editKey.value = key;
-  void nextTick(() => {
-    // 编辑区内所有 textarea 都要 autosize(字段用可换行显示的 textarea,进场先贴合内容高)
-    autosizeAll();
-    if (!isTouch) focusEl.value?.focus();
-  });
-}
-// textarea 自适应高度:进入编辑时若仍用固定行数,长内容会瞬间缩短、抽屉回弹(看到「摘要区缩起来」)。
-// 让编辑框贴合内容高度,与只读态视觉连续,消除跳动。
-function autosize(el: HTMLTextAreaElement) {
-  el.style.height = 'auto';
-  el.style.height = `${el.scrollHeight}px`;
-}
-// 对 focusEl 所在编辑卡内的全部 textarea 逐一 autosize(多字段编辑时不止一个)
-function autosizeAll() {
-  const root = focusEl.value?.closest('.bbs-fp-editform, .bbs-fp-texteditor');
-  root?.querySelectorAll('textarea').forEach(t => autosize(t as HTMLTextAreaElement));
-  if (focusEl.value instanceof HTMLTextAreaElement) autosize(focusEl.value);
-}
-function onTextInput(e: Event) {
-  autosize(e.target as HTMLTextAreaElement);
-}
-// 字段 textarea:输入时 autosize;回车不换行(拦截 Enter,保持「单行语义、多行显示」)。
-// Shift+Enter 也拦——这些是短字段,不需要真正的换行。
-function onFieldKeydown(e: KeyboardEvent) {
-  if (e.key === 'Enter') e.preventDefault();
-}
-function cancelEdit() {
-  editKey.value = null;
-}
-
-/** 克隆当前 delta,交给 mutator 改,再整体重放写回。 */
-function commitDelta(mutate: (dd: StoredDelta) => void): void {
-  const l = leaf.value;
-  if (!l) return;
-  const dd: StoredDelta = JSON.parse(JSON.stringify(l.delta ?? {}));
-  mutate(dd);
-  editLeafFull(props.floor, {
-    text: l.text ?? '',
-    timeStart: l.timeStart ?? '',
-    timeEnd: l.timeEnd ?? '',
-    delta: dd,
-  });
-  editKey.value = null;
-}
-
-/* —— 正文 —— */
-function editText() {
-  edit.text = leaf.value?.text ?? '';
-  beginEdit('text');
-}
-function saveText() {
-  const l = leaf.value;
-  if (!l) return;
-  editLeafFull(props.floor, { text: edit.text, timeStart: l.timeStart ?? '', timeEnd: l.timeEnd ?? '', delta: l.delta ?? {} });
-  editKey.value = null;
-}
-
-/* —— 时间 —— */
-function editTime() {
-  edit.timeStart = leaf.value?.timeStart ?? '';
-  edit.timeEnd = leaf.value?.timeEnd ?? '';
-  beginEdit('time');
-}
-function saveTime() {
-  const l = leaf.value;
-  if (!l) return;
-  editLeafFull(props.floor, { text: l.text ?? '', timeStart: edit.timeStart, timeEnd: edit.timeEnd, delta: l.delta ?? {} });
-  editKey.value = null;
-}
-
-/* —— 地点 —— */
-function editLoc() {
-  edit.location = d.value?.location ?? '';
-  beginEdit('loc');
-}
-function saveLoc() {
-  const loc = edit.location.trim();
-  commitDelta(dd => {
-    if (loc) dd.location = loc;
-    else delete dd.location;
-  });
-}
-
-// 当前正在编辑的角色 tag,本轮实际存在的字段(供模板按需渲染)。
-// 关键:update delta 只含本轮改动的字段——若把全部字段都渲染成空框,用户会误以为「这角色没有这些数据」,
-// 其实只是本轮没改。故只渲染 delta 里已存在(!== undefined)的字段;新增(add)则给全字段以便补全。
-const editingNpcDelta = computed(() => {
-  const key = editKey.value;
-  if (!key?.startsWith('npc:')) return undefined;
-  const [, bucket, idxStr] = key.split(':');
-  return (bucket === 'add' ? d.value?.npcs?.add : bucket === 'update' ? d.value?.npcs?.update : undefined)?.[Number(idxStr)];
-});
-const npcEditFields = computed(() => {
-  const npc = editingNpcDelta.value;
-  return npc ? NPC_FIELDS.filter(f => editKey.value?.startsWith('npc:add:') || npc[f.key] !== undefined) : [];
-});
-const npcAffinityEditFields = computed(() => {
-  const npc = editingNpcDelta.value;
-  return npc ? NPC_AFFINITY_FIELDS.filter(f => editKey.value?.startsWith('npc:add:') || npc[f.key] !== undefined) : [];
-});
-
-/* —— 物品 / 角色 / 计划 就地改字段 —— */
-function editTag(tag: Tag) {
-  const dd = d.value;
-  if (!dd) return;
-  // 清空所有草稿字段:不可编辑的标签(scene / plan 的 resolve/reopen/remove)不会填任何字段,
-  // 若不清空会残留上一次编辑的值(如刚编辑过物品,再点悬念「达成」就显示旧物品名)——这是串数据 bug 的根因。
-  edit.name = '';
-  edit.qty = '';
-  edit.desc = '';
-  edit.content = '';
-  edit.title = '';
-  edit.npcAge = '';
-  edit.relation = '';
-  edit.affinityInner = '';
-  edit.affinityOuter = '';
-  edit.affinityNote = '';
-  edit.ties = '';
-  edit.outfit = '';
-  edit.condition = '';
-  edit.npcDesc = '';
-  edit.personality = '';
-  edit.npcLoc = '';
-  edit.varPath = '';
-  edit.varKey = '';
-  edit.varValue = '';
-  edit.varDelta = '';
-  if (tag.key.startsWith('item:')) {
-    if (tag.bucket === 'remove') {
-      edit.name = dd.items?.remove?.[tag.idx] ?? '';
-    } else {
-      const x = (tag.bucket === 'add' ? dd.items?.add : dd.items?.update)?.[tag.idx];
-      edit.name = x?.name ?? '';
-      edit.qty = typeof x?.qty === 'number' ? String(x.qty) : '';
-      edit.desc = x?.desc ?? '';
-    }
-  } else if (tag.key.startsWith('npc:')) {
-    if (tag.bucket === 'remove') {
-      edit.name = dd.npcs?.remove?.[tag.idx] ?? '';
-    } else {
-      const x = (tag.bucket === 'add' ? dd.npcs?.add : dd.npcs?.update)?.[tag.idx];
-      edit.name = x?.name ?? '';
-      edit.title = x?.title ?? '';
-      edit.npcAge = x?.age ?? '';
-      edit.relation = x?.relation ?? '';
-      edit.affinityInner = x?.affinityInner == null ? '' : String(x.affinityInner);
-      edit.affinityOuter = x?.affinityOuter == null ? '' : String(x.affinityOuter);
-      edit.affinityNote = x?.affinityNote ?? '';
-      edit.ties = x?.ties ?? '';
-      edit.outfit = x?.outfit ?? '';
-      edit.condition = x?.condition ?? '';
-      edit.npcDesc = x?.desc ?? '';
-      edit.personality = x?.personality ?? '';
-      edit.npcLoc = x?.location ?? '';
-    }
-  } else if (tag.key.startsWith('plan:add:')) {
-    edit.content = dd.plans?.add?.[tag.idx]?.content ?? '';
-  } else if (tag.key.startsWith('var:')) {
-    const op = dd.varOps?.[tag.idx];
-    if (op) {
-      edit.varPath = op.path ?? '';
-      edit.varKey = op.key !== undefined ? String(op.key) : '';
-      edit.varValue = varValueToInput(op.value);
-      edit.varDelta = typeof op.delta === 'number' ? String(op.delta) : '';
-    }
-  }
-  beginEdit(tag.key);
-}
-
-function saveTag(tag: Tag) {
-  commitDelta(dd => {
-    if (tag.key.startsWith('item:')) {
-      if (tag.bucket === 'remove') {
-        if (dd.items?.remove) dd.items.remove[tag.idx] = edit.name.trim();
-      } else {
-        const arr = tag.bucket === 'add' ? dd.items?.add : dd.items?.update;
-        const x = arr?.[tag.idx];
-        if (x) {
-          x.name = edit.name.trim();
-          // String() 兜底:type="number" 的 v-model 会把值转成 number,直接 .trim() 会抛错(number 无 trim)。
-          const qtyStr = String(edit.qty).trim();
-          const q = Number(qtyStr);
-          if (qtyStr && Number.isFinite(q)) x.qty = q;
-          else delete x.qty;
-          if (edit.desc.trim()) x.desc = edit.desc.trim();
-          else delete x.desc;
-        }
-      }
-    } else if (tag.key.startsWith('npc:')) {
-      if (tag.bucket === 'remove') {
-        if (dd.npcs?.remove) dd.npcs.remove[tag.idx] = edit.name.trim();
-      } else {
-        const arr = tag.bucket === 'add' ? dd.npcs?.add : dd.npcs?.update;
-        const x = arr?.[tag.idx];
-        if (x) {
-          x.name = edit.name.trim();
-          // 各档案/即时字段走注册表:有值即写、留空即删该键(空字段不落进 delta)。
-          // 本轮未渲染的字段其草稿已被 editTag 清空 → 会 delete,但它本就不在 delta,无副作用。
-          const rec = x as unknown as Record<string, unknown>;
-          const prevAge = x.age;
-          for (const f of NPC_FIELDS) {
-            const t = (edit[f.draft] as string).trim();
-            // 好感说明的空字符串是显式清空;省略才是保留上一层,不能混用。
-            if (t || (f.key === 'affinityNote' && x.affinityNote !== undefined)) rec[f.key] = t;
-            else delete rec[f.key];
-          }
-          for (const { key } of NPC_AFFINITY_FIELDS) {
-            // update 未提供的一侧必须继续省略,不能因编辑另一侧而写成未知。
-            if (x[key] !== undefined || (tag.bucket === 'add' && edit[key] !== '')) {
-              x[key] = affinityLevelFromInput(edit[key]);
-            }
-          }
-          // 年龄被改动时清掉 delta 里可能残留的旧锚点(手动编辑写入的 ageTime),
-          // 让重放按本叶子时间盖新锚点;没改则保留原锚点不动。
-          if (x.age !== prevAge) delete rec.ageTime;
-        }
-      }
-    } else if (tag.key.startsWith('plan:add:')) {
-      const x = dd.plans?.add?.[tag.idx];
-      if (x) x.content = edit.content.trim();
-    } else if (tag.key.startsWith('var:')) {
-      const op = dd.varOps?.[tag.idx];
-      if (op) {
-        op.path = edit.varPath.trim();
-        // 按命令类型写回对应字段(只改本类型有的字段,避免残留无关字段)
-        if (op.op === 'add') {
-          const n = Number(String(edit.varDelta).trim());
-          op.delta = Number.isFinite(n) ? n : 0;
-        }
-        if (op.op === 'set' || op.op === 'assign') {
-          op.value = parseVarValue(edit.varValue);
-        }
-        if (op.op === 'assign' || op.op === 'remove') {
-          const k = edit.varKey.trim();
-          if (k) op.key = k; // 纯数字键作数组下标由重放侧 Number() 兜底,存字符串即可
-          else delete op.key;
-        }
-      }
-    }
-  });
-}
-
-/** 删除某条变动(从对应桶按序号剔除)。 */
-function deleteTag(tag: Tag) {
-  const [cat, bucket] = tag.key.split(':');
-  commitDelta(dd => {
-    if (cat === 'protagonist') {
-      delete dd.protagonist;
-      return;
-    }
-    if (cat === 'var') {
-      if (Array.isArray(dd.varOps)) dd.varOps.splice(tag.idx, 1); // varOps 是扁平数组,直接按序号删
-      return;
-    }
-    const group = (dd as Record<string, Record<string, unknown[]>>)[cat === 'item' ? 'items' : cat === 'npc' ? 'npcs' : cat === 'scene' ? 'scenes' : cat === 'secret' ? 'secrets' : 'plans'];
-    const arr = group?.[bucket];
-    if (Array.isArray(arr)) arr.splice(tag.idx, 1);
-  });
-}
+/* ============ 就地编辑(状态与读写见 floor/useLeafEdit.ts,子组件 inject 取用) ============ */
+const leafEdit = useLeafEdit({ floor: props.floor, leaf, omit, d });
+provide(LEAF_EDIT, leafEdit);
+const { editKey, edit, setFocus, onTextInput, onFieldKeydown, cancelEdit, editText, saveText, editTime, saveTime, editLoc, saveLoc } = leafEdit;
 
 /* —— 整楼操作 —— */
 // 删除摘要走行内两步确认(面板嵌在 #chat 滚动容器 + 每楼独立 shadow,行内比 Teleport 弹窗更稳、更贴合紧凑面板)
@@ -525,6 +181,12 @@ async function toggleOmit() {
   } finally {
     busy.value = false;
   }
+}
+// 页脚的番外开关:切换没有生效(如记忆处于保护状态)时,开关回到实际状态,不显示成已切换
+async function onOmitSwitch(e: Event) {
+  const input = e.target as HTMLInputElement;
+  await toggleOmit();
+  input.checked = omit.value;
 }
 
 function requestSummary() {
@@ -566,8 +228,8 @@ async function useNewSummary() {
   try {
     const ok = await applyFloorPreview(preview);
     comparePreview.value = null;
-    if (ok) toast(`楼层 #${props.floor} 已换成新摘要`, 'success');
-    else toast(engineState.lastError || `楼层 #${props.floor} 没有替换`, 'error');
+    if (ok) toast(`楼层 #${props.floor} 已替换为新摘要`, 'success');
+    else toast(engineState.lastError || `楼层 #${props.floor} 未替换`, 'error');
   } finally {
     applyingPreview.value = false;
   }
@@ -583,264 +245,140 @@ function keepCurrentSummary() {
 
 <template>
   <div class="bbs-root bbs-fp" :data-theme="ui.theme">
-    <article class="bbs-summary-card bbs-fp-card" :class="{ 'is-omit': omit, 'is-expanded': expanded }">
-      <!-- 卡片头 = 锚点:两行。首行「楼号 + 时间」,次行摘要预览 -->
-      <header class="bbs-fp-head" @click="expanded = !expanded">
-        <span class="bbs-fp-head-main">
-          <span class="bbs-fp-head-top">
-            <span class="bbs-fp-floor" :class="{ 'is-pending': !omit && !valid, 'is-omit': omit }">#{{ floor }}</span>
-            <span v-if="timeLabel" class="bbs-fp-head-time">🕑 {{ timeLabel }}</span>
-            <span v-if="recallChip" class="bbs-fp-head-recall" :class="{ 'is-failed': recallChip.failed }" :title="recall?.statusText">{{ recallChip.text }}</span>
-            <span v-if="openConflicts" class="bbs-fp-head-recall is-warn" title="本楼正文与已有记录不一致，展开查看">不一致 {{ openConflicts }}</span>
-          </span>
-          <span class="bbs-fp-preview" :class="{ 'is-muted': previewMuted }">{{ previewText }}</span>
+    <FloorCardShell v-model:expanded="expanded" :drawer-id="drawerId" caret :class="{ 'is-omit': omit }">
+      <!-- 卡片头 = 锚点。首行「楼号 + 时间 + 标签」,次行摘要预览;展开后正文与可编辑的时间就在下方,两者都不再重复 -->
+      <template #head>
+        <span class="bbs-fp-head-top">
+          <span class="bbs-fp-floor" :class="{ 'is-pending': !omit && !valid, 'is-omit': omit }">#{{ floor }}</span>
+          <span v-if="timeLabel && !expanded" class="bbs-fp-head-time"><Icon name="clock" class="bbs-fp-head-icon" />{{ timeLabel }}</span>
+          <span v-if="recallChip" class="bbs-fp-head-recall" :class="{ 'is-failed': recallChip.failed }" :title="recall?.statusText">{{ recallChip.text }}</span>
+          <span v-if="openConflicts" class="bbs-fp-head-recall is-warn" title="本楼正文与已有记录不一致，展开查看">不一致 {{ openConflicts }}</span>
+          <span v-if="omit" class="bbs-fp-head-tag" title="此楼不参与摘要、总结和注入">番外</span>
         </span>
-        <button
-          class="bbs-fp-omitbtn"
-          :class="{ 'is-active': omit }"
-          type="button"
-          :title="omit ? '取消番外（恢复参与记忆）' : '标为番外（此楼不参与摘要/总结/注入）'"
-          :disabled="busy || engineState.running"
-          @click.stop="toggleOmit"
-        >
-          <Icon name="sparkles" />
-        </button>
-        <button
+        <span v-if="!expanded" class="bbs-fp-preview" :class="{ 'is-muted': previewMuted }">{{ previewText }}</span>
+      </template>
+      <template #actions>
+        <IconButton
           class="bbs-fp-summarybtn"
-          type="button"
-          :title="summaryActionTitle"
-          :aria-label="summaryActionTitle"
+          size="sm"
+          :label="summaryActionTitle"
           :disabled="summaryActionDisabled"
           @click.stop="requestSummary"
         >
           <span v-if="summarizingHere" class="bbs-fp-spinner"></span>
-          <Icon v-else name="search" />
-        </button>
-      </header>
+          <Icon v-else :name="summaryIcon" />
+        </IconButton>
+      </template>
 
-      <!-- 卡片体 = 抽屉(grid 高度过渡) -->
-      <div class="bbs-fp-drawer" :class="{ 'is-open': expanded }">
-        <div class="bbs-fp-drawer-inner">
-          <div class="bbs-fp-drawer-body">
-            <p v-if="omit" class="bbs-fp-note">此楼已标为番外，以下数据不参与记忆；取消番外即恢复。</p>
+      <p v-if="omit" class="bbs-fp-note">此楼已标为番外，以下数据不参与记忆；关闭页脚的「番外」开关即恢复。</p>
 
-            <template v-if="leaf">
-              <!-- 时间 / 地点 chips(可点编辑) -->
-              <div class="bbs-fp-chips">
-                <!-- 时间 -->
-                <div v-if="editKey === 'time'" class="bbs-fp-editform">
-                  <label class="bbs-fp-nrow">
-                    <span class="bbs-fp-nlabel">起始</span>
-                    <textarea :ref="setFocus" v-model="edit.timeStart" rows="1" class="bbs-input bbs-fp-nfield" placeholder="如 1988/9/29 21:00" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
-                  </label>
-                  <label class="bbs-fp-nrow">
-                    <span class="bbs-fp-nlabel">结束</span>
-                    <textarea v-model="edit.timeEnd" rows="1" class="bbs-input bbs-fp-nfield" placeholder="留空=同起始" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
-                  </label>
-                  <div class="bbs-fp-editfoot">
-                    <button class="bbs-btn bbs-btn-sm" type="button" @click="cancelEdit">取消</button>
-                    <button class="bbs-btn bbs-btn-sm bbs-btn-primary" type="button" @click="saveTime">保存</button>
-                  </div>
-                </div>
-                <button v-else-if="!omit" class="bbs-fp-chip is-btn" type="button" @click="editTime">
-                  🕑 {{ timeLabel || '设置时间' }}
-                </button>
-                <span v-else-if="timeLabel" class="bbs-fp-chip">🕑 {{ timeLabel }}</span>
-
-                <!-- 地点 -->
-                <div v-if="editKey === 'loc'" class="bbs-fp-editform">
-                  <label class="bbs-fp-nrow">
-                    <span class="bbs-fp-nlabel">地点</span>
-                    <textarea :ref="setFocus" v-model="edit.location" rows="1" class="bbs-input bbs-fp-nfield" placeholder="当前地点" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
-                  </label>
-                  <div class="bbs-fp-editfoot">
-                    <button class="bbs-btn bbs-btn-sm" type="button" @click="cancelEdit">取消</button>
-                    <button class="bbs-btn bbs-btn-sm bbs-btn-primary" type="button" @click="saveLoc">保存</button>
-                  </div>
-                </div>
-                <button v-else-if="!omit" class="bbs-fp-chip is-btn" type="button" @click="editLoc">
-                  📍 {{ d?.location || '设置地点' }}
-                </button>
-                <span v-else-if="d?.location" class="bbs-fp-chip">📍 {{ d.location }}</span>
-              </div>
-
-              <!-- 摘要正文(可点编辑) -->
-              <template v-if="editKey === 'text'">
-                <div class="bbs-fp-texteditor">
-                  <textarea :ref="setFocus" v-model="edit.text" class="bbs-input bbs-fp-textarea" rows="3" @input="onTextInput"></textarea>
-                  <div class="bbs-fp-editrow-actions">
-                    <button class="bbs-btn" type="button" @click="cancelEdit">取消</button>
-                    <button class="bbs-btn bbs-btn-primary" type="button" @click="saveText">保存</button>
-                  </div>
-                </div>
-              </template>
-              <p
-                v-else
-                class="bbs-summary-text bbs-fp-text"
-                :class="{ 'is-muted': !leaf.text, 'is-btn': !omit }"
-                :title="omit ? '' : '点击编辑摘要正文'"
-                @click="!omit && editText()"
-              >
-                {{ leaf.text || '（无摘要正文，点此补写）' }}
-              </p>
-              <p v-if="leaf.lite && !omit && !hasAnyDelta" class="bbs-fp-note">此楼摘要在批量补摘时与相邻楼层合并生成，只有摘要和时间，未记录状态变动。</p>
-
-              <!-- 变动分组:每类目一张小卡(图标标题 + 标签流);点标签就地编辑(可编辑类)或展开删除 -->
-              <div v-if="hasAnyDelta" class="bbs-fp-groups">
-                <template v-for="g in groups" :key="g.title">
-                <section v-if="g.tags.length" class="bbs-fp-group">
-                  <span class="bbs-fp-gtitle"><Icon :name="g.icon" class="bbs-fp-gicon" />{{ g.title }}</span>
-                  <div class="bbs-fp-flow">
-                    <template v-for="tag in g.tags" :key="tag.key">
-                      <!-- 就地编辑该标签:统一表单式(带字段标签 + 底部规整按钮)。可编辑类给字段行;
-                           不可编辑类(scene、plan 的 达成/重启/删除)只读回显 + 删除/取消。 -->
-                      <div v-if="editKey === tag.key" class="bbs-fp-editform">
-                        <template v-if="tag.editable && tag.key.startsWith('item:') && tag.bucket !== 'remove'">
-                          <label class="bbs-fp-nrow">
-                            <span class="bbs-fp-nlabel">名称</span>
-                            <textarea :ref="setFocus" v-model="edit.name" rows="1" class="bbs-input bbs-fp-nfield" placeholder="名称" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
-                          </label>
-                          <label class="bbs-fp-nrow">
-                            <span class="bbs-fp-nlabel">数量</span>
-                            <input v-model="edit.qty" class="bbs-input bbs-fp-nfield bbs-fp-nfield-num" type="number" placeholder="留空=不计数" />
-                          </label>
-                          <label class="bbs-fp-nrow">
-                            <span class="bbs-fp-nlabel">描述</span>
-                            <textarea v-model="edit.desc" rows="1" class="bbs-input bbs-fp-nfield" placeholder="可选" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
-                          </label>
-                        </template>
-                        <template v-else-if="tag.editable && tag.key.startsWith('npc:') && tag.bucket !== 'remove'">
-                          <!-- 名称恒有(匹配键);其余只渲染本轮实际改动过的字段,不误导「无此数据」 -->
-                          <label class="bbs-fp-nrow">
-                            <span class="bbs-fp-nlabel">名称</span>
-                            <textarea :ref="setFocus" v-model="edit.name" rows="1" class="bbs-input bbs-fp-nfield" placeholder="名称" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
-                          </label>
-                          <div v-for="f in npcAffinityEditFields" :key="f.key" class="bbs-fp-nrow">
-                            <span class="bbs-fp-nlabel">{{ f.label }}</span>
-                            <BbsSelect v-model="edit[f.key]" :options="f.options" :aria-label="f.label" class="bbs-fp-nfield" />
-                          </div>
-                          <label v-for="f in npcEditFields" :key="f.draft" class="bbs-fp-nrow">
-                            <span class="bbs-fp-nlabel">{{ f.label }}</span>
-                            <textarea v-model="edit[f.draft]" rows="1" class="bbs-input bbs-fp-nfield" :placeholder="f.label" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
-                          </label>
-                        </template>
-                        <template v-else-if="tag.editable && tag.key.startsWith('plan:add:')">
-                          <label class="bbs-fp-nrow">
-                            <span class="bbs-fp-nlabel">内容</span>
-                            <textarea :ref="setFocus" v-model="edit.content" rows="1" class="bbs-input bbs-fp-nfield" placeholder="内容" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
-                          </label>
-                        </template>
-                        <template v-else-if="tag.key.startsWith('var:')">
-                          <!-- 变量命令:按类型显示字段。路径恒有;set/assign 有「值」;add 有「增量」;assign/remove 有「键」 -->
-                          <label class="bbs-fp-nrow">
-                            <span class="bbs-fp-nlabel">路径</span>
-                            <textarea :ref="setFocus" v-model="edit.varPath" rows="1" class="bbs-input bbs-fp-nfield" placeholder="如 好感度 或 势力.魔法议会.声望" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
-                          </label>
-                          <label v-if="editingVarOp?.op === 'assign' || editingVarOp?.op === 'remove'" class="bbs-fp-nrow">
-                            <span class="bbs-fp-nlabel">键</span>
-                            <textarea v-model="edit.varKey" rows="1" class="bbs-input bbs-fp-nfield" placeholder="对象键 / 数组下标" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
-                          </label>
-                          <label v-if="editingVarOp?.op === 'add'" class="bbs-fp-nrow">
-                            <span class="bbs-fp-nlabel">增量</span>
-                            <input v-model="edit.varDelta" class="bbs-input bbs-fp-nfield bbs-fp-nfield-num" type="number" placeholder="可负，如 -10" />
-                          </label>
-                          <label v-if="editingVarOp?.op === 'set' || editingVarOp?.op === 'assign'" class="bbs-fp-nrow">
-                            <span class="bbs-fp-nlabel">值</span>
-                            <textarea v-model="edit.varValue" rows="1" class="bbs-input bbs-fp-nfield" placeholder="文本直接写；数字/true/JSON 按原样" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
-                          </label>
-                        </template>
-                        <template v-else-if="tag.editable && tag.bucket === 'remove'">
-                          <label class="bbs-fp-nrow">
-                            <span class="bbs-fp-nlabel">名称</span>
-                            <textarea :ref="setFocus" v-model="edit.name" rows="1" class="bbs-input bbs-fp-nfield" placeholder="名称" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
-                          </label>
-                        </template>
-                        <!-- 不可编辑标签:只读回显要删除的内容(带副文本,如变量的值/增量) -->
-                        <p v-else class="bbs-fp-editreadonly">{{ tag.sub ? `${tag.text} · ${tag.sub}` : tag.text }}</p>
-                        <div class="bbs-fp-editfoot">
-                          <button class="bbs-fp-editdel" type="button" title="删除此条" @click="deleteTag(tag)"><Icon name="trash" />删除</button>
-                          <span class="bbs-fp-editfoot-spacer"></span>
-                          <button class="bbs-btn bbs-btn-sm" type="button" @click="cancelEdit">取消</button>
-                          <button v-if="tag.editable" class="bbs-btn bbs-btn-sm bbs-btn-primary" type="button" @click="saveTag(tag)">保存</button>
-                        </div>
-                      </div>
-                      <!-- 标签只读态:徽标钉左上 + 主文本一行 + 副文本(细节)另起淡色一行 -->
-                      <button
-                        v-else
-                        class="bbs-fp-tagline is-btn"
-                        :class="'op-' + tag.op"
-                        type="button"
-                        :disabled="omit"
-                        :title="omit ? '' : '点击编辑'"
-                        @click="editTag(tag)"
-                      >
-                        <span class="bbs-fp-op">{{ opLabel[tag.op] }}</span>
-                        <span class="bbs-fp-tagbody">
-                          <span class="bbs-fp-tagmain">{{ tag.text }}</span>
-                          <span v-if="tag.sub" class="bbs-fp-tagsub">{{ tag.sub }}</span>
-                        </span>
-                      </button>
-                    </template>
-                  </div>
-                </section>
-                </template>
-              </div>
-            </template>
-
-            <p v-else class="bbs-summary-text bbs-fp-text is-muted">此楼尚无摘要。</p>
-
-            <!-- 正文与记录不一致:摘要时标出,记录保持原样;可提醒正文模型或忽略 -->
-            <section v-if="conflicts.length" class="bbs-fp-group bbs-fp-conflicts">
-              <span class="bbs-fp-gtitle"><Icon name="bolt" class="bbs-fp-gicon" />与记录不一致 · {{ conflicts.length }} 处</span>
-              <p class="bbs-fp-recall-status">摘要时发现本楼正文与已有记录不一致，且正文没有交代变化，记录保持原样。</p>
-              <div v-for="(c, i) in conflicts" :key="i" class="bbs-fp-conflict" :class="`is-${c.status ?? 'open'}`">
-                <p class="bbs-fp-conflict-about">{{ c.about }}</p>
-                <p class="bbs-fp-conflict-line"><span class="bbs-fp-conflict-tag">记录</span>{{ c.record }}</p>
-                <p class="bbs-fp-conflict-line"><span class="bbs-fp-conflict-tag">正文</span>「{{ c.text }}」</p>
-                <div class="bbs-fp-conflict-actions">
-                  <template v-if="!c.status || c.status === 'open'">
-                    <button class="bbs-btn bbs-btn-sm" type="button" title="下一次生成时注入一次提醒，让正文按记录继续" @click="changeConflict(i, 'pending')">提醒正文模型</button>
-                    <button class="bbs-btn bbs-btn-sm" type="button" @click="changeConflict(i, 'ignored')">忽略</button>
-                  </template>
-                  <template v-else>
-                    <span class="bbs-fp-conflict-state">{{ CONFLICT_STATE[c.status] }}</span>
-                    <button v-if="c.status !== 'reminded'" class="bbs-fp-conflict-undo" type="button" @click="changeConflict(i, 'open')">撤销</button>
-                  </template>
-                </div>
-              </div>
-              <p class="bbs-fp-conflict-hint">以正文为准时，可在角色页、物品页等处直接修改对应记录。</p>
-            </section>
-
-            <!-- 生成本楼前的召回:来源楼层、故事时间、注入全文还是摘要、内容预览 -->
-            <section v-if="recall" class="bbs-fp-group bbs-fp-recall">
-              <span class="bbs-fp-gtitle"><Icon name="bookmark" class="bbs-fp-gicon" />召回<template v-if="recall.items.length"> · {{ recall.items.length }} 段</template></span>
-              <p class="bbs-fp-recall-status" :class="{ 'is-failed': recall.phase === 'failed' }">{{ recall.statusText }}</p>
-              <RecallList v-if="recall.items.length" :items="recall.items" />
-            </section>
-
-            <!-- 页脚:删除整楼摘要(行内两步确认,防误触) -->
-            <div v-if="leaf && !omit" class="bbs-fp-footer">
-              <template v-if="confirmingDelete">
-                <span class="bbs-fp-confirm-text">删除此楼摘要？</span>
-                <button class="bbs-fp-confirm-cancel" type="button" :disabled="busy" @click="cancelDelete">取消</button>
-                <button class="bbs-fp-confirm-ok" type="button" :disabled="busy" @click="removeLeaf">
-                  <Icon name="trash" />删除
-                </button>
-              </template>
-              <button v-else class="bbs-fp-delleaf" type="button" title="删除此楼摘要" :disabled="busy" @click="askDelete">
-                <Icon name="trash" />删除摘要
-              </button>
+      <template v-if="leaf">
+        <!-- 时间 / 地点(可点编辑) -->
+        <div class="bbs-fp-chips">
+          <!-- 时间 -->
+          <div v-if="editKey === 'time'" class="bbs-fp-editform">
+            <label class="bbs-fp-nrow">
+              <span class="bbs-fp-nlabel">起始</span>
+              <textarea :ref="setFocus" v-model="edit.timeStart" rows="1" class="bbs-input bbs-fp-nfield" placeholder="如 1988/9/29 21:00" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
+            </label>
+            <label class="bbs-fp-nrow">
+              <span class="bbs-fp-nlabel">结束</span>
+              <textarea v-model="edit.timeEnd" rows="1" class="bbs-input bbs-fp-nfield" placeholder="留空则与起始相同" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
+            </label>
+            <div class="bbs-fp-editfoot">
+              <span class="bbs-fp-editfoot-spacer"></span>
+              <button class="bbs-btn bbs-btn-sm" type="button" @click="cancelEdit">取消</button>
+              <button class="bbs-btn bbs-btn-sm bbs-btn-primary" type="button" @click="saveTime">保存</button>
             </div>
           </div>
+          <button v-else-if="!omit" class="bbs-fp-chip is-btn" type="button" :aria-label="timeLabel ? `编辑时间：${timeLabel}` : undefined" @click="editTime">
+            <Icon name="clock" class="bbs-fp-chip-icon" />{{ timeLabel || '设置时间' }}
+          </button>
+          <span v-else-if="timeLabel" class="bbs-fp-chip"><Icon name="clock" class="bbs-fp-chip-icon" />{{ timeLabel }}</span>
+
+          <!-- 地点 -->
+          <div v-if="editKey === 'loc'" class="bbs-fp-editform">
+            <label class="bbs-fp-nrow">
+              <span class="bbs-fp-nlabel">地点</span>
+              <textarea :ref="setFocus" v-model="edit.location" rows="1" class="bbs-input bbs-fp-nfield" placeholder="当前地点" @input="onTextInput" @keydown="onFieldKeydown"></textarea>
+            </label>
+            <div class="bbs-fp-editfoot">
+              <span class="bbs-fp-editfoot-spacer"></span>
+              <button class="bbs-btn bbs-btn-sm" type="button" @click="cancelEdit">取消</button>
+              <button class="bbs-btn bbs-btn-sm bbs-btn-primary" type="button" @click="saveLoc">保存</button>
+            </div>
+          </div>
+          <button v-else-if="!omit" class="bbs-fp-chip is-btn" type="button" :aria-label="d?.location ? `编辑地点：${d.location}` : undefined" @click="editLoc">
+            <Icon name="location" class="bbs-fp-chip-icon" />{{ d?.location || '设置地点' }}
+          </button>
+          <span v-else-if="d?.location" class="bbs-fp-chip"><Icon name="location" class="bbs-fp-chip-icon" />{{ d.location }}</span>
+        </div>
+
+        <!-- 摘要正文:可编辑时整块是一个按钮(鼠标点按、键盘 Enter/空格都能进入编辑) -->
+        <template v-if="editKey === 'text'">
+          <div class="bbs-fp-texteditor">
+            <textarea :ref="setFocus" v-model="edit.text" class="bbs-input bbs-fp-textarea" rows="3" aria-label="摘要正文" @input="onTextInput"></textarea>
+            <div class="bbs-fp-editrow-actions">
+              <button class="bbs-btn" type="button" @click="cancelEdit">取消</button>
+              <button class="bbs-btn bbs-btn-primary" type="button" @click="saveText">保存</button>
+            </div>
+          </div>
+        </template>
+        <button
+          v-else-if="!omit"
+          class="bbs-summary-text bbs-fp-text is-btn"
+          :class="{ 'is-muted': !leaf.text }"
+          type="button"
+          title="编辑摘要正文"
+          @click="editText"
+        >{{ leaf.text || '（无摘要正文，点击补写）' }}</button>
+        <p v-else class="bbs-summary-text bbs-fp-text" :class="{ 'is-muted': !leaf.text }">{{ leaf.text || '（无摘要正文）' }}</p>
+        <p v-if="leaf.lite && !omit && !hasAnyDelta" class="bbs-fp-note">此楼摘要在批量补摘时与相邻楼层合并生成，只有摘要和时间，未记录状态变动。</p>
+
+        <!-- 变动分组:点一条就地编辑(可编辑类)或展开删除 -->
+        <DeltaGroups v-if="hasTags" :groups="groups" :omit="omit" />
+      </template>
+
+      <p v-else class="bbs-summary-text bbs-fp-text is-muted">此楼尚无摘要。</p>
+
+      <!-- 正文与记录不一致:摘要时标出,记录保持原样;可提醒正文模型或忽略 -->
+      <FloorConflicts v-if="conflicts.length" :floor="floor" :conflicts="conflicts" />
+
+      <!-- 生成本楼前的召回 -->
+      <FloorRecall v-if="recall" :recall="recall" />
+
+      <!-- 页脚:番外开关;生成 / 重新生成摘要;删除摘要(行内两步确认:每楼是独立的 shadow,没有弹窗宿主,行内确认更可靠) -->
+      <div class="bbs-fp-footer">
+        <label class="bbs-fp-omit-switch">
+          <input type="checkbox" class="bbs-switch" :checked="omit" :disabled="busy || engineState.running" @change="onOmitSwitch" />
+          <span class="bbs-fp-omit-label">番外</span>
+          <span class="bbs-fp-omit-hint">此楼不参与摘要、总结和注入</span>
+        </label>
+        <div v-if="!omit" class="bbs-fp-footer-actions">
+          <template v-if="confirmingDelete">
+            <span class="bbs-fp-confirm-text">删除此楼摘要？</span>
+            <button class="bbs-btn bbs-btn-sm bbs-fp-confirm-cancel" type="button" :disabled="busy" @click="cancelDelete">取消</button>
+            <button class="bbs-fp-confirm-ok" type="button" :disabled="busy" @click="removeLeaf">
+              <Icon name="trash" />删除
+            </button>
+          </template>
+          <template v-else>
+            <button class="bbs-btn bbs-btn-sm bbs-fp-regen" type="button" :disabled="summaryActionDisabled" @click="requestSummary">
+              <span v-if="summarizingHere" class="bbs-fp-spinner"></span><Icon v-else :name="summaryIcon" />{{ summaryActionText }}
+            </button>
+            <button v-if="leaf" class="bbs-fp-delleaf" type="button" title="删除此楼摘要" :disabled="busy" @click="askDelete">
+              <Icon name="trash" />删除摘要
+            </button>
+          </template>
         </div>
       </div>
-    </article>
+    </FloorCardShell>
 
     <ConfirmDialog
       v-model:open="regenerateConfirmOpen"
       :title="`重新摘要楼层 #${floor}`"
       confirmText="生成新摘要"
-      confirmIcon="search"
+      confirmIcon="refresh"
       :busy="summarizingHere"
       busyText="生成中…"
       @confirm="confirmRegenerate"
@@ -851,42 +389,18 @@ function keepCurrentSummary() {
   </div>
 </template>
 
+<style scoped src="./floor/editForm.css"></style>
 <style scoped>
 .bbs-fp {
   margin: 6px 0 2px;
 }
-/* 外层卡用 --bbs-bg(页面底色),与主界面「页面底 → surface 卡片 → surface-2 次级块」的
-   层次一致:楼层面板即一块「迷你页面」,内部的类目小卡才是抬起的 surface。
-   (默认继承自 .bbs-summary-card 的 surface,这里覆盖成 bg。)
-   收起态更紧凑:收窄内边距,楼号行本就矮,大留白会显空。展开态恢复常规 padding。 */
-.bbs-fp-card {
-  background: var(--bbs-bg);
-  padding: 9px 12px;
-}
-.bbs-fp-card.is-expanded {
-  padding: 12px 14px;
-}
+/* 番外:虚线边框 + 左侧中性竖线表示「不计入记忆」。不降整体透明度,文字对比度不受影响 */
 .bbs-fp-card.is-omit {
-  opacity: 0.72;
+  border-style: dashed;
   border-left: 3px solid var(--bbs-ink-muted);
 }
 
-/* 卡片头:左侧两行主区(楼号+时间 / 预览)+ 右侧番外键、单楼摘要键 */
-.bbs-fp-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  flex-wrap: nowrap;
-}
-.bbs-fp-head-main {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-/* 首行:楼号 + 时间 */
+/* 卡片头首行:楼号 + 时间 + 小标签 */
 .bbs-fp-head-top {
   display: flex;
   align-items: center;
@@ -898,17 +412,21 @@ function keepCurrentSummary() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11.5px;
+  font-size: var(--bbs-fs-meta);
   color: var(--bbs-ink-muted);
   font-variant-numeric: tabular-nums;
 }
-/* 召回标签:时间之后的小描边签,空间不够时时间先省略 */
-.bbs-fp-head-recall {
+.bbs-fp-head-icon {
+  margin-right: 4px;
+}
+/* 头部小标签(召回、不一致、番外):时间之后的小描边签,空间不够时时间先省略 */
+.bbs-fp-head-recall,
+.bbs-fp-head-tag {
   flex: 0 0 auto;
   padding: 0 7px;
   border: 1px solid var(--bbs-line);
   border-radius: var(--bbs-radius-pill);
-  font-size: 11px;
+  font-size: var(--bbs-fs-badge);
   line-height: 18px;
   color: var(--bbs-ink-soft);
   white-space: nowrap;
@@ -933,7 +451,7 @@ function keepCurrentSummary() {
   border: 1px solid var(--bbs-accent);
   background: var(--bbs-accent-soft);
   font-family: var(--bbs-font-mono);
-  font-size: 11px;
+  font-size: var(--bbs-fs-badge);
   font-weight: 600;
   color: var(--bbs-accent);
   font-variant-numeric: tabular-nums;
@@ -951,46 +469,14 @@ function keepCurrentSummary() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12.5px;
+  font-size: var(--bbs-fs-sm);
   color: var(--bbs-ink-soft);
 }
 .bbs-fp-preview.is-muted {
   color: var(--bbs-ink-muted);
   font-style: italic;
 }
-.bbs-fp-omitbtn,
-.bbs-fp-summarybtn {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--bbs-radius-sm);
-  background: transparent;
-  color: var(--bbs-ink-muted);
-  cursor: pointer;
-  font-size: 13px;
-  transition:
-    color var(--bbs-dur) var(--bbs-ease),
-    background var(--bbs-dur) var(--bbs-ease);
-}
-.bbs-fp-omitbtn:hover:not(:disabled),
-.bbs-fp-summarybtn:hover:not(:disabled) {
-  color: var(--bbs-accent);
-  background: var(--bbs-surface-2);
-}
-.bbs-fp-omitbtn:disabled,
-.bbs-fp-summarybtn:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-.bbs-fp-omitbtn.is-active {
-  color: var(--bbs-accent);
-  background: var(--bbs-accent-soft);
-}
+/* 单楼摘要键生成中的旋转环(放在 IconButton 的插槽里) */
 .bbs-fp-spinner {
   width: 13px;
   height: 13px;
@@ -1003,34 +489,6 @@ function keepCurrentSummary() {
 @keyframes bbs-fp-spin {
   to { transform: rotate(360deg); }
 }
-.bbs-fp-card.is-expanded .bbs-fp-head {
-  margin-bottom: 12px;
-}
-
-/* 抽屉 */
-.bbs-fp-drawer {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows var(--bbs-dur) var(--bbs-ease);
-}
-.bbs-fp-drawer.is-open {
-  grid-template-rows: 1fr;
-}
-.bbs-fp-drawer-inner {
-  min-height: 0;
-  overflow: hidden;
-}
-.bbs-fp-drawer-body {
-  opacity: 0;
-  transform: translateY(-8px);
-  transition:
-    opacity var(--bbs-dur) var(--bbs-ease),
-    transform var(--bbs-dur) var(--bbs-ease);
-}
-.bbs-fp-drawer.is-open .bbs-fp-drawer-body {
-  opacity: 1;
-  transform: none;
-}
 
 .bbs-fp-note {
   margin: 0 0 10px;
@@ -1038,10 +496,12 @@ function keepCurrentSummary() {
   border-radius: var(--bbs-radius-sm);
   background: var(--bbs-surface-2);
   color: var(--bbs-ink-muted);
-  font-size: 12px;
+  font-size: var(--bbs-fs-meta);
+  line-height: 1.6;
+  text-wrap: pretty;
 }
 
-/* 时间/地点 chips */
+/* 时间/地点 */
 .bbs-fp-chips {
   display: flex;
   flex-wrap: wrap;
@@ -1052,15 +512,26 @@ function keepCurrentSummary() {
 .bbs-fp-chip {
   display: inline-flex;
   align-items: center;
-  padding: 3px 10px;
+  gap: 5px;
+  max-width: 100%;
+  min-height: 26px;
+  padding: 3px 11px;
   border-radius: var(--bbs-radius-pill);
   border: 1px solid transparent;
   background: var(--bbs-accent-soft);
   color: var(--bbs-accent);
-  font-size: 11.5px;
+  font-size: var(--bbs-fs-meta);
   font-weight: 500;
+  line-height: 1.4;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.bbs-fp-chip-icon {
+  flex: 0 0 auto;
+  font-size: 13px;
 }
 .bbs-fp-chip.is-btn {
+  min-height: var(--bbs-control-h-sm);
   cursor: pointer;
   transition: border-color var(--bbs-dur) var(--bbs-ease);
 }
@@ -1084,6 +555,7 @@ function keepCurrentSummary() {
   line-height: 1.75;
   letter-spacing: 0.02em;
   color: var(--bbs-ink);
+  text-align: left;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1101,307 +573,6 @@ function keepCurrentSummary() {
 }
 .bbs-fp-text.is-btn:hover {
   border-color: var(--bbs-accent);
-}
-
-/* 变动分组:整体不再是平铺行,而是若干张「卡中卡」——每类目一张淡底描边小卡,
-   顶部图标标题定调,下方标签流。层次感与主界面卡片语言一致。 */
-.bbs-fp-groups {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding-top: 12px;
-  border-top: 1px dashed var(--bbs-line);
-}
-/* 类目小卡:抬起面(surface),浮在 bg 外层卡之上——对齐主界面 .bbs-plan 卡片 */
-.bbs-fp-group {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--bbs-line);
-  border-radius: var(--bbs-radius-sm);
-  background: var(--bbs-surface);
-}
-/* 类目标题:描边图标 + 名称,图标着强调色作视觉锚点,一眼分区 */
-.bbs-fp-gtitle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--bbs-ink-soft);
-  white-space: nowrap;
-}
-.bbs-fp-gicon {
-  color: var(--bbs-accent);
-  font-size: 15px;
-}
-/* 召回卡:与变动类目卡同一层级,列表条目沉一档(surface-2),徽标提亮一档(surface) */
-.bbs-fp-recall {
-  margin-top: 10px;
-  --bbs-recall-item-bg: var(--bbs-surface-2);
-  --bbs-recall-badge-bg: var(--bbs-surface);
-}
-.bbs-fp-recall-status {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--bbs-ink-soft);
-}
-.bbs-fp-recall-status.is-failed {
-  color: var(--bbs-danger);
-}
-/* 与记录不一致:每处一块淡底条目,处理过的降一档 */
-.bbs-fp-conflicts {
-  margin-top: 10px;
-}
-.bbs-fp-conflicts .bbs-fp-gicon {
-  color: var(--bbs-warning);
-}
-.bbs-fp-conflict {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px 10px;
-  border: 1px solid var(--bbs-line);
-  border-left: 3px solid var(--bbs-warning);
-  border-radius: var(--bbs-radius-sm);
-  background: var(--bbs-surface-2);
-}
-.bbs-fp-conflict:not(.is-open) {
-  border-left-color: var(--bbs-line-strong, var(--bbs-line));
-  opacity: 0.8;
-}
-.bbs-fp-conflict p {
-  margin: 0;
-}
-.bbs-fp-conflict-about {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--bbs-ink);
-}
-.bbs-fp-conflict-line {
-  display: flex;
-  gap: 6px;
-  font-size: 12.5px;
-  line-height: 1.55;
-  color: var(--bbs-ink-soft);
-  word-break: break-word;
-}
-.bbs-fp-conflict-tag {
-  flex: 0 0 auto;
-  padding: 0 6px;
-  border-radius: var(--bbs-radius-sm);
-  background: var(--bbs-surface);
-  font-size: 11px;
-  line-height: 19px;
-  color: var(--bbs-ink-muted);
-}
-.bbs-fp-conflict-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-top: 2px;
-}
-.bbs-fp-conflict-actions .bbs-btn-sm {
-  padding: 4px 10px;
-  font-size: 12px;
-}
-.bbs-fp-conflict-state {
-  font-size: 12px;
-  color: var(--bbs-ink-muted);
-}
-.bbs-fp-conflict-undo {
-  padding: 2px 6px;
-  border: 0;
-  background: transparent;
-  color: var(--bbs-ink-muted);
-  font-size: 12px;
-  text-decoration: underline;
-  cursor: pointer;
-}
-.bbs-fp-conflict-undo:hover {
-  color: var(--bbs-accent);
-}
-.bbs-fp-conflict-hint {
-  margin: 0;
-  font-size: 11.5px;
-  color: var(--bbs-ink-muted);
-}
-/* 变动条纵向堆叠(每条独占一行):它们承载的是可长可短的内容,横向 chip 流会把长条撑成
-   丑陋的多行泡泡。改为账册式条目——一行一条、左对齐、内容自然换行。 */
-.bbs-fp-flow {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-}
-/* 变动条(只读=按钮,可点编辑):徽标钉左上,右侧主/副文本左对齐。
-   坐落在 surface 类目卡上,故自身用次级面(surface-2),层次沉一档;
-   小圆角(非药丸),像账册上的一行条目;色彩只落在左侧徽标,条目本体素净。 */
-.bbs-fp-tagline {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  width: 100%;
-  padding: 7px 10px;
-  border-radius: var(--bbs-radius-sm);
-  border: 1px solid var(--bbs-line);
-  background: var(--bbs-surface-2);
-  color: var(--bbs-ink);
-  font-family: var(--bbs-font-sans);
-  text-align: left;
-}
-.bbs-fp-tagline.is-btn {
-  cursor: pointer;
-  transition:
-    border-color var(--bbs-dur) var(--bbs-ease),
-    box-shadow var(--bbs-dur) var(--bbs-ease);
-}
-.bbs-fp-tagline.is-btn:hover:not(:disabled) {
-  border-color: var(--bbs-accent);
-  box-shadow: 0 0 0 2px var(--bbs-accent-soft);
-}
-.bbs-fp-tagline:disabled {
-  cursor: default;
-}
-/* op 徽标:小圆角色块,颜色即语义(新增=强调、移除=危险、达成/重启=琥珀、更新/迁移=中性)。
-   中性态在 surface-2 条上用 surface 提亮一档;顶部对齐首行,margin-top 微调与主文本基线齐平。 */
-.bbs-fp-op {
-  flex: 0 0 auto;
-  margin-top: 1px;
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 7px;
-  border-radius: var(--bbs-radius-sm);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--bbs-ink-soft);
-  background: var(--bbs-surface);
-}
-.bbs-fp-tagline.op-add .bbs-fp-op {
-  color: var(--bbs-accent);
-  background: var(--bbs-accent-soft);
-}
-.bbs-fp-tagline.op-remove .bbs-fp-op {
-  color: var(--bbs-danger);
-  background: var(--bbs-danger-soft);
-}
-.bbs-fp-tagline.op-resolve .bbs-fp-op,
-.bbs-fp-tagline.op-reopen .bbs-fp-op {
-  color: var(--bbs-warning);
-  background: var(--bbs-warning-soft);
-}
-/* 主/副文本:纵向堆叠,主文本正常色、副文本淡色小字 */
-.bbs-fp-tagbody {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.bbs-fp-tagmain {
-  font-size: 12.5px;
-  line-height: 1.45;
-  color: var(--bbs-ink);
-  word-break: break-word;
-}
-.bbs-fp-tagsub {
-  font-size: 11.5px;
-  line-height: 1.5;
-  color: var(--bbs-ink-soft);
-  word-break: break-word;
-}
-
-/* ===== 统一就地编辑表单 =====
-   时间/地点/物品/角色/悬念的编辑全走这套:淡底描边卡片,内含「字段行(标签+输入)」
-   纵向排列,底部一条规整的删除/取消/保存。观感对齐主界面弹窗,不再是挤成一行的小框。 */
-.bbs-fp-editform {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  border-radius: var(--bbs-radius-sm);
-  border: 1px solid var(--bbs-accent);
-  background: var(--bbs-surface);
-}
-/* 字段行:左侧固定宽标签 + 右侧撑满输入框,规整对齐 */
-/* 字段行:标签顶端对齐(输入框可能多行,标签仍贴首行) */
-.bbs-fp-nrow {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
-.bbs-fp-nlabel {
-  flex: 0 0 auto;
-  width: 40px;
-  padding-top: 6px; /* 与字段首行文字基线对齐 */
-  font-size: 12px;
-  color: var(--bbs-ink-soft);
-}
-/* 字段输入:改用 textarea 以「单行输入、多行显示」——内容长时自动换行、随内容长高,
-   完整可见;回车被 onFieldKeydown 拦截,输入语义仍是单行。
-   底用 surface-2:输入框在 surface 表单卡上要沉一档,对齐主界面输入框惯例。 */
-.bbs-fp-nfield {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: 5px 9px;
-  font-size: 12.5px;
-  font-family: var(--bbs-font-sans);
-  line-height: 1.5;
-  background: var(--bbs-surface-2);
-  resize: none;
-  overflow: hidden;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-/* 数量仍是普通 number input,单行即可,不需要换行长高 */
-.bbs-fp-nfield-num {
-  resize: none;
-}
-/* 不可编辑标签删除态:只读回显要删除的内容 */
-.bbs-fp-editreadonly {
-  margin: 0;
-  font-size: 12.5px;
-  color: var(--bbs-ink-soft);
-  word-break: break-word;
-}
-/* 底部操作条:删除靠左(低调,hover 显红),取消/保存靠右成组 */
-.bbs-fp-editfoot {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 2px;
-}
-.bbs-fp-editfoot-spacer {
-  flex: 1 1 auto;
-}
-.bbs-fp-editfoot .bbs-btn-sm {
-  padding: 5px 12px;
-  font-size: 12px;
-}
-.bbs-fp-editdel {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 5px 8px;
-  border: 0;
-  border-radius: var(--bbs-radius-sm);
-  background: transparent;
-  color: var(--bbs-ink-muted);
-  font-size: 12px;
-  cursor: pointer;
-  transition:
-    color var(--bbs-dur) var(--bbs-ease),
-    background var(--bbs-dur) var(--bbs-ease);
-}
-.bbs-fp-editdel:hover {
-  color: var(--bbs-danger);
-  background: var(--bbs-danger-soft);
 }
 
 /* 正文编辑器:textarea 盒模型已与只读块统一(见上「正文」块),这里只加可拉伸 + 去掉底距(编辑器容器管间距) */
@@ -1422,14 +593,38 @@ function keepCurrentSummary() {
   margin-top: 6px;
 }
 
-/* 页脚 */
+/* 页脚:上为番外开关,下为生成 / 重新生成摘要与删除摘要 */
 .bbs-fp-footer {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
-  margin-top: 12px;
+  margin-top: 14px;
   padding-top: 10px;
   border-top: 1px solid var(--bbs-line);
+}
+/* 番外开关:整行可点(label 包住开关),说明紧跟在后 */
+.bbs-fp-omit-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-height: var(--bbs-control-h-sm);
+  cursor: pointer;
+  font-size: var(--bbs-fs-sm);
+  color: var(--bbs-ink);
+}
+.bbs-fp-omit-label {
+  font-weight: 600;
+}
+.bbs-fp-omit-hint {
+  font-size: var(--bbs-fs-meta);
+  color: var(--bbs-ink-muted);
+}
+.bbs-fp-footer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 /* 删除入口:平时只是一枚安静的图标+字,靠右不抢眼;hover 才浮现危险色 */
 .bbs-fp-delleaf {
@@ -1437,12 +632,13 @@ function keepCurrentSummary() {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  min-height: var(--bbs-control-h-sm);
   padding: 5px 10px;
   border: 0;
   border-radius: var(--bbs-radius-sm);
   background: transparent;
   color: var(--bbs-ink-muted);
-  font-size: 12px;
+  font-size: var(--bbs-fs-meta);
   cursor: pointer;
   transition:
     color var(--bbs-dur) var(--bbs-ease),
@@ -1454,59 +650,52 @@ function keepCurrentSummary() {
 }
 .bbs-fp-delleaf:disabled {
   opacity: 0.55;
-  cursor: default;
 }
-/* 两步确认:提示文字 + 取消/删除并排,删除键用危险色实心,确认动作明确 */
+/* 两步确认:提示文字 + 取消(通用小按钮)+ 删除(危险色实心,文字色随主题) */
 .bbs-fp-confirm-text {
   flex: 1 1 auto;
   min-width: 0;
-  font-size: 12px;
+  font-size: var(--bbs-fs-meta);
   color: var(--bbs-ink-soft);
 }
-.bbs-fp-confirm-cancel,
+.bbs-fp-confirm-cancel {
+  flex: 0 0 auto;
+}
 .bbs-fp-confirm-ok {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  min-height: var(--bbs-control-h-sm);
   padding: 5px 12px;
-  border-radius: var(--bbs-radius-sm);
-  font-size: 12px;
+  border: 1px solid var(--bbs-danger);
+  border-radius: 9px;
+  background: var(--bbs-danger);
+  /* 危险色上的文字色随主题:夜间危险色较浅,用深色字 */
+  color: var(--bbs-danger-ink);
+  font-size: var(--bbs-fs-meta);
   font-weight: 600;
   cursor: pointer;
-  transition:
-    background var(--bbs-dur) var(--bbs-ease),
-    border-color var(--bbs-dur) var(--bbs-ease),
-    opacity var(--bbs-dur) var(--bbs-ease);
-}
-.bbs-fp-confirm-cancel {
-  border: 1px solid var(--bbs-line-strong);
-  background: transparent;
-  color: var(--bbs-ink-soft);
-}
-.bbs-fp-confirm-cancel:hover:not(:disabled) {
-  border-color: var(--bbs-accent);
-  color: var(--bbs-accent);
-}
-.bbs-fp-confirm-ok {
-  border: 1px solid var(--bbs-danger);
-  background: var(--bbs-danger);
-  color: #fff;
+  transition: opacity var(--bbs-dur) var(--bbs-ease);
 }
 .bbs-fp-confirm-ok:hover:not(:disabled) {
   opacity: 0.9;
 }
-.bbs-fp-confirm-cancel:disabled,
 .bbs-fp-confirm-ok:disabled {
   opacity: 0.55;
-  cursor: default;
+}
+
+/* 手机与触屏:可点的标签和页脚按钮加高到 40px */
+@media (max-width: 640px), (pointer: coarse) {
+  .bbs-fp-chip.is-btn,
+  .bbs-fp-omit-switch,
+  .bbs-fp-delleaf,
+  .bbs-fp-confirm-ok {
+    min-height: 40px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .bbs-fp-drawer,
-  .bbs-fp-drawer-body {
-    transition: none;
-  }
   .bbs-fp-spinner {
     animation-duration: 1.4s;
   }

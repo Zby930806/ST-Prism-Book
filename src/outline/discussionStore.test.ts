@@ -131,9 +131,46 @@ describe('独立 sidecar / 旧聊天兼容', () => {
   });
 });
 
+describe('消息时间（第 2 版）', () => {
+  const at = (n: number) => 1_800_000_000_000 + n;
+  it('读取第 2 版，带时间与不带时间的消息可以混合', () => {
+    const messages: DiscussionMessage[] = [...pair('旧问', '旧答'), { role: 'user', content: '新问', at: at(1) }, { role: 'assistant', content: '新答', at: at(2) }];
+    ctx.chatMetadata[DISCUSSION_DATA_KEY] = { version: 2, messages };
+    loadOutlineDiscussion();
+    expect(discussionState.issue).toBe('');
+    expect(discussionState.messages).toEqual(messages);
+    expect(discussionWriteIssue()).toBe('');
+  });
+  it('带时间追加后写第 2 版，旧消息保持没有时间，重载可恢复', async () => {
+    seed();
+    await appendDiscussionTurn('新问题', '新回答', discussionState.revision, sources.captureOutlineSource(ctx), { question: at(1), answer: at(2) });
+    const expected = [...pair(), { role: 'user', content: '新问题', at: at(1) }, { role: 'assistant', content: '新回答', at: at(2) }];
+    expect(saved()).toEqual({ version: 2, messages: expected });
+    expect(Object.keys((saved() as { messages: object[] }).messages[0])).toEqual(['role', 'content']);
+    loadOutlineDiscussion();
+    expect(discussionState.messages).toEqual(expected);
+  });
+  it('时间无效时照常保存问答，只是不记时间', async () => {
+    await appendDiscussionTurn('问', '答', discussionState.revision, sources.captureOutlineSource(ctx), { question: Number.NaN, answer: at(2) });
+    expect(saved()).toEqual(data(pair('问', '答')));
+  });
+  it('清空后写空的第 1 版，旧版本也能读取', async () => {
+    await appendDiscussionTurn('问', '答', discussionState.revision, sources.captureOutlineSource(ctx), { question: at(1), answer: at(2) });
+    expect((saved() as { version: number }).version).toBe(2);
+    await clearOutlineDiscussion(discussionState.revision);
+    expect(saved()).toEqual(data([]));
+  });
+});
+
 describe('严格格式 / 未知版本只读', () => {
   const bad: [string, () => unknown][] = [
-    ['未来版本', () => ({ version: 2, messages: pair() })],
+    ['未来版本', () => ({ version: 3, messages: pair() })],
+    ['v1 消息带时间', () => data([{ ...pair()[0], at: 1 }, pair()[1]] as DiscussionMessage[])],
+    ['v2 时间为 0', () => ({ version: 2, messages: [{ ...pair()[0], at: 0 }, pair()[1]] })],
+    ['v2 时间为小数', () => ({ version: 2, messages: [{ ...pair()[0], at: 1.5 }, pair()[1]] })],
+    ['v2 时间为字符串', () => ({ version: 2, messages: [{ ...pair()[0], at: '1800000000000' }, pair()[1]] })],
+    ['v2 时间为 undefined', () => ({ version: 2, messages: [{ ...pair()[0], at: undefined }, pair()[1]] })],
+    ['v2 消息未知字段', () => ({ version: 2, messages: [{ ...pair()[0], at: 1, extra: true }, pair()[1]] })],
     ['旧版本', () => ({ version: 0, messages: pair() })],
     ['字符串版本', () => ({ version: '1', messages: pair() })],
     ['缺版本', () => ({ messages: pair() })],
@@ -291,7 +328,7 @@ describe('revision / 来源 / metadata 并发保护', () => {
     if (kind === '替换') ctx.chatMetadata[DISCUSSION_DATA_KEY] = data(pair('外部问题', '外部回答'));
     if (kind === '原地修改') (saved() as ReturnType<typeof data>).messages[0].content = '外部编辑';
     if (kind === '删除') delete ctx.chatMetadata[DISCUSSION_DATA_KEY];
-    if (kind === '未来版本') ctx.chatMetadata[DISCUSSION_DATA_KEY] = { version: 2, messages: [] };
+    if (kind === '未来版本') ctx.chatMetadata[DISCUSSION_DATA_KEY] = { version: 3, messages: [] };
     const raw = saved();
     expect(discussionWriteIssue()).toContain('其它操作中改变');
     expect(discussionState.revision).toBe(revision + 1);

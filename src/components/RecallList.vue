@@ -42,7 +42,7 @@ defineProps<{ items: RecallPeekItem[] }>();
   align-items: center;
   gap: 6px;
   margin-bottom: 4px;
-  font-size: 11.5px;
+  font-size: var(--bbs-fs-meta);
   color: var(--bbs-ink-muted);
 }
 .bbs-recall-list-source {
@@ -53,7 +53,9 @@ defineProps<{ items: RecallPeekItem[] }>();
   margin-left: auto;
   padding: 0 6px;
   border-radius: var(--bbs-radius-sm);
+  font-size: var(--bbs-fs-badge);
   font-weight: 600;
+  line-height: 18px;
   color: var(--bbs-ink-soft);
   background: var(--bbs-recall-badge-bg, var(--bbs-surface-2));
 }
@@ -63,7 +65,7 @@ defineProps<{ items: RecallPeekItem[] }>();
 }
 .bbs-recall-list-preview {
   margin: 0;
-  font-size: 12.5px;
+  font-size: var(--bbs-fs-sm);
   line-height: 1.65;
   color: var(--bbs-ink);
   overflow-wrap: anywhere;

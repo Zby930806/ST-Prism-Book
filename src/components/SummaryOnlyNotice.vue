@@ -6,69 +6,38 @@ defineProps<{ subject: string }>();
 </script>
 
 <template>
-  <aside v-if="apiSettings.summaryOnlyMode" class="bbs-summary-only-notice" role="status">
-    <span class="bbs-summary-only-icon"><Icon name="eye-off" /></span>
+  <aside v-if="apiSettings.summaryOnlyMode" class="bbs-callout is-warning bbs-summary-only-notice" role="status">
+    <span class="bbs-summary-only-icon" aria-hidden="true"><Icon name="eye-off" /></span>
     <div class="bbs-summary-only-copy">
-      <strong>仅记录，不注入正文</strong>
+      <strong class="bbs-callout-title">仅记录，不注入正文</strong>
       <p>已开启「仅注入剧情摘要」：{{ subject }}照常分析和保存，但不注入正文。</p>
     </div>
   </aside>
 </template>
 
 <style scoped>
+/* 外观沿用共享警告提示条（.bbs-callout.is-warning），这里只排图标与文字。 */
 .bbs-summary-only-notice {
   display: flex;
   align-items: flex-start;
-  gap: 11px;
+  gap: 10px;
   margin-top: 12px;
-  padding: 11px 13px;
-  border: 2px solid var(--bbs-warning);
-  border-radius: var(--bbs-radius-sm);
-  background: var(--bbs-warning-soft);
-  box-shadow: inset 4px 0 0 var(--bbs-warning);
 }
 
 .bbs-summary-only-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   flex: 0 0 auto;
-  width: 30px;
-  height: 30px;
-  border: 1px solid var(--bbs-warning);
-  border-radius: var(--bbs-radius-sm);
-  background: var(--bbs-surface);
-  color: var(--bbs-warning);
-  font-size: 17px;
+  margin-top: 2px;
+  font-size: 16px;
 }
 
 .bbs-summary-only-copy {
   min-width: 0;
 }
 
-.bbs-summary-only-copy strong {
-  display: block;
-  color: var(--bbs-warning);
-  font-size: 13.5px;
-  line-height: 1.35;
-}
-
 .bbs-summary-only-copy p {
-  margin: 3px 0 0;
+  margin: 2px 0 0;
   color: var(--bbs-ink-soft);
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-@media (max-width: 480px) {
-  .bbs-summary-only-notice {
-    gap: 9px;
-    padding: 10px;
-  }
-
-  .bbs-summary-only-icon {
-    width: 28px;
-    height: 28px;
-  }
+  font-size: 12.5px;
+  line-height: 1.6;
 }
 </style>

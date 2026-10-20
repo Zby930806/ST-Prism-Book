@@ -25,8 +25,10 @@ export interface RecallDebugRerankHit {
   leafId: string;
   rerankScore: number;
   similarity: number;
-  /** 分档:full=发全文,brief=发摘要,drop=两档都不达标被丢弃 */
-  tier: 'full' | 'brief' | 'drop';
+  /** 分档:full=发全文,brief=发摘要,drop=两档都不达标被丢弃,cut=达标但放不进召回预算 */
+  tier: 'full' | 'brief' | 'drop' | 'cut';
+  /** 达到全文档,但原文放不进召回预算,改发了摘要 */
+  downgraded?: boolean;
   /** 来源标记:本聊天命中为楼层号「#5」,bundle 快照为「旧档」 */
   source: string;
   storyTime: string;
@@ -36,6 +38,11 @@ export interface RecallDebugRerankHit {
   /** false = 只由关键词命中,没有向量相似度 */
   similarityKnown?: boolean;
 }
+
+/** 召回完成但一段都没注入:有达标的段落,却都放不进召回预算。 */
+export const RECALL_DONE_OVER_BUDGET = '召回完成:超出注入预算,本回合未注入';
+/** 召回完成但一段都没注入:没有段落达到阈值。 */
+export const RECALL_DONE_NONE_PASSED = '召回完成:无内容达标,本回合未注入';
 
 /** 关键词一路的命中 */
 export interface RecallDebugKeywordHit {

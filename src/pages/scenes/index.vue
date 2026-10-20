@@ -1,9 +1,12 @@
 <script setup lang="ts">
+import EmptyState from '@/components/EmptyState.vue';
 import Icon from '@/components/Icon.vue';
+import IconButton from '@/components/IconButton.vue';
 import PageHeader from '@/components/PageHeader.vue';
 import BbsSelect from '@/components/BbsSelect.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
-import ModalMask from '@/components/ModalMask.vue';
+import ModalShell from '@/components/ModalShell.vue';
+import StatRow from '@/components/StatRow.vue';
 import SummaryOnlyNotice from '@/components/SummaryOnlyNotice.vue';
 import { buildSceneLocationIndex, editSceneDesc, findCurrentSceneId, removeScene, reparentScene, resolveSceneLocationId, sceneId, upsertScene } from '@/memory/apply';
 import { buildTravelDraft } from '@/memory/inject';
@@ -223,6 +226,11 @@ function addScene() {
   }
   composerOpen.value = false;
 }
+// 名字框按 Enter 添加。取消这次 Enter 的默认动作：添加后弹窗关闭、焦点回到「添加地点」按钮，否则同一次 Enter 会把弹窗再次打开。
+function onNameEnter(e: KeyboardEvent) {
+  e.preventDefault();
+  addScene();
+}
 
 /* —— 编辑弹窗:改本级名 + 上级(下拉选)+ 描述 —— */
 interface SceneEditing {
@@ -306,7 +314,7 @@ function confirmTravel() {
   const target = traveling.value;
   if (!target) return;
   if (!appendChatInput(buildTravelDraft(target))) {
-    toast('没能写入酒馆的输入框。', 'error');
+    toast('无法写入酒馆输入框。', 'error');
     return;
   }
   traveling.value = null;
@@ -316,8 +324,8 @@ function confirmTravel() {
 </script>
 
 <template>
-  <section class="bbs-page">
-    <PageHeader icon="scenes" title="场景" description="故事里出现过的地点，按上下级排好；标着「所在」的是现在的位置。">
+  <section class="bbs-page bbs-ledger">
+    <PageHeader icon="scenes" title="场景" description="故事中出现过的地点，按上下级排列；标有「所在」的为当前位置。">
       <template #actions>
         <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!hasLeaf"
           :title="hasLeaf ? '手动添加地点' : '需先有摘要才能手动添加'" @click="openComposer"><Icon name="plus" />添加地点</button>
@@ -328,14 +336,17 @@ function confirmTravel() {
       <span class="bbs-current-icon"><Icon name="scenes" /></span>
       <div><span class="bbs-current-label">当前所在</span><p>{{ currentScene ? currentScene.path.join(' › ') : memory.state.location || '尚未记录当前位置' }}</p></div>
     </div>
-    <div class="bbs-scene-toolbar">
-      <span class="bbs-scene-total"><strong>{{ memory.scenes.length }}</strong> 个地点<span v-if="rows.length"> · 展示 {{ rows.length }} 个</span></span>
-      <div v-if="memory.scenes.length" class="bbs-scene-tools">
-        <button class="bbs-filter-tab" type="button" @click="setAllCollapsed(false)">全部展开</button>
-        <button class="bbs-filter-tab" type="button" @click="setAllCollapsed(true)">收起层级</button>
-      </div>
-    </div>
-    <p v-if="!hasLeaf" class="bbs-scene-hint">有了第一条摘要后才能手动添加地点。</p>
+    <StatRow
+      label="地点概览"
+      :items="[{ value: memory.scenes.length, label: '个地点' }]"
+      :note="rows.length < memory.scenes.length ? '展示 ' + rows.length + ' 个' : undefined"
+    >
+      <template v-if="memory.scenes.length" #aside>
+        <button class="bbs-btn bbs-btn-sm" type="button" @click="setAllCollapsed(false)">全部展开</button>
+        <button class="bbs-btn bbs-btn-sm" type="button" @click="setAllCollapsed(true)">收起层级</button>
+      </template>
+    </StatRow>
+    <p v-if="!hasLeaf" class="bbs-scene-hint">生成第一条摘要后可手动添加地点。</p>
 
     <TransitionGroup v-if="rows.length" tag="div" name="scene" class="bbs-scene-tree">
       <div
@@ -378,73 +389,60 @@ function confirmTravel() {
             </span>
           </div>
           <div class="bbs-scene-acts">
-              <button v-if="!r.isCurrent" class="bbs-item-act" type="button" title="前往" @click.stop="askTravel(r.node)"><Icon name="navigate" /><span>前往</span></button>
-              <button class="bbs-item-act" type="button" title="编辑" @click.stop="openEdit(r.node)"><Icon name="edit" /><span>编辑</span></button>
-              <button class="bbs-item-act bbs-item-del" type="button" title="删除" @click.stop="askRemove(r.node)"><Icon name="trash" /><span>删除</span></button>
-            </div>
+            <button v-if="!r.isCurrent" class="bbs-btn bbs-btn-sm" type="button" :aria-label="'前往：' + r.node.name" @click.stop="askTravel(r.node)"><Icon name="navigate" />前往</button>
+            <IconButton icon="edit" :label="'编辑地点：' + r.node.name" title="编辑" @click.stop="openEdit(r.node)" />
+            <IconButton icon="trash" tone="danger" :label="'删除地点：' + r.node.name" title="删除" @click.stop="askRemove(r.node)" />
+          </div>
         </div>
       </div>
     </TransitionGroup>
 
-    <div v-else class="bbs-empty">
-      <span class="bbs-empty-icon"><Icon name="scenes" /></span>
-      <h3>暂无地点</h3>
-      <p>摘要会记录到访过的地点，并按上下级整理。{{ hasLeaf ? '也可手动添加。' : '生成第一条摘要后可手动添加。' }}</p>
+    <EmptyState v-else icon="scenes" title="暂无地点" :text="'摘要记录到访过的地点，并按上下级整理。' + (hasLeaf ? '也可手动添加。' : '生成第一条摘要后可手动添加。')">
       <button v-if="hasLeaf" class="bbs-btn" type="button" @click="openComposer"><Icon name="plus" />添加第一处地点</button>
-    </div>
+    </EmptyState>
 
     <!-- 添加弹窗:选上级(已有地点 / 顶级)+ 填新名 + 描述 -->
-    <ModalMask :open="composerOpen" @close="closeComposer">
-      <div class="bbs-modal" role="dialog" aria-modal="true" aria-label="添加地点">
-        <header class="bbs-modal-head">
-          <span class="bbs-modal-title">添加地点</span>
-          <button class="bbs-item-act" type="button" title="关闭" @click="closeComposer"><Icon name="close" /></button>
-        </header>
-        <div class="bbs-modal-field">
-          <span class="bbs-modal-label">上级地点（从已有地点里选，或设为顶级）</span>
-          <BbsSelect v-model="newParentId" :options="parentOptions(sceneOptions)" aria-label="上级地点" />
-        </div>
-        <label class="bbs-modal-field">
-          <span class="bbs-modal-label">名称</span>
-          <input ref="nameInput" v-model="newName" class="bbs-input" type="text" placeholder="新地点名" @keydown.enter="addScene" />
-        </label>
-        <label class="bbs-modal-field">
-          <span class="bbs-modal-label">描述（必填）</span>
-          <textarea v-model="newDesc" class="bbs-input bbs-modal-textarea" rows="3" placeholder="这地方是什么、有何特征"></textarea>
-        </label>
-        <footer class="bbs-modal-foot">
-          <button class="bbs-btn" type="button" @click="closeComposer">取消</button>
-          <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!newName.trim() || !newDesc.trim()" @click="addScene">添加</button>
-        </footer>
+    <ModalShell :open="composerOpen" title="添加地点" @close="closeComposer">
+      <div class="bbs-modal-field">
+        <span class="bbs-modal-label">上级地点（从已有地点中选择，或设为顶级）</span>
+        <BbsSelect v-model="newParentId" :options="parentOptions(sceneOptions)" aria-label="上级地点" />
       </div>
-    </ModalMask>
+      <label class="bbs-modal-field">
+        <span class="bbs-modal-label">名称</span>
+        <input ref="nameInput" v-model="newName" class="bbs-input" type="text" placeholder="新地点名" @keydown.enter="onNameEnter" />
+      </label>
+      <label class="bbs-modal-field">
+        <span class="bbs-modal-label">描述（必填）</span>
+        <textarea v-model="newDesc" class="bbs-input bbs-modal-textarea" rows="3" placeholder="地点的性质与特征"></textarea>
+      </label>
+      <template #footer>
+        <button class="bbs-btn" type="button" @click="closeComposer">取消</button>
+        <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!newName.trim() || !newDesc.trim()" @click="addScene">添加</button>
+      </template>
+    </ModalShell>
 
     <!-- 编辑弹窗:Teleport 出滚动容器,见 ModalMask -->
-    <ModalMask :open="!!editing" @close="cancelEdit">
-      <div v-if="editing" class="bbs-modal" role="dialog" aria-modal="true" aria-label="编辑地点">
-        <header class="bbs-modal-head">
-          <span class="bbs-modal-title">编辑地点</span>
-          <button class="bbs-item-act" type="button" title="关闭" @click="cancelEdit"><Icon name="close" /></button>
-        </header>
+    <ModalShell :open="!!editing" title="编辑地点" @close="cancelEdit">
+      <template v-if="editing">
         <p class="bbs-scene-crumb">{{ editing.path.join(' › ') }}</p>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">名称</span>
           <input v-model="editing.name" class="bbs-input" type="text" placeholder="地点名" />
         </label>
         <div class="bbs-modal-field">
-          <span class="bbs-modal-label">上级地点（改这里会连同下属一起移动）</span>
+          <span class="bbs-modal-label">上级地点（修改后下属地点一并移动）</span>
           <BbsSelect v-model="editing.parentId" :options="parentOptions(editParentOptions)" aria-label="上级地点" />
         </div>
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">描述（必填）</span>
-          <textarea v-model="editing.desc" class="bbs-input bbs-modal-textarea" rows="3" placeholder="这地方是什么、有何特征"></textarea>
+          <textarea v-model="editing.desc" class="bbs-input bbs-modal-textarea" rows="3" placeholder="地点的性质与特征"></textarea>
         </label>
-        <footer class="bbs-modal-foot">
-          <button class="bbs-btn" type="button" @click="cancelEdit">取消</button>
-          <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!editing.name.trim() || !editing.desc.trim()" @click="saveEdit">保存</button>
-        </footer>
-      </div>
-    </ModalMask>
+      </template>
+      <template #footer>
+        <button class="bbs-btn" type="button" @click="cancelEdit">取消</button>
+        <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!editing?.name.trim() || !editing?.desc.trim()" @click="saveEdit">保存</button>
+      </template>
+    </ModalShell>
 
     <ConfirmDialog
       :open="!!traveling"
@@ -455,7 +453,7 @@ function confirmTravel() {
       @confirm="confirmTravel"
       @cancel="traveling = null"
     >
-      前往「{{ traveling?.path.join(' › ') }}」？会把一段去那里的草稿填进输入框，不会自动发送，也不会提前改动记忆；输入框里已有内容的话，草稿接在后面。
+      前往「{{ traveling?.path.join(' › ') }}」？在输入框中填入前往该地点的草稿，不自动发送，不修改记忆；输入框已有内容时追加在其后。
     </ConfirmDialog>
 
     <ConfirmDialog
@@ -468,76 +466,34 @@ function confirmTravel() {
       @confirm="confirmRemove"
       @cancel="removing = null"
     >
-      删除「{{ removing?.name }}」<template v-if="removeChildCount">和它下面的 {{ removeChildCount }} 个地点</template>？删除操作记录在最新一条摘要上，删除该楼即可恢复。
+      删除「{{ removing?.name }}」<template v-if="removeChildCount">及其下属的 {{ removeChildCount }} 个地点</template>？删除操作记录在最新一条摘要上，删除该楼层可恢复。
     </ConfirmDialog>
   </section>
 </template>
 
 <style scoped>
 
-/* 页面本身保持文档流，滚动交给书页容器；不把工具栏与说明再套成卡片。 */
-.bbs-page { display: flex; flex-direction: column; height: auto; min-width: 0; min-height: 100%; color: var(--bbs-ink); }
-.bbs-page, .bbs-page * { box-sizing: border-box; }
-.bbs-page .bbs-input { min-width: 0; max-width: 100%; }
-.bbs-page button { font-family: inherit; }
-.bbs-page button:focus-visible, .bbs-page input:focus-visible, .bbs-page textarea:focus-visible { outline: 2px solid var(--bbs-accent); outline-offset: 3px; }
-.bbs-page button:disabled { cursor: not-allowed; }
-.bbs-page .bbs-btn { min-height: 38px; gap: 6px; white-space: normal; }
-.bbs-ledger-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin: 18px 0; padding: 0 0 14px; border-bottom: 1px solid var(--bbs-line); font-size: 12px; line-height: 1.6; color: var(--bbs-ink-muted); }
-.bbs-ledger-meta strong { margin-right: 4px; font-size: 19px; font-variant-numeric: tabular-nums; font-weight: 650; color: var(--bbs-ink); }
-.bbs-ledger-note { margin-left: auto; color: var(--bbs-accent); }
-.bbs-search { display: flex; align-items: center; gap: 9px; flex: 1 1 200px; min-width: 0; color: var(--bbs-ink-muted); }
-.bbs-search > .bbs-input { flex: 1; width: 100%; }
-.bbs-filterbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 18px; }
-.bbs-filter-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
-.bbs-filter-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--bbs-line); border-radius: 9px; background: var(--bbs-surface-2); color: var(--bbs-ink-soft); font-size: 12px; cursor: pointer; }
-.bbs-filter-tab[aria-pressed='true'] { background: var(--bbs-accent-soft); border-color: var(--bbs-accent); color: var(--bbs-accent); }
-.bbs-filter-tab span { font-variant-numeric: tabular-nums; font-size: 11px; }
-.bbs-item-act { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--bbs-ink-soft); cursor: pointer; font-size: 15px; }
-.bbs-item-act:hover:not(:disabled) { background: var(--bbs-surface-2); border-color: var(--bbs-line); color: var(--bbs-accent); }
-.bbs-item-del:hover:not(:disabled) { background: var(--bbs-danger-soft); color: var(--bbs-danger); border-color: var(--bbs-danger); }
-.bbs-empty { display: flex; flex: none; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 230px; padding: 34px 16px; margin: 12px 0; text-align: center; background: transparent; }
-.bbs-empty-icon { display: inline-flex; align-items: center; justify-content: center; width: 54px; height: 54px; border-radius: 18px; background: var(--bbs-accent-soft); color: var(--bbs-accent); font-size: 25px; }
-.bbs-empty h3 { margin: 5px 0 0; color: var(--bbs-ink); font-size: 16px; font-weight: 650; }
-.bbs-empty p { max-width: 360px; margin: 0; color: var(--bbs-ink-muted); font-size: 13px; line-height: 1.8; }
-.bbs-empty .bbs-btn { margin-top: 6px; }
-.bbs-modal { min-width: 0; overflow-wrap: anywhere; }
-.bbs-modal-head, .bbs-modal-foot { flex-wrap: wrap; }
-.bbs-modal-textarea { resize: vertical; min-height: 80px; font-family: inherit; }
-.bbs-modal-check { flex-direction: row; align-items: center; gap: 9px; cursor: pointer; }
-.bbs-modal-check input { flex-shrink: 0; }
-@media (max-width: 480px) {
-  .bbs-ledger-meta { gap: 6px 14px; margin: 16px 0; }
-  .bbs-ledger-note { flex-basis: 100%; margin-left: 0; }
-  .bbs-search { flex-basis: 100%; }
-  .bbs-filterbar { gap: 10px; }
-  .bbs-item-act { width: 40px; height: 40px; }
-  .bbs-page .bbs-btn { min-height: 42px; }
-  .bbs-filter-tab { min-height: 40px; }
-  .bbs-empty { min-height: 210px; padding: 26px 10px; }
-}
+/* 页面外壳（统计行、搜索、筛选、图标按钮、空状态）在 base.css 的 .bbs-ledger 中统一定义。 */
 
 .bbs-current-location { display: flex; align-items: center; gap: 12px; margin-top: 8px; padding: 16px 0 16px 14px; border-left: 3px solid var(--bbs-accent); }
 .bbs-current-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 36px; height: 36px; border-radius: 12px; background: var(--bbs-accent-soft); color: var(--bbs-accent); font-size: 19px; }
 .bbs-current-location > div { min-width: 0; }
 .bbs-current-label { font-size: 11px; letter-spacing: .06em; color: var(--bbs-ink-muted); }
 .bbs-current-location p { margin: 5px 0 0; font-size: 15px; font-weight: 600; line-height: 1.7; overflow-wrap: anywhere; }
-.bbs-scene-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 0 14px; margin-bottom: 16px; border-bottom: 1px solid var(--bbs-line); }
-.bbs-scene-total { color: var(--bbs-ink-muted); font-size: 12px; }
-.bbs-scene-total strong { color: var(--bbs-ink); font-size: 19px; font-variant-numeric: tabular-nums; }
-.bbs-scene-tools { display: flex; flex-wrap: wrap; gap: 6px; }
 .bbs-scene-hint { margin: 0 0 12px; font-size: 12px; line-height: 1.7; color: var(--bbs-ink-muted); }
 .bbs-scene-tree { display: flex; flex-direction: column; gap: 12px; position: relative; min-width: 0; }
 .bbs-scene-row { display: flex; align-items: stretch; min-width: 0; }
 .bbs-scene-rail { flex: 0 0 16px; position: relative; }
 .bbs-scene-rail::before { content: ''; position: absolute; left: 6px; top: -12px; bottom: -12px; width: 1px; background: var(--bbs-line); }
 .bbs-scene-rail.active::before { background: var(--bbs-accent); }
-.bbs-scene-card { flex: 1 1 auto; min-width: 0; padding: 16px; border: 1px solid var(--bbs-line); border-radius: 14px; background: var(--bbs-surface); box-shadow: var(--bbs-card-shadow); }
+.bbs-scene-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; align-content: start; flex: 1 1 auto; min-width: 0; padding: 16px; border: 1px solid var(--bbs-line); border-radius: 14px; background: var(--bbs-surface); box-shadow: var(--bbs-card-shadow); }
 .bbs-scene-card.clickable { cursor: pointer; }
 .bbs-scene-card.clickable:hover { border-color: var(--bbs-line-strong); }
 .bbs-scene-row.is-current .bbs-scene-card { border-color: var(--bbs-accent); background: var(--bbs-accent-soft); }
-.bbs-scene-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.bbs-scene-toggle { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; height: 32px; padding: 0; border: 1px solid var(--bbs-line); border-radius: 8px; background: var(--bbs-surface); color: var(--bbs-accent); cursor: pointer; transition: transform .16s ease; }
+.bbs-scene-card > * { grid-column: 1 / -1; }
+.bbs-scene-card > .bbs-scene-head { grid-column: 1; }
+.bbs-scene-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.bbs-scene-toggle { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 var(--bbs-icon-btn); height: var(--bbs-icon-btn); padding: 0; border: 1px solid var(--bbs-line); border-radius: 8px; background: var(--bbs-surface); color: var(--bbs-accent); cursor: pointer; transition: transform .16s ease; }
 .bbs-scene-toggle.collapsed { transform: rotate(-90deg); }
 .bbs-scene-name { flex: 1; min-width: 0; font-size: 15px; line-height: 1.6; font-weight: 650; overflow-wrap: anywhere; }
 .bbs-scene-count { flex-shrink: 0; font-size: 11px; color: var(--bbs-ink-muted); padding: 3px 7px; border-radius: 6px; background: var(--bbs-surface-2); }
@@ -547,8 +503,8 @@ function confirmTravel() {
 .bbs-scene-items { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .bbs-scene-chip { display: inline-flex; align-items: baseline; gap: 4px; min-width: 0; max-width: 100%; padding: 4px 8px; border-radius: 7px; background: var(--bbs-surface-2); color: var(--bbs-ink-soft); font-size: 11px; overflow-wrap: anywhere; }
 .bbs-scene-chip i { font-style: normal; color: var(--bbs-accent); }
-.bbs-scene-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px; margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--bbs-line); }
-.bbs-scene-acts .bbs-item-act { width: auto; min-width: 36px; gap: 5px; padding: 0 7px; font-size: 12px; }
+.bbs-scene-card > .bbs-scene-acts { grid-column: 2; grid-row: 1; }
+.bbs-scene-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px; }
 .scene-enter-active, .scene-leave-active { transition: opacity .16s ease, transform .16s ease; }
 .scene-enter-from, .scene-leave-to { opacity: 0; transform: translateY(-6px); }
 .scene-leave-active { position: absolute; width: 100%; }
@@ -558,8 +514,8 @@ function confirmTravel() {
   .bbs-scene-rail { flex-basis: 8px; }
   .bbs-scene-rail::before { left: 2px; }
   .bbs-scene-card { padding: 12px 10px; }
-  .bbs-scene-toggle { flex-basis: 36px; height: 36px; }
-  .bbs-scene-acts .bbs-item-act { min-height: 40px; }
+  /* 窄屏动作键放在卡片末尾、靠右，不再与名字抢一行。 */
+  .bbs-scene-card > .bbs-scene-acts { grid-column: 1 / -1; grid-row: auto; margin-top: 8px; }
 }
 @media (prefers-reduced-motion: reduce) { .scene-enter-active, .scene-leave-active, .scene-move, .bbs-scene-toggle { transition: none; } }
 </style>

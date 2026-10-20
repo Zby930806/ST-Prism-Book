@@ -5,14 +5,14 @@ import { ApiError, apiFailure, containsCompleteJson, describeFailure, isRetryabl
 import { apiSettings, engineActiveHere, getChannelForTask, normalizeBatchFullRecent, normalizeBatchMaxFloors } from '@/api/settings';
 import type { TaskType } from '@/api/settings';
 import type { STMessage, WorldInfoEntry } from '@/st/context';
-import { getContext, getCheckWorldInfo, getEjsTemplate, setMessageText } from '@/st/context';
+import { getContext, getCheckWorldInfo, getEjsTemplate, mainApiModelName, setMessageText } from '@/st/context';
 import { toast } from '@/st/toast';
 import { addSummary, classifyNpcPresence, deriveMemory, finalizeDelta, fmtVarOpsInline, getLeaf, invalidateSummaryAncestors, itemChangesOf, leafValid, makeLeafId, pruneBrokenComps, syncItemLogFromMessage } from './apply';
 import { extractJsonObject } from './json';
 import { parseSummaryResponse, SummaryResponseError } from './summaryResponse';
 import { buildConditionPatchContext } from './conditionPatch';
 import { clearInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
-import { BATCH_SUMMARY_THINKING_CHECKLIST, buildBatchSummaryPrompt, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
+import { BATCH_SUMMARY_THINKING_CHECKLIST, buildBatchSummaryPrompt, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, isDeepSeekModel, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
 import { clampToTimeTags, cleanBody, explicitOpeningTime, hasStoryBody, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, latestStoryTime, parseTimeRange, storyTimeValue, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import type { ViewNode } from './select';
@@ -1104,6 +1104,10 @@ interface Sender {
   /** 出错时告诉用户去哪里改设置。 */
   settings: string;
   mainApi: boolean;
+  /** 实际处理请求的模型名;用于决定是否发送内容边界(DeepSeek 沿用原提示词)。 */
+  model: string;
+  /** 是否发送内容边界:DeepSeek 模型不发,其余模型发。 */
+  contentBoundary: boolean;
 }
 
 function resolveSender(task: TaskType): Sender | { error: string } {
@@ -1114,12 +1118,23 @@ function resolveSender(task: TaskType): Sender | { error: string } {
       label: `渠道「${channel.name}」(${channel.model})`,
       settings: `设置 → 副 API → ${channel.name || '未命名渠道'}`,
       mainApi: false,
+      model: channel.model,
+      contentBoundary: !isDeepSeekModel(channel.model),
     };
   }
   if (!mainApiAvailable()) {
     return { error: '还没有可用的 API：这个任务没有指派副 API 渠道，酒馆的主 API 也连不上。请到「设置 → 副 API」添加并指派渠道，或者先连好酒馆的主 API。' };
   }
-  return { send: messages => requestViaMainApi(messages), label: '主 API(主界面当前在用)', settings: '酒馆的主 API 设置', mainApi: true };
+  // 主 API 的模型名在发请求时读取(用户可能中途切换连接),不在 resolveSender 时定死
+  const mainModel = () => mainApiModelName(getContext());
+  return {
+    send: messages => requestViaMainApi(messages),
+    label: '主 API(主界面当前在用)',
+    settings: '酒馆的主 API 设置',
+    mainApi: true,
+    get model() { return mainModel(); },
+    get contentBoundary() { return !isDeepSeekModel(mainModel()); },
+  };
 }
 
 /**
@@ -1433,7 +1448,7 @@ async function summarizeFloorWork(
     varsState: stateBefore.vars,
     varsMeaning: (['global', 'char', 'chat'] as const).map(t => memory.varTemplates[t].meaning.trim()).filter(Boolean).join('\n\n'),
     varsRule: (['global', 'char', 'chat'] as const).map(t => memory.varTemplates[t].rule.trim()).filter(Boolean).join('\n\n'),
-  });
+  }, { contentBoundary: sender.contentBoundary });
 
   const builtin = usesBuiltinSummary();
   const conditionBlock = builtin ? buildConditionPatchContext(stateBefore) : '';
@@ -1874,7 +1889,7 @@ async function summarizeLiteChunk(chat: STMessage[], floors: number[], sender: S
   const priorTime = latestStoryTime(chat.slice(0, beforeIndex)) || storyTimeValue(stateBefore.state.time);
   const fictionalOpening = !priorTime && !!initialStoryTime() && ctx.chatMetadata?.[INITIAL_TIME_ORIGIN_KEY] === 'fictional';
   const history = renderHistoryNodes(recentHistory(selectHistoryNodesBefore(memory.summaries, chat, beforeIndex), LITE_HISTORY_MAX_CHARS));
-  const prompt = buildBatchSummaryPrompt({ user: ctx.name1, char: ctx.name2, time: priorTime || initialStoryTime(), timeIsFictional: fictionalOpening, history, content });
+  const prompt = buildBatchSummaryPrompt({ user: ctx.name1, char: ctx.name2, time: priorTime || initialStoryTime(), timeIsFictional: fictionalOpening, history, content }, { contentBoundary: sender.contentBoundary });
   const charCard = fetchCharCard();
   const persona = fetchUserPersona();
   // 与逐层摘要一样,稳定内容放前面,便于服务商复用缓存;不带世界书(按每组内容激活,长且各组不同)
@@ -2192,7 +2207,7 @@ export async function checkResummary(): Promise<number> {
     const batch = roots.slice(0, threshold);
     const { content, hints } = joinNodesForResummary(batch);
     // 传**输出层级**(level+1):L1(普通总结,300-500字)/ L2+(二次总结,字数随输入动态)
-    const prompt = buildResummaryPrompt({ user: ctx.name1, char: ctx.name2, content, level: level + 1 });
+    const prompt = buildResummaryPrompt({ user: ctx.name1, char: ctx.name2, content, level: level + 1 }, { contentBoundary: sender.contentBoundary });
     // 输出层级 level+1:为 1 是普通总结,≥2 是二次总结
     const what = level + 1 === 1 ? '总结' : '二次总结';
 
@@ -2363,7 +2378,7 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
 
   const level = Math.max(...picked.map(n => n.level)) + 1;
   const { content, hints } = joinNodesForResummary(picked);
-  const prompt = buildResummaryPrompt({ user: ctx.name1, char: ctx.name2, content, level });
+  const prompt = buildResummaryPrompt({ user: ctx.name1, char: ctx.name2, content, level }, { contentBoundary: sender.contentBoundary });
   const what = level === 1 ? '总结' : '二次总结';
 
   busy = true;

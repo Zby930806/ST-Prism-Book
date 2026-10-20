@@ -28,7 +28,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{ (e: 'close'): void }>();
 const maskEl = ref<HTMLElement | null>(null);
-const { onDialogKeydown } = useDialogFocus(maskEl, () => !!props.open, () => emit('close'));
+// 打开时聚焦弹窗本身（插槽里 role=dialog 的元素），读屏能报出弹窗名称；没有则聚焦遮罩。
+const { onDialogKeydown } = useDialogFocus(maskEl, () => !!props.open, () => emit('close'), () => maskEl.value?.querySelector<HTMLElement>('[role="dialog"]') ?? null);
 </script>
 
 <template>

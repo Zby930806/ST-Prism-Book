@@ -33,6 +33,8 @@ const dependencies: Record<string, unknown> = {
   vue: { ...Vue, vModelText: {}, vModelCheckbox: {}, vModelSelect: {} },
   '@/st/context': host, '@/notes/settings': settings, '@/notes/service': service,
   '@/notes/store': store, '@/notes/prompt': prompt, '@/notes/modelCatalog': modelCatalog,
+  // 跨页定位只在设置页跳转时用到；这里不发请求，避免牵出 state/ui 的本机存储。
+  '@/state/pageFocus': { pageFocus: Vue.reactive({ section: '' }), takePageFocus: () => false },
   '@/components/Icon.vue': { default: { render: () => null } },
   '@/components/PageHeader.vue': { default: { render: () => null } },
 };

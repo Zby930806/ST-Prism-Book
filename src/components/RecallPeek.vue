@@ -1,9 +1,11 @@
 <script setup lang="ts">
 /**
  * 召回速览:从快捷回复栏的「召回」按钮弹出,无需打开宝书即可查看上次召回的内容。
- * 只读 recallDebug(上次召回的快照,切聊天时清空)。点外面、按 Esc、再点按钮或打开宝书都会关掉。
+ * 只读 recallDebug(上次召回的快照,切聊天时清空)。点外面、按 Esc、再点按钮或打开宝书都会关掉;
+ * 用 Esc 或关闭键关掉时,焦点回到「召回」按钮。
  */
-import Icon from '@/components/Icon.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import IconButton from '@/components/IconButton.vue';
 import RecallList from '@/components/RecallList.vue';
 import { recallDebug } from '@/memory/vector/debug';
 import { recalledItems, recallPhase, recallStatusText } from '@/memory/vector/recallView';
@@ -12,7 +14,6 @@ import { ui } from '@/state/ui';
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
 
 const panel = ref<HTMLElement | null>(null);
-const showRaw = ref(false);
 const pos = ref({ left: 8, bottom: 96, width: 360 });
 
 const items = computed(() => recalledItems(recallDebug));
@@ -35,8 +36,13 @@ function place(): void {
   pos.value = { left, bottom, width };
 }
 
-function close(): void {
+/** 关闭速览。restoreFocus:焦点在速览里时(键盘操作)送回「召回」按钮;点外面关闭时不抢焦点。 */
+function close(restoreFocus = false): void {
+  const root = panel.value?.getRootNode() as Document | ShadowRoot | undefined;
+  const active = root?.activeElement ?? null;
+  const focusInside = !!panel.value && !!active && panel.value.contains(active);
   ui.recallPeekOpen = false;
+  if (restoreFocus && focusInside) document.getElementById('bbs-qr-recall')?.focus({ preventScroll: true });
 }
 function onPointerDown(e: PointerEvent): void {
   const path = e.composedPath();
@@ -47,7 +53,7 @@ function onPointerDown(e: PointerEvent): void {
   close();
 }
 function onKey(e: KeyboardEvent): void {
-  if (e.key === 'Escape') close();
+  if (e.key === 'Escape') close(true);
 }
 function unbind(): void {
   window.removeEventListener('pointerdown', onPointerDown, true);
@@ -60,7 +66,6 @@ watch(
   open => {
     unbind();
     if (!open) return;
-    showRaw.value = false;
     place();
     window.addEventListener('pointerdown', onPointerDown, true);
     window.addEventListener('keydown', onKey);
@@ -92,17 +97,17 @@ onUnmounted(unbind);
     <header class="bbs-recall-peek-head">
       <span class="bbs-recall-peek-title">上次召回<template v-if="phase === 'done'"> · {{ items.length }} 段</template></span>
       <span v-if="timeText" class="bbs-recall-peek-time">{{ timeText }}</span>
-      <button class="bbs-recall-peek-close" type="button" title="关闭" aria-label="关闭" @click="close"><Icon name="close" /></button>
+      <IconButton class="bbs-recall-peek-close" icon="close" size="sm" label="关闭" @click="close(true)" />
     </header>
     <div class="bbs-recall-peek-body">
-      <p class="bbs-recall-peek-status" :class="`is-${phase}`">{{ statusText }}</p>
+      <EmptyState v-if="phase === 'none'" compact icon="bookmark" title="暂无召回记录" text="生成回复前自动召回，结果显示在此处。" />
+      <p v-else class="bbs-recall-peek-status" :class="`is-${phase}`">{{ statusText }}</p>
       <RecallList v-if="items.length" :items="items" />
-      <template v-if="phase === 'done' && recallDebug.injectedText">
-        <button class="bbs-recall-peek-toggle" type="button" :aria-expanded="showRaw" @click="showRaw = !showRaw">
-          <Icon name="chevron" class="bbs-recall-peek-caret" :class="{ 'is-open': showRaw }" />{{ showRaw ? '收起注入原文' : '查看注入原文' }}
-        </button>
-        <pre v-if="showRaw" class="bbs-recall-peek-raw">{{ recallDebug.injectedText }}</pre>
-      </template>
+      <!-- 注入原文:行式折叠(与设置页等处的折叠行同一种),每次打开速览都是收起状态 -->
+      <details v-if="phase === 'done' && recallDebug.injectedText" class="bbs-disclosure bbs-recall-peek-raw-fold">
+        <summary>注入原文</summary>
+        <pre class="bbs-recall-peek-raw">{{ recallDebug.injectedText }}</pre>
+      </details>
       <p class="bbs-recall-peek-hint">检索问题和评分过程见「设置 → 向量记忆 → 上次召回详情」。</p>
     </div>
   </div>
@@ -128,34 +133,20 @@ onUnmounted(unbind);
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 10px 10px 14px;
+  padding: 6px 8px 6px 14px;
   border-bottom: 1px solid var(--bbs-line);
 }
 .bbs-recall-peek-title {
-  font-size: 13.5px;
+  font-size: var(--bbs-fs-body);
   font-weight: 600;
 }
 .bbs-recall-peek-time {
-  font-size: 12px;
+  font-size: var(--bbs-fs-meta);
   color: var(--bbs-ink-muted);
   font-variant-numeric: tabular-nums;
 }
 .bbs-recall-peek-close {
   margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--bbs-ink-muted);
-  cursor: pointer;
-}
-.bbs-recall-peek-close:hover {
-  color: var(--bbs-accent);
-  background: var(--bbs-accent-soft);
 }
 .bbs-recall-peek-body {
   flex: 1 1 auto;
@@ -168,52 +159,43 @@ onUnmounted(unbind);
 }
 .bbs-recall-peek-status {
   margin: 0;
-  font-size: 12.5px;
+  font-size: var(--bbs-fs-sm);
   line-height: 1.7;
   color: var(--bbs-ink-soft);
 }
 .bbs-recall-peek-status.is-failed {
   color: var(--bbs-danger);
 }
-.bbs-recall-peek-toggle {
-  align-self: flex-start;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 0;
-  border: 0;
-  background: transparent;
+/* 折叠行在小弹层里收紧一些:字号与正文说明同级,行高仍不低于点按尺寸 */
+.bbs-recall-peek-raw-fold > summary {
+  min-height: var(--bbs-control-h-sm);
+  padding: 4px 0;
+  font-size: var(--bbs-fs-sm);
+  font-weight: 500;
   color: var(--bbs-ink-soft);
-  font: 500 12px/1.6 var(--bbs-font-sans);
-  cursor: pointer;
-}
-.bbs-recall-peek-toggle:hover {
-  color: var(--bbs-accent);
-}
-.bbs-recall-peek-caret {
-  transform: rotate(-90deg);
-  transition: transform var(--bbs-dur) var(--bbs-ease);
-}
-.bbs-recall-peek-caret.is-open {
-  transform: none;
 }
 .bbs-recall-peek-raw {
-  margin: 0;
+  margin: 4px 0 0;
   max-height: 220px;
   overflow: auto;
   padding: 8px 10px;
   border-radius: var(--bbs-radius-sm);
   background: var(--bbs-bg);
   border: 1px solid var(--bbs-line);
-  font: 12px/1.65 var(--bbs-font-sans);
+  font: var(--bbs-fs-meta)/1.65 var(--bbs-font-sans);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   color: var(--bbs-ink-soft);
 }
 .bbs-recall-peek-hint {
   margin: 0;
-  font-size: 11.5px;
+  font-size: var(--bbs-fs-meta);
   line-height: 1.6;
   color: var(--bbs-ink-muted);
+}
+@media (max-width: 640px), (pointer: coarse) {
+  .bbs-recall-peek-raw-fold > summary {
+    min-height: 40px;
+  }
 }
 </style>

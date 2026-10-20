@@ -1,152 +1,525 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue';
+/**
+ * 规划讨论：页面内是一张入口卡片，点开后是全屏（桌面为居中大窗）的对话界面。
+ * 对话界面在标题栏下选择参考的版本，底部输入；「生成草稿」从底部弹出设置面板，
+ * 确认后按讨论生成草稿。讨论不修改规划，也不注入正文。
+ * 对话界面 Teleport 到 modalHost（与其他弹窗相同，避开 iOS 滚动容器内的定位问题）。
+ */
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, useId, watch } from 'vue';
+import BbsSelect from '@/components/BbsSelect.vue';
+import BrandMark from '@/components/BrandMark.vue';
+import ConfirmDialog from '@/components/ConfirmDialog.vue';
+import Icon from '@/components/Icon.vue';
+import IconButton from '@/components/IconButton.vue';
+import { useDialogFocus } from '@/composables/useDialogFocus';
 import { engineActiveHere } from '@/api/settings';
 import { getContext } from '@/st/context';
+import { copyText } from '@/st/clipboard';
+import { toast } from '@/st/toast';
+import { modalHost } from '@/state/ui';
 import { outlineState } from '@/outline/store';
 import { discussionState, clearOutlineDiscussion } from '@/outline/discussionStore';
 import { captureOutlineSource, sameOutlineChat, type OutlineSource } from '@/outline/source';
 import type { DiscussionTarget } from '@/outline/discussionContext';
+import { discussionTimeLabel, discussionTranscript, plainPreview } from '@/outline/discussionView';
 import { discussionRun, sendOutlineDiscussion, cancelOutlineDiscussion, captureOutlineRefinement, generateOutline, outlineRun, cancelOutline } from '@/outline/service';
+import DiscussionMessages from './DiscussionMessages.vue';
 
 const props = defineProps<{ disabled: boolean; unsaved: boolean; configurationIssue: string; apiDirty: boolean }>();
+const emit = defineEmits<{ (e: 'view-draft'): void; (e: 'open-api'): void }>();
+
+const MAX_ROUNDS = 12;
+// 发给规划模型的修订指令（提示词），不随界面文案改动。
+const REFINE_INSTRUCTION = '根据所选大纲与讨论生成修订草稿。以讨论中用户最新明确意见为准，模型建议不等于已被采纳；保留未要求改动的合理内容与人物边界。没有现有大纲时按讨论整理初稿。不要把讨论当成剧情事实。';
+const errorText = (cause: unknown) => cause instanceof Error ? cause.message : '操作未完成，请重试。';
+const ids = { title: useId(), sheet: useId(), entry: useId() };
+
 const question = ref(''), target = ref<DiscussionTarget>('none'), stageCount = ref(6), refining = ref(false);
 const error = ref(''), touchedTarget = ref(false);
+const pendingQuestion = ref<{ text: string; at: number } | null>(null);
+/** 按讨论生成草稿的结果：成功后提供「查看草稿」，失败或未采用时说明原因。 */
+const result = ref<{ kind: 'ready' | 'error' | 'notice'; text: string; detail?: string } | null>(null);
 let mounted = true;
 onBeforeUnmount(() => { mounted = false; });
+
+const rounds = computed(() => discussionState.messages.length / 2);
+const lastAt = computed(() => discussionState.messages[discussionState.messages.length - 1]?.at);
+const full = computed(() => rounds.value >= MAX_ROUNDS);
+const totalChars = computed(() => discussionState.messages.reduce((sum, message) => sum + message.content.length, 0));
 const record = computed(() => target.value === 'draft' ? outlineState.draft : target.value === 'active' ? outlineState.active : null);
-const locked = computed(() => props.disabled || discussionRun.busy || discussionState.saving || outlineRun.busy
-  || /只读|版本|格式/.test(discussionState.issue));
-const available = computed(() => !locked.value && engineActiveHere() && !props.configurationIssue);
-const canSend = computed(() => available.value && !!question.value.trim() && question.value.length <= 4000);
-type Confirmation = { kind: 'refine' | 'clear'; source: OutlineSource; revision: number; discussionRevision: number; target: DiscussionTarget; count: number };
-const confirmation = shallowRef<Confirmation | null>(null);
+const protectedData = computed(() => /只读|版本|格式/.test(discussionState.issue));
+const locked = computed(() => props.disabled || discussionRun.busy || discussionState.saving || outlineRun.busy || protectedData.value);
+const engineOn = computed(() => engineActiveHere());
+const available = computed(() => !locked.value && engineOn.value && !props.configurationIssue);
+const canSend = computed(() => available.value && !full.value && !!question.value.trim() && question.value.length <= 4000);
+const canRefine = computed(() => available.value && rounds.value > 0);
+const stageValid = computed(() => Number.isInteger(stageCount.value) && stageCount.value >= 1 && stageCount.value <= 12);
+// 等待回复、生成草稿时仍可先写下一条；只读保护或页面锁定时不可输入。
+const typingBlocked = computed(() => protectedData.value || (props.disabled && !discussionRun.busy && !outlineRun.busy));
+const generatingDraft = computed(() => refining.value && outlineRun.busy);
+const targetOptions = computed(() => [
+  ...(outlineState.active ? [{ value: 'active' as const, label: '正在用的规划 · ' + outlineState.active.content.title }] : []),
+  ...(outlineState.draft ? [{ value: 'draft' as const, label: '草稿 · ' + outlineState.draft.content.title }] : []),
+  { value: 'none' as const, label: '不参考，先聊方向' },
+]);
+const roundsLabel = computed(() => !rounds.value ? '暂无讨论'
+  : full.value ? `已满 ${MAX_ROUNDS} 轮` : rounds.value >= MAX_ROUNDS - 2 ? `${rounds.value} 轮讨论 · 上限 ${MAX_ROUNDS} 轮` : `${rounds.value} 轮讨论`);
+const placeholder = computed(() => !engineOn.value ? '当前角色未启用棱镜宝书'
+  : full.value ? `讨论已满 ${MAX_ROUNDS} 轮，清空后可继续` : '输入想法或问题…');
+const entryText = computed(() => {
+  if (discussionRun.busy) return '规划模型正在回复…';
+  if (generatingDraft.value) return '正在按讨论生成草稿…';
+  const messages = discussionState.messages;
+  return messages.length ? '规划模型：' + plainPreview(messages[messages.length - 1].content, 90) : '讨论仅用于构思，生成草稿后再确认生效。';
+});
+// 等待中的状态显示在等待气泡里；其余结果（保存、取消、清空）显示在列表末尾。
+const listNote = computed(() => discussionRun.busy ? '' : discussionRun.status);
+
 watch(() => [outlineState.active?.id, outlineState.draft?.id], () => {
   if (!touchedTarget.value) target.value = outlineState.active ? 'active' : outlineState.draft ? 'draft' : 'none';
   else if (target.value !== 'none' && !record.value) { target.value = 'none'; touchedTarget.value = false; }
 }, { immediate: true });
 watch(record, value => { stageCount.value = value?.content.chapters.length ?? 6; }, { immediate: true });
-watch(() => [outlineState.revision, discussionState.revision, target.value, stageCount.value, question.value], () => {
-  const request = confirmation.value;
-  if (request && (!sameOutlineChat(request.source) || request.revision !== outlineState.revision
-    || request.discussionRevision !== discussionState.revision || request.target !== target.value || request.count !== stageCount.value))
-    confirmation.value = null;
+function pickTarget(value: DiscussionTarget) {
+  target.value = value; touchedTarget.value = true;
+}
+
+/* —— 对话界面：打开、关闭、放大 —— */
+const open = ref(false), maximized = ref(false);
+const panelEl = ref<HTMLElement | null>(null);
+const { onDialogKeydown } = useDialogFocus(panelEl, () => open.value, () => close());
+function openPanel() { open.value = true; }
+function close() {
+  if (sheet.value) { closeSheet(); return; }
+  closeMenu();
+  open.value = false;
+}
+// 手机软键盘弹出时，按可见区域的高度摆放对话界面，输入栏不被键盘遮住。
+const viewport = ref<{ top: number; height: number } | null>(null);
+function syncViewport() {
+  const vv = window.visualViewport;
+  viewport.value = vv ? { top: vv.offsetTop, height: vv.height } : null;
+}
+watch(open, value => {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  if (value) { syncViewport(); vv.addEventListener('resize', syncViewport); vv.addEventListener('scroll', syncViewport); }
+  else { vv.removeEventListener('resize', syncViewport); vv.removeEventListener('scroll', syncViewport); viewport.value = null; }
 });
-// 切聊天清掉未发送输入与确认，普通新回复/草稿保存不清空用户正在输入的意见。
-let chat = getContext() ? captureOutlineSource(getContext()!) : undefined;
-watch(() => [outlineState.revision, discussionState.revision], () => {
-  if (chat && sameOutlineChat(chat)) return;
-  chat = getContext() ? captureOutlineSource(getContext()!) : undefined;
-  question.value = ''; error.value = ''; confirmation.value = null; touchedTarget.value = false;
-  target.value = outlineState.active ? 'active' : outlineState.draft ? 'draft' : 'none';
-});
+const maskStyle = computed(() => viewport.value ? { top: `${viewport.value.top}px`, height: `${viewport.value.height}px` } : undefined);
+
+/* —— 更多操作菜单 —— */
+const menuOpen = ref(false);
+const menuWrap = ref<HTMLElement | null>(null);
+const moreButton = ref<InstanceType<typeof IconButton> | null>(null);
+const moreEl = () => moreButton.value?.$el as HTMLElement | undefined;
+function menuItems(): HTMLElement[] {
+  return Array.from(menuWrap.value?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? []);
+}
+function openMenu() {
+  menuOpen.value = true;
+  document.addEventListener('mousedown', onDocMousedown, true);
+  nextTick(() => menuItems()[0]?.focus());
+}
+function closeMenu(restoreFocus = false) {
+  if (!menuOpen.value) return;
+  menuOpen.value = false;
+  document.removeEventListener('mousedown', onDocMousedown, true);
+  if (restoreFocus) moreEl()?.focus();
+}
+function onDocMousedown(event: MouseEvent) {
+  if (menuWrap.value && event.composedPath().includes(menuWrap.value)) return;
+  closeMenu();
+}
+function onMenuKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeMenu(true); return; }
+  if (event.key === 'Tab') { closeMenu(); return; }
+  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+  event.preventDefault();
+  const items = menuItems();
+  const index = items.indexOf(event.target as HTMLElement);
+  items[(index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus();
+}
+onBeforeUnmount(() => document.removeEventListener('mousedown', onDocMousedown, true));
+
+async function copyAll() {
+  closeMenu(true);
+  if (await copyText(discussionTranscript(discussionState.messages))) toast('已复制全部讨论。', 'success');
+  else toast('复制失败：浏览器不允许访问剪贴板，请选中文字后手动复制。', 'warning');
+}
+
+/* —— 清空讨论：确认弹窗叠在对话界面之上 —— */
+const clearOpen = ref(false);
+let clearRequest: { source: OutlineSource; revision: number } | null = null;
+function requestClear() {
+  closeMenu(true);
+  const ctx = getContext();
+  if (locked.value || !rounds.value || !ctx?.getCurrentChatId()) return;
+  clearRequest = { source: captureOutlineSource(ctx), revision: discussionState.revision };
+  // 等菜单收起、焦点回到「更多操作」后再打开，关闭弹窗时焦点能回到这里。
+  nextTick(() => { clearOpen.value = true; });
+}
+async function confirmClear() {
+  const request = clearRequest;
+  clearOpen.value = false; clearRequest = null;
+  if (!request || locked.value) return;
+  if (!sameOutlineChat(request.source) || request.revision !== discussionState.revision) {
+    error.value = '讨论已有变化，请核对后重新清空。'; return;
+  }
+  try {
+    await clearOutlineDiscussion(request.revision);
+    if (mounted && sameOutlineChat(request.source)) {
+      discussionRun.error = ''; discussionRun.errorDetail = ''; discussionRun.status = '讨论已清空。'; result.value = null;
+    }
+  } catch (cause) {
+    if (mounted && sameOutlineChat(request.source)) error.value = errorText(cause);
+  }
+}
+
+/* —— 发送：先显示待回复的问题；失败时把原文放回输入框 —— */
 async function send() {
   if (!canSend.value) return;
   const ctx = getContext(); if (!ctx) return;
   const source = captureOutlineSource(ctx), text = question.value;
-  error.value = ''; confirmation.value = null;
+  error.value = ''; result.value = null;
+  pendingQuestion.value = { text: text.trim(), at: Date.now() }; question.value = '';
   const saved = await sendOutlineDiscussion(text, target.value);
-  if (saved && mounted && sameOutlineChat(source) && question.value === text) question.value = '';
+  if (!mounted) return;
+  pendingQuestion.value = null;
+  if (!saved && sameOutlineChat(source) && !question.value) question.value = text;
 }
-function request(kind: Confirmation['kind']) {
-  if (locked.value || (kind === 'refine' && !available.value)) return;
+
+/* —— 生成草稿：底部面板即确认步骤，打开时记下聊天与版本，确认时核对 —— */
+type SheetRequest = { source: OutlineSource; revision: number; discussionRevision: number };
+const sheet = shallowRef<SheetRequest | null>(null);
+const sheetError = ref('');
+const sheetEl = ref<HTMLElement | null>(null);
+const draftButton = ref<HTMLButtonElement | null>(null);
+const snapshot = (ctx: NonNullable<ReturnType<typeof getContext>>): SheetRequest =>
+  ({ source: captureOutlineSource(ctx), revision: outlineState.revision, discussionRevision: discussionState.revision });
+const sheetWarning = computed(() => outlineState.draft
+  ? '将替换当前草稿，确认启用前不会影响正文。' + (props.unsaved ? '草稿中未保存的修改也会被替换。' : '')
+  : '生成的草稿需确认启用后才会影响正文。');
+function openSheet() {
+  if (!canRefine.value) return;
   const ctx = getContext(); if (!ctx?.getCurrentChatId()) return;
-  error.value = '';
-  confirmation.value = { kind, source: captureOutlineSource(ctx), revision: outlineState.revision,
-    discussionRevision: discussionState.revision, target: target.value, count: stageCount.value };
+  closeMenu();
+  sheetError.value = ''; result.value = null;
+  sheet.value = snapshot(ctx);
+  nextTick(() => sheetEl.value?.focus({ preventScroll: true }));
 }
-async function confirm() {
-  const choice = confirmation.value;
-  if (!choice || locked.value) return;
-  confirmation.value = null;
-  if (!sameOutlineChat(choice.source) || choice.revision !== outlineState.revision
-    || choice.discussionRevision !== discussionState.revision || choice.target !== target.value || choice.count !== stageCount.value) {
-    error.value = '聊天、讨论或规划已经变了，请重新核对。'; return;
+function closeSheet() {
+  sheet.value = null; sheetError.value = '';
+  nextTick(() => draftButton.value?.focus({ preventScroll: true }));
+}
+function onSheetKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape') return;
+  event.preventDefault(); event.stopPropagation(); closeSheet();
+}
+function stepStage(delta: number) {
+  const value = Number.isInteger(stageCount.value) ? stageCount.value : 6;
+  stageCount.value = Math.min(12, Math.max(1, value + delta));
+}
+function clampStage() {
+  const value = Math.round(Number(stageCount.value));
+  stageCount.value = Number.isFinite(value) ? Math.min(12, Math.max(1, value)) : 6;
+}
+async function confirmRefine() {
+  const request = sheet.value;
+  if (!request || !canRefine.value || !stageValid.value) return;
+  if (!sameOutlineChat(request.source)) { sheet.value = null; error.value = '聊天已切换，请在当前聊天重新操作。'; return; }
+  if (request.revision !== outlineState.revision || request.discussionRevision !== discussionState.revision) {
+    const ctx = getContext();
+    sheet.value = ctx ? snapshot(ctx) : null;
+    sheetError.value = '讨论或规划刚有变化，请核对后再次确认。';
+    return;
   }
+  let reference;
+  try { reference = captureOutlineRefinement(target.value); }
+  catch (cause) { sheetError.value = errorText(cause); return; }
+  const count = stageCount.value, previousDraftId = outlineState.draft?.id;
+  sheet.value = null; sheetError.value = ''; error.value = '';
+  refining.value = true;
+  nextTick(() => panelEl.value?.querySelector<HTMLElement>('.oc-bar .bbs-btn')?.focus({ preventScroll: true }));
   try {
-    if (choice.kind === 'clear') {
-      await clearOutlineDiscussion(choice.discussionRevision);
-      if (mounted && sameOutlineChat(choice.source)) { discussionRun.error = ''; discussionRun.errorDetail = ''; discussionRun.status = '讨论已清空。'; }
-      return;
-    }
-    const reference = captureOutlineRefinement(choice.target);
-    const previousDraftId = outlineState.draft?.id;
-    refining.value = true;
-    await generateOutline('根据所选大纲与讨论生成修订草稿。以讨论中用户最新明确意见为准，模型建议不等于已被采纳；保留未要求改动的合理内容与人物边界。没有现有大纲时按讨论整理初稿。不要把讨论当成剧情事实。', choice.count, reference);
-    if (mounted && sameOutlineChat(choice.source) && !outlineRun.error && outlineState.draft && outlineState.draft.id !== previousDraftId) { target.value = 'draft'; touchedTarget.value = true; }
+    await generateOutline(REFINE_INSTRUCTION, count, reference);
+    if (!mounted || !sameOutlineChat(request.source)) return;
+    if (!outlineRun.error && outlineState.draft && outlineState.draft.id !== previousDraftId) {
+      target.value = 'draft'; touchedTarget.value = true;
+      result.value = { kind: 'ready', text: '草稿已生成，确认启用前不会影响正文。' };
+    } else if (outlineRun.error) result.value = { kind: 'error', text: outlineRun.error, detail: outlineRun.errorDetail };
+    else if (outlineRun.status) result.value = { kind: 'notice', text: outlineRun.status };
   } catch (cause) {
-    if (mounted && sameOutlineChat(choice.source)) error.value = cause instanceof Error ? cause.message : '操作未完成，请重试。';
+    if (mounted && sameOutlineChat(request.source)) error.value = errorText(cause);
   } finally { refining.value = false; }
 }
+function viewDraft() {
+  open.value = false;
+  emit('view-draft');
+}
+function openApi() {
+  open.value = false;
+  emit('open-api');
+}
+
+// 切聊天时清掉未发送的输入、面板与结果；普通新回复、草稿保存不清空正在输入的内容。
+let chat = getContext() ? captureOutlineSource(getContext()!) : undefined;
+watch(() => [outlineState.revision, discussionState.revision], () => {
+  if (chat && sameOutlineChat(chat)) return;
+  chat = getContext() ? captureOutlineSource(getContext()!) : undefined;
+  question.value = ''; error.value = ''; touchedTarget.value = false; pendingQuestion.value = null;
+  sheet.value = null; sheetError.value = ''; result.value = null; clearOpen.value = false; clearRequest = null;
+  target.value = outlineState.active ? 'active' : outlineState.draft ? 'draft' : 'none';
+});
 </script>
 
 <template>
-  <details class="bbs-disclosure is-card outline-discussion" aria-label="大纲讨论区">
-    <summary>和模型讨论规划 <span v-if="discussionState.messages.length" class="bbs-disclosure-meta">{{ discussionState.messages.length / 2 }} 轮</span></summary>
-    <p class="hint">先和模型聊聊人物动机、节奏或走向。讨论不会改动规划，也不会发给正文；想采纳时点「按讨论生成草稿」。</p>
-    <p v-if="unsaved" class="bbs-callout is-warning">草稿有没保存的修改：讨论只会参考已保存的版本，按讨论生成草稿也会覆盖这些修改。</p>
-    <p v-if="configurationIssue" class="bbs-callout is-warning">{{ configurationIssue }}</p>
-    <p v-if="apiDirty" class="hint">API 设置尚未保存，讨论时使用上次保存的设置。</p>
-    <label>参考哪个版本
-      <select v-model="target" class="bbs-input" aria-label="讨论参考" :disabled="locked" @change="touchedTarget = true">
-        <option v-if="outlineState.active" value="active">正在用的规划 · {{ outlineState.active.content.title }}</option>
-        <option v-if="outlineState.draft" value="draft">草稿 · {{ outlineState.draft.content.title }}</option>
-        <option value="none">不参考，先聊方向</option>
-      </select>
-    </label>
-    <ol v-if="discussionState.messages.length" class="discussion-messages" aria-label="已保存的大纲讨论">
-      <li v-for="(message, index) in discussionState.messages" :key="index" :class="message.role">
-        <strong>{{ message.role === 'user' ? '你' : '模型' }}</strong>
-        <div class="discussion-text">{{ message.content }}</div>
-      </li>
-    </ol>
-    <p v-else class="hint">暂无讨论。可就当前规划的走向、节奏或角色反应提问。</p>
-    <label>你想聊的<textarea v-model="question" class="bbs-input" rows="4" maxlength="4000" :disabled="locked" placeholder="想保留什么、想改什么，或者先问问模型的看法。Ctrl+Enter 发送" @keydown.ctrl.enter.prevent="send" /></label>
-    <div class="discussion-actions">
-      <button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canSend" @click="send">发送</button>
-      <button v-if="discussionRun.busy" type="button" class="bbs-btn" :disabled="discussionState.saving" @click="cancelOutlineDiscussion">取消</button>
+  <section class="oc-entry" :aria-labelledby="ids.entry">
+    <span class="oc-entry-avatar" aria-hidden="true"><BrandMark :size="30" /></span>
+    <div class="oc-entry-main">
+      <h4 :id="ids.entry" class="oc-entry-title">规划讨论<span v-if="rounds" class="oc-entry-count">{{ rounds }} 轮{{ lastAt ? ' · ' + discussionTimeLabel(lastAt) : '' }}</span></h4>
+      <p class="oc-entry-text">{{ entryText }}</p>
     </div>
-    <p v-if="discussionRun.status" class="discussion-status" role="status">{{ discussionRun.status }}</p>
-    <div v-if="error || discussionRun.error || discussionState.issue" class="bbs-callout is-danger" role="alert">
-      <p>{{ error || discussionRun.error || discussionState.issue }}</p>
-      <details v-if="!error && discussionRun.error && discussionRun.errorDetail"><summary>技术细节</summary><p>{{ discussionRun.errorDetail }}</p></details>
-    </div>
-    <div class="discussion-refine">
-      <label>草稿分几个阶段（1–12）<input v-model.number="stageCount" class="bbs-input" type="number" min="1" max="12" step="1" :disabled="locked" /></label>
-      <div class="discussion-actions">
-        <button type="button" class="bbs-btn" :disabled="!available || !discussionState.messages.length || !Number.isInteger(stageCount) || stageCount < 1 || stageCount > 12" @click="request('refine')">按讨论生成草稿</button>
-        <button type="button" class="bbs-btn" :disabled="locked || !discussionState.messages.length" @click="request('clear')">清空讨论</button>
-        <button v-if="refining && outlineRun.busy" type="button" class="bbs-btn" @click="cancelOutline">取消生成</button>
+    <button type="button" class="bbs-btn oc-entry-open" :class="{ 'bbs-btn-primary': !rounds }" @click="openPanel">{{ rounds ? '继续讨论' : '开始讨论' }}<Icon name="navigate" /></button>
+  </section>
+
+  <Teleport :to="modalHost" :disabled="!modalHost">
+    <Transition name="oc">
+      <div v-if="open" class="oc-mask" :style="maskStyle" @mousedown.self="close">
+        <section ref="panelEl" class="oc-panel" :class="{ 'is-max': maximized }" role="dialog" aria-modal="true"
+          :aria-labelledby="ids.title" tabindex="-1" @keydown="onDialogKeydown">
+          <header class="oc-head" :inert="!!sheet">
+            <IconButton icon="back" label="返回规划" @click="close" />
+            <span class="oc-avatar" aria-hidden="true"><BrandMark :size="28" /></span>
+            <div class="oc-titles">
+              <h2 :id="ids.title">规划讨论</h2>
+              <p>棱镜宝书</p>
+            </div>
+            <IconButton class="oc-expand" :icon="maximized ? 'minimize' : 'maximize'" :label="maximized ? '还原窗口' : '放大窗口'" @click="maximized = !maximized" />
+            <div ref="menuWrap" class="oc-more" @keydown="onMenuKeydown">
+              <IconButton ref="moreButton" icon="more" label="更多操作" aria-haspopup="menu" :aria-expanded="menuOpen" @click="menuOpen ? closeMenu(true) : openMenu()" />
+              <div v-if="menuOpen" class="oc-menu" role="menu" aria-label="更多操作">
+                <button type="button" role="menuitem" class="oc-menu-item" :disabled="!rounds" @click="copyAll"><Icon name="copy" />复制全部讨论</button>
+                <button type="button" role="menuitem" class="oc-menu-item is-danger" :disabled="locked || !rounds" @click="requestClear"><Icon name="trash" />清空讨论</button>
+              </div>
+            </div>
+          </header>
+
+          <div class="oc-context" :inert="!!sheet">
+            <div class="oc-ref">
+              <span class="oc-ref-label">参考</span>
+              <div class="oc-ref-select"><BbsSelect :model-value="target" :options="targetOptions" aria-label="讨论参考的版本" @update:model-value="pickTarget" /></div>
+            </div>
+            <p class="oc-info"><Icon name="info" />讨论仅用于构思，生成草稿后再确认生效。</p>
+          </div>
+
+          <DiscussionMessages :inert="!!sheet" :messages="discussionState.messages" :pending="discussionRun.busy ? pendingQuestion : null"
+            :busy="discussionRun.busy" :busy-text="discussionRun.status" :note="listNote" />
+
+          <footer class="oc-foot" :inert="!!sheet">
+            <div class="oc-alerts">
+              <p v-if="!engineOn" class="bbs-callout is-warning">当前角色未启用棱镜宝书，讨论与生成草稿不可用。可在设置页顶部的总开关或角色设置中启用。</p>
+              <div v-else-if="configurationIssue" class="bbs-callout is-warning oc-alert-row">
+                <span>规划 API 不可用：{{ configurationIssue }}</span>
+                <button type="button" class="bbs-btn bbs-btn-sm" @click="openApi">打开规划 API 设置</button>
+              </div>
+              <p v-if="discussionState.issue" class="bbs-callout is-danger" role="alert">{{ discussionState.issue }}</p>
+              <div v-if="error || discussionRun.error" class="bbs-callout is-danger" role="alert">
+                <p>{{ error || discussionRun.error }}</p>
+                <details v-if="!error && discussionRun.errorDetail"><summary>技术细节</summary><p>{{ discussionRun.errorDetail }}</p></details>
+              </div>
+              <div v-if="result?.kind === 'error'" class="bbs-callout is-danger" role="alert">
+                <p>{{ result.text }}</p>
+                <details v-if="result.detail"><summary>技术细节</summary><p>{{ result.detail }}</p></details>
+              </div>
+              <p v-else-if="result?.kind === 'notice'" class="oc-hint" role="status">{{ result.text }}</p>
+              <div v-else-if="result?.kind === 'ready'" class="bbs-callout is-success oc-alert-row" role="status">
+                <span>{{ result.text }}</span>
+                <button type="button" class="bbs-btn bbs-btn-sm bbs-btn-primary" @click="viewDraft">查看草稿</button>
+              </div>
+              <div v-if="full" class="bbs-callout is-warning oc-alert-row">
+                <span>讨论已满 {{ MAX_ROUNDS }} 轮，清空讨论后可继续；规划不受影响。</span>
+                <button type="button" class="bbs-btn bbs-btn-sm" :disabled="locked" @click="requestClear">清空讨论</button>
+              </div>
+              <p v-else-if="totalChars >= 44000" class="oc-hint">讨论记录已有 {{ totalChars }} 字，上限 48000 字。</p>
+              <p v-if="unsaved && target === 'draft'" class="oc-hint">草稿有未保存的修改，讨论只参考已保存的版本。</p>
+              <p v-if="apiDirty" class="oc-hint">规划 API 设置尚未保存，使用上次保存的设置。</p>
+            </div>
+            <div class="oc-bar">
+              <span class="oc-rounds">{{ roundsLabel }}</span>
+              <span v-if="generatingDraft" class="oc-progress" role="status"><span class="bbs-spin" aria-hidden="true"></span>正在生成草稿…</span>
+              <button v-if="generatingDraft" type="button" class="bbs-btn bbs-btn-sm" @click="cancelOutline">取消生成</button>
+              <button v-else ref="draftButton" type="button" class="bbs-btn bbs-btn-sm oc-draft" :disabled="!canRefine" @click="openSheet">生成草稿<Icon name="arrow-up-right" /></button>
+            </div>
+            <div class="oc-composer" :class="{ 'is-disabled': typingBlocked }">
+              <textarea v-model="question" v-autosize class="oc-input" rows="1" maxlength="4000" aria-label="讨论内容" :placeholder="placeholder"
+                :disabled="typingBlocked" @keydown.ctrl.enter.prevent="send" @keydown.meta.enter.prevent="send" />
+              <button v-if="discussionRun.busy" type="button" class="oc-send is-stop" :disabled="discussionState.saving" aria-label="停止等待回复" title="停止等待回复" @click="cancelOutlineDiscussion"><Icon name="stop" /></button>
+              <button v-else type="button" class="oc-send" :disabled="!canSend" aria-label="发送" title="发送（Ctrl+Enter）" @click="send"><Icon name="send" /></button>
+            </div>
+            <p class="oc-caption">发送仅用于讨论<span class="oc-shortcut"> · Ctrl+Enter 发送</span><span v-if="question.length > 3600" class="oc-count"> · {{ question.length }} / 4000</span></p>
+          </footer>
+
+          <Transition name="oc-sheet">
+            <div v-if="sheet" class="oc-scrim" @mousedown.self="closeSheet">
+              <section ref="sheetEl" class="oc-sheet" role="dialog" aria-modal="true" :aria-labelledby="ids.sheet" tabindex="-1" @keydown="onSheetKeydown">
+                <header class="oc-sheet-head">
+                  <div>
+                    <h3 :id="ids.sheet">按讨论生成草稿</h3>
+                    <p>整理当前讨论，生成可编辑的规划草稿。</p>
+                  </div>
+                  <IconButton icon="close" label="关闭" @click="closeSheet" />
+                </header>
+                <div class="oc-sheet-card">
+                  <div class="oc-sheet-row">
+                    <span class="oc-sheet-label">参考版本</span>
+                    <div class="oc-sheet-select"><BbsSelect :model-value="target" :options="targetOptions" aria-label="参考版本" @update:model-value="pickTarget" /></div>
+                  </div>
+                  <div class="oc-sheet-row">
+                    <span class="oc-sheet-label">阶段数量<small>可设置 1–12 个阶段</small></span>
+                    <div class="oc-stepper" role="group" aria-label="阶段数量">
+                      <button type="button" :disabled="stageCount <= 1" aria-label="减少一个阶段" @click="stepStage(-1)"><Icon name="minus" /></button>
+                      <input v-model.number="stageCount" type="number" min="1" max="12" step="1" inputmode="numeric" aria-label="阶段数量" @change="clampStage" />
+                      <button type="button" :disabled="stageCount >= 12" aria-label="增加一个阶段" @click="stepStage(1)"><Icon name="plus" /></button>
+                    </div>
+                  </div>
+                </div>
+                <p class="oc-sheet-warn"><Icon name="info" />{{ sheetWarning }}</p>
+                <p v-if="sheetError" class="bbs-callout is-danger" role="alert">{{ sheetError }}</p>
+                <button type="button" class="bbs-btn bbs-btn-primary oc-sheet-primary" :disabled="!canRefine || !stageValid" @click="confirmRefine">生成草稿</button>
+                <button type="button" class="oc-sheet-back" @click="closeSheet">返回讨论</button>
+              </section>
+            </div>
+          </Transition>
+        </section>
       </div>
-    </div>
-    <div v-if="confirmation" class="discussion-confirmation">
-      <p>{{ confirmation.kind === 'clear' ? '只清空当前聊天的讨论记录，草稿、规划、札记和摘要均不受影响。确定清空？' : '将再次请求规划 API，按讨论生成新草稿并替换当前草稿（包括未保存的修改）。正在使用的规划不受影响，新草稿需确认后生效。' }}</p>
-      <div class="discussion-actions">
-        <button type="button" class="bbs-btn bbs-btn-primary" :disabled="locked" @click="confirm">{{ confirmation.kind === 'clear' ? '清空' : '生成草稿' }}</button>
-        <button type="button" class="bbs-btn" @click="confirmation = null">取消</button>
-      </div>
-    </div>
-  </details>
+    </Transition>
+  </Teleport>
+
+  <ConfirmDialog v-model:open="clearOpen" title="清空讨论" confirm-text="清空" tone="danger" confirm-icon="trash" top-layer @confirm="confirmClear">
+    只清空当前聊天的讨论记录，草稿、规划、札记和摘要均不受影响。
+  </ConfirmDialog>
 </template>
 
 <style scoped>
-.outline-discussion { min-width:0; max-width:100%; margin:12px 0; overflow-wrap:anywhere; font-size:13px; line-height:1.75; }
-label { display:flex; flex-direction:column; gap:5px; margin:10px 0; min-width:0; font-size:12.5px; color:var(--bbs-ink-soft); }
-.bbs-input { box-sizing:border-box; width:100%; min-width:0; max-width:100%; min-height:40px; font-size:13px; color:var(--bbs-ink); }
-textarea { resize:vertical; font:inherit; }
-.discussion-actions { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }
-.bbs-btn { min-height:38px; max-width:100%; white-space:normal; overflow-wrap:anywhere; }
-.discussion-messages { list-style:none; margin:12px 0; padding:0; max-height:380px; overflow:auto; overscroll-behavior:contain; display:flex; flex-direction:column; gap:8px; }
-.discussion-messages li { padding:10px 12px; border-radius:10px; background:var(--bbs-surface-2); }
-.discussion-messages li strong { display:block; margin-bottom:2px; font-size:12px; color:var(--bbs-ink-muted); }
-.discussion-messages .user { margin-left:12%; background:var(--bbs-accent-soft); }
-.discussion-messages .user strong { color:var(--bbs-accent); }
-.discussion-messages .assistant { margin-right:12%; }
-.discussion-text { white-space:pre-wrap; overflow-wrap:anywhere; }
-.discussion-status { color:var(--bbs-accent); }
-.discussion-refine { margin-top:6px; padding-top:6px; border-top:1px solid var(--bbs-line); }
-.discussion-refine label { max-width:220px; }
-.discussion-confirmation { padding:10px 14px; border-left:2px solid var(--bbs-accent); border-radius:0 8px 8px 0; background:var(--bbs-accent-soft); }
-.hint { color:var(--bbs-ink-muted); font-size:12.5px; }
-:is(button,input,select,textarea,summary):focus-visible { outline:2px solid var(--bbs-accent); outline-offset:2px; }
-@media(max-width:480px) { .discussion-messages .user { margin-left:0; } .discussion-messages .assistant { margin-right:0; } .discussion-refine label { max-width:none; } }
+/* —— 页面内的入口卡片 —— */
+.oc-entry { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; min-width: 0; margin: 12px 0; padding: 12px 14px; border: 1px solid var(--bbs-line); border-radius: var(--bbs-radius); background: var(--bbs-surface); }
+.oc-entry-avatar, .oc-avatar { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; border-radius: 50%; background: var(--bbs-accent-soft); }
+.oc-entry-avatar { width: 40px; height: 40px; }
+.oc-entry-main { flex: 1 1 220px; min-width: 0; }
+.oc-entry-title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 650; line-height: 1.5; color: var(--bbs-ink); }
+.oc-entry-count { padding: 0 8px; border-radius: var(--bbs-radius-pill); background: var(--bbs-surface-2); font-size: 11px; font-weight: 500; line-height: 1.7; color: var(--bbs-ink-muted); }
+.oc-entry-text { display: -webkit-box; margin: 2px 0 0; overflow: hidden; font-size: 13px; line-height: 1.6; color: var(--bbs-ink-muted); overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.oc-entry-open { flex: 0 0 auto; margin-left: auto; }
+
+/* —— 对话界面：桌面居中大窗，窄屏全屏 —— */
+.oc-mask { position: fixed; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100vh; height: 100dvh; z-index: 10001; display: flex; align-items: center; justify-content: center; padding: 24px; background: var(--bbs-overlay); }
+.oc-panel { position: relative; display: flex; flex-direction: column; width: min(100%, 760px); height: min(100%, 860px); min-height: 0; overflow: hidden; border: 1px solid var(--bbs-line); border-radius: var(--bbs-radius-win); background: var(--bbs-bg); box-shadow: var(--bbs-shadow); color: var(--bbs-ink); font-family: var(--bbs-font-sans); font-size: 14px; line-height: 1.6; }
+.oc-panel.is-max { width: 100%; height: 100%; }
+.oc-panel:focus { outline: none; }
+
+.oc-head { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--bbs-line); background: var(--bbs-surface); }
+.oc-avatar { width: 38px; height: 38px; }
+.oc-titles { flex: 1 1 auto; min-width: 0; }
+.oc-titles h2 { margin: 0; font: 600 16px/1.4 var(--bbs-font-reading); letter-spacing: .04em; color: var(--bbs-ink); }
+.oc-titles p { margin: 0; font-size: 12px; line-height: 1.4; color: var(--bbs-ink-muted); }
+.oc-more { position: relative; }
+.oc-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 3; display: flex; flex-direction: column; min-width: 168px; padding: 4px; border: 1px solid var(--bbs-line); border-radius: var(--bbs-radius); background: var(--bbs-surface); box-shadow: var(--bbs-shadow); }
+.oc-menu-item { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 10px; border: 0; border-radius: var(--bbs-radius-sm); background: transparent; color: var(--bbs-ink); font-size: 13px; text-align: left; cursor: pointer; }
+.oc-menu-item:hover:not(:disabled), .oc-menu-item:focus-visible { background: var(--bbs-surface-2); }
+.oc-menu-item.is-danger { color: var(--bbs-danger); }
+.oc-menu-item:disabled { color: var(--bbs-ink-muted); }
+
+.oc-context { flex: 0 0 auto; padding: 10px 16px; border-bottom: 1px solid var(--bbs-line); background: var(--bbs-surface); }
+.oc-ref { display: flex; align-items: center; width: fit-content; max-width: 100%; min-width: 0; padding-left: 12px; border: 1px solid var(--bbs-control-border); border-radius: var(--bbs-radius-pill); background: var(--bbs-surface); }
+.oc-ref-label { flex: 0 0 auto; padding-right: 10px; border-right: 1px solid var(--bbs-line); font-size: 13px; line-height: 1.4; color: var(--bbs-ink-soft); }
+.oc-ref-select { min-width: 0; max-width: 320px; }
+.oc-ref :deep(.bbs-select-trigger) { min-height: 34px; padding: 6px 12px 6px 10px; border: 0; border-radius: 0 var(--bbs-radius-pill) var(--bbs-radius-pill) 0; background: transparent; }
+.oc-info { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; font-size: 12px; line-height: 1.5; color: var(--bbs-ink-muted); }
+.oc-info .bbs-icon, .oc-sheet-warn .bbs-icon { flex: 0 0 auto; font-size: 14px; }
+
+.oc-foot { flex: 0 0 auto; padding: 10px 16px max(12px, env(safe-area-inset-bottom)); border-top: 1px solid var(--bbs-line); background: var(--bbs-surface); }
+.oc-alerts { display: flex; flex-direction: column; gap: 6px; max-height: 32vh; overflow-y: auto; }
+.oc-alerts:not(:empty) { margin-bottom: 10px; }
+.oc-alerts .bbs-callout { margin: 0; font-size: 12.5px; }
+.oc-alert-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+.oc-alert-row > span { flex: 1 1 200px; min-width: 0; }
+.oc-hint { margin: 0; font-size: 12px; line-height: 1.6; color: var(--bbs-ink-muted); }
+.oc-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.oc-rounds { flex: 1 1 auto; font-size: 12px; color: var(--bbs-ink-muted); }
+.oc-progress { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--bbs-accent); }
+.oc-progress .bbs-spin { flex: 0 0 auto; }
+.oc-bar .oc-draft { border-color: var(--bbs-accent); background: transparent; color: var(--bbs-accent); }
+.oc-bar .oc-draft:hover:not(:disabled) { background: var(--bbs-accent-soft); }
+.oc-bar .oc-draft:disabled { border-color: var(--bbs-line); color: var(--bbs-ink-muted); }
+.oc-composer { display: flex; align-items: flex-end; gap: 8px; padding: 5px 5px 5px 16px; border: 1px solid var(--bbs-control-border); border-radius: 22px; background: var(--bbs-surface); }
+.oc-composer:focus-within { border-color: var(--bbs-accent); box-shadow: 0 0 0 1px var(--bbs-accent); }
+.oc-composer.is-disabled { background: var(--bbs-surface-2); }
+.oc-input { flex: 1 1 auto; min-width: 0; min-height: 34px; max-height: 168px; margin: 0; padding: 6px 0; border: 0; outline: none; resize: none; background: transparent; color: var(--bbs-ink); font-size: 14px; line-height: 1.6; overflow-y: auto; }
+.oc-input:focus-visible { outline: none; }
+.oc-input::placeholder { color: var(--bbs-ink-muted); }
+.oc-send { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 50%; background: var(--bbs-accent); color: var(--bbs-accent-ink); font-size: 17px; cursor: pointer; }
+.oc-send:disabled { background: var(--bbs-surface-2); color: var(--bbs-ink-muted); }
+.oc-send.is-stop { background: var(--bbs-ink); color: var(--bbs-surface); }
+.oc-caption { margin: 6px 0 0; font-size: 11px; line-height: 1.5; text-align: center; color: var(--bbs-ink-muted); }
+
+/* —— 生成草稿的底部面板：盖在对话上，对话区变暗 —— */
+.oc-scrim { position: absolute; top: 0; right: 0; bottom: 0; left: 0; z-index: 4; display: flex; align-items: flex-end; justify-content: center; padding: 0 12px 12px; background: var(--bbs-overlay); }
+.oc-sheet { display: flex; flex-direction: column; gap: 12px; width: 100%; max-width: 560px; max-height: calc(100% - 24px); overflow-y: auto; padding: 18px 18px 14px; border: 1px solid var(--bbs-line); border-radius: var(--bbs-radius-win); background: var(--bbs-surface); box-shadow: var(--bbs-shadow); }
+.oc-sheet:focus { outline: none; }
+.oc-sheet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.oc-sheet-head h3 { margin: 0; font: 600 17px/1.4 var(--bbs-font-reading); letter-spacing: .03em; color: var(--bbs-ink); }
+.oc-sheet-head p { margin: 4px 0 0; font-size: 13px; line-height: 1.6; color: var(--bbs-ink-muted); }
+.oc-sheet-card { display: flex; flex-direction: column; border: 1px solid var(--bbs-line); border-radius: var(--bbs-radius); background: var(--bbs-bg); }
+.oc-sheet-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 12px 14px; }
+.oc-sheet-row + .oc-sheet-row { border-top: 1px solid var(--bbs-line); }
+.oc-sheet-label { display: flex; flex-direction: column; font-size: 14px; font-weight: 600; color: var(--bbs-ink); }
+.oc-sheet-label small { margin-top: 2px; font-size: 12px; font-weight: 400; color: var(--bbs-ink-muted); }
+.oc-sheet-select { flex: 1 1 200px; min-width: 0; max-width: 300px; }
+.oc-stepper { display: inline-flex; align-items: center; overflow: hidden; border: 1px solid var(--bbs-control-border); border-radius: var(--bbs-radius-pill); background: var(--bbs-surface); }
+.oc-stepper button { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 36px; padding: 0; border: 0; background: transparent; color: var(--bbs-ink-soft); font-size: 15px; cursor: pointer; }
+.oc-stepper button:hover:not(:disabled) { background: var(--bbs-surface-2); color: var(--bbs-accent); }
+.oc-stepper button:disabled { color: var(--bbs-line-strong); }
+.oc-stepper input { width: 44px; height: 36px; padding: 0; border: 0; border-left: 1px solid var(--bbs-line); border-right: 1px solid var(--bbs-line); background: transparent; color: var(--bbs-ink); font-size: 15px; font-weight: 600; text-align: center; -moz-appearance: textfield; appearance: textfield; }
+.oc-stepper input::-webkit-outer-spin-button, .oc-stepper input::-webkit-inner-spin-button { margin: 0; -webkit-appearance: none; }
+.oc-sheet-warn { display: flex; align-items: flex-start; gap: 6px; margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--bbs-warning); }
+.oc-sheet-warn .bbs-icon { margin-top: 3px; }
+.oc-sheet .bbs-callout { margin: 0; }
+.oc-sheet-primary { width: 100%; min-height: 42px; font-size: 14px; }
+.oc-sheet-back { align-self: center; min-height: 36px; padding: 4px 12px; border: 0; border-radius: var(--bbs-radius-sm); background: transparent; color: var(--bbs-ink-soft); font-size: 13px; cursor: pointer; }
+.oc-sheet-back:hover { color: var(--bbs-accent); }
+
+.oc-mask :is(button, input, textarea):focus-visible { outline: 2px solid var(--bbs-accent); outline-offset: 2px; }
+
+/* —— 进出场：桌面淡入并微升；窄屏、触屏与减少动效时 --bbs-dur 为 0，直接到终态 —— */
+.oc-enter-active, .oc-leave-active { transition: opacity var(--bbs-dur) var(--bbs-ease); }
+.oc-enter-active .oc-panel, .oc-leave-active .oc-panel { transition: transform var(--bbs-dur) var(--bbs-ease); }
+.oc-enter-from, .oc-leave-to { opacity: 0; }
+.oc-enter-from .oc-panel, .oc-leave-to .oc-panel { transform: translateY(10px) scale(.985); }
+.oc-sheet-enter-active, .oc-sheet-leave-active { transition: opacity var(--bbs-dur) var(--bbs-ease); }
+.oc-sheet-enter-active .oc-sheet, .oc-sheet-leave-active .oc-sheet { transition: transform var(--bbs-dur) var(--bbs-ease); }
+.oc-sheet-enter-from, .oc-sheet-leave-to { opacity: 0; }
+.oc-sheet-enter-from .oc-sheet, .oc-sheet-leave-to .oc-sheet { transform: translateY(24px); }
+
+@media (max-width: 640px) {
+  .oc-mask { padding: 0; }
+  .oc-panel, .oc-panel.is-max { width: 100%; height: 100%; border: 0; border-radius: 0; }
+  .oc-expand, .oc-shortcut { display: none; }
+  .oc-head { padding: 8px 8px 8px 6px; }
+  .oc-context { padding: 8px 12px; }
+  .oc-foot { padding: 8px 12px max(10px, env(safe-area-inset-bottom)); }
+  .oc-scrim { padding: 0; }
+  .oc-sheet { max-width: none; max-height: calc(100% - 40px); padding: 16px 16px max(12px, env(safe-area-inset-bottom)); border-width: 1px 0 0; border-radius: var(--bbs-radius-win) var(--bbs-radius-win) 0 0; }
+  .oc-sheet-select { max-width: none; }
+}
+@media (hover: none), (pointer: coarse) {
+  .oc-shortcut { display: none; }
+  .oc-send { width: 40px; height: 40px; }
+  .oc-stepper button { width: 44px; height: 40px; }
+  .oc-stepper input { height: 40px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .oc-enter-active, .oc-leave-active, .oc-enter-active .oc-panel, .oc-leave-active .oc-panel,
+  .oc-sheet-enter-active, .oc-sheet-leave-active, .oc-sheet-enter-active .oc-sheet, .oc-sheet-leave-active .oc-sheet { transition: none; }
+}
 </style>

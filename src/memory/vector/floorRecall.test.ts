@@ -58,6 +58,20 @@ describe('楼层召回记录：读写格式', () => {
     const rec = floorRecallFromDebug(snapshotRecallDebug(), 2);
     expect(rec).toMatchObject({ v: 1, swipe: 2, status: '召回完成' });
     expect(rec.items.map(i => [i.source, i.tier, i.preview])).toEqual([['#3', 'full', '旧事一'], ['旧档', 'brief', '旧事二']]);
+    expect(rec).not.toHaveProperty('cut');
+  });
+
+  it('记下放不进召回预算的段数，读回时保留', () => {
+    resetRecallDebug();
+    setRecallRerank([
+      { leafId: 'a', rerankScore: 0.95, similarity: 0.9, tier: 'brief', downgraded: true, source: '#3', storyTime: '', preview: '改发摘要' },
+      { leafId: 'b', rerankScore: 0.92, similarity: 0.9, tier: 'cut', source: '#4', storyTime: '', preview: '放不下' },
+    ]);
+    setRecallStatus('召回完成');
+    const rec = floorRecallFromDebug(snapshotRecallDebug(), 0);
+    expect(rec).toMatchObject({ cut: 1, items: [{ source: '#3', tier: 'brief', preview: '改发摘要' }] });
+    expect(readFloorRecall(ai('回复', { bbs_recall: rec }))?.cut).toBe(1);
+    expect(readFloorRecall(ai('回复', { bbs_recall: { ...rec, cut: -3 } }))).not.toHaveProperty('cut');
   });
 
   it('页码对不上、格式不对时不显示；坏条目跳过', () => {

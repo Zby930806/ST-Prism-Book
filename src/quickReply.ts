@@ -52,6 +52,7 @@ function buildButton(): HTMLElement {
   btn.id = BTN_ID;
   btn.className = 'qr--button menu_button interactable';
   btn.setAttribute('tabindex', '0');
+  btn.setAttribute('role', 'button');
   btn.title = '打开棱镜宝书';
   btn.textContent = '棱镜宝书';
   btn.addEventListener('click', e => {

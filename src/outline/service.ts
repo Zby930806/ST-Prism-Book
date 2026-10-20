@@ -64,6 +64,7 @@ export async function sendOutlineDiscussion(question: string, target: Discussion
   if (discussionRun.busy || outlineRun.busy) return false;
   discussionRun.error = ''; discussionRun.errorDetail = ''; discussionRun.status = '';
   let own = 0, phase: 'preflight' | 'request' | 'parse' | 'save' = 'preflight';
+  const askedAt = Date.now();
   try {
     if (!engineActiveHere()) throw new Error('当前角色没有启用棱镜宝书。');
     if (generationBusy) throw new Error('请等正文生成结束后再讨论大纲。');
@@ -97,9 +98,9 @@ export async function sendOutlineDiscussion(question: string, target: Discussion
       try { answer = cutDiscussionReply(partial, error as ApiError); } catch { throw error; }
       phase = 'parse';
     }
-    phase = 'save'; await appendDiscussionTurn(question.trim(), answer, discussionRevision, source);
+    phase = 'save'; await appendDiscussionTurn(question.trim(), answer, discussionRevision, source, { question: askedAt, answer: Date.now() });
     if (own !== discussionRunId || !sameOutlineChat(source)) return false;
-    discussionRun.status = '已保存这一轮讨论，大纲没有改动。想采纳的话，点「按讨论生成草稿」再确认加入计划。';
+    discussionRun.status = '已保存这一轮讨论，规划未改动。采纳时使用「生成草稿」，确认加入计划后生效。';
     return true;
   } catch (error) {
     if (own && own !== discussionRunId) return false;

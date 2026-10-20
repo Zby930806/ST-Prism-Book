@@ -8,7 +8,7 @@ export const NOTES_DEFAULT_MAX_TOKENS = 8000;
 export const NOTES_MAX_TOKENS_LIMIT = 65535;
 /** 旧版保存设置时没有记下默认值，那时的默认是 3000。 */
 const LEGACY_DEFAULT_MAX_TOKENS = 3000;
-const defaults = (): NotesSettings => ({ enabled: false, autoGenerate: false, injectConfirmed: false, recentFloors: 8, memoryChars: 12000,
+const defaults = (): NotesSettings => ({ enabled: false, autoGenerate: false, injectConfirmed: false, showInChat: true, recentFloors: 8, memoryChars: 12000,
   channel: { id: 'prism-notes-independent', name: '双子札记独立 API', url: '', key: '', model: '', temperature: 0.8, maxTokens: NOTES_DEFAULT_MAX_TOKENS, timeoutSec: 180, stream: true, prefill: false, excludeParams: [], reasoningEffort: '' } });
 export const notesSettings = reactive<NotesSettings>(defaults());
 let protectedSettings = false;
@@ -16,6 +16,8 @@ const bounded = (v: unknown, fallback: number, lo: number, hi: number) => typeof
 function normalize(value: Partial<NotesSettings>): NotesSettings {
   const d = defaults(), c = value.channel ?? d.channel;
   return { enabled: value.enabled === true, autoGenerate: value.autoGenerate === true, injectConfirmed: value.injectConfirmed === true,
+    // 旧设置没有这一项:按默认显示(札记本身默认关,没启用札记的聊天不受影响)
+    showInChat: value.showInChat !== false,
     recentFloors: Math.floor(bounded(value.recentFloors,8,1,40)), memoryChars: Math.floor(bounded(value.memoryChars,12000,1000,40000)),
     channel: { ...d.channel, url: typeof c.url === 'string' ? c.url.trim() : '', key: typeof c.key === 'string' ? c.key : '', model: typeof c.model === 'string' ? c.model.trim() : '',
       temperature: bounded(c.temperature,.8,0,2), maxTokens: Math.floor(bounded(c.maxTokens,NOTES_DEFAULT_MAX_TOKENS,256,NOTES_MAX_TOKENS_LIMIT)), timeoutSec: Math.floor(bounded(c.timeoutSec,180,10,600)), stream: c.stream !== false } };
@@ -50,4 +52,8 @@ export function validateNotesChannel(): void {
   if (!c.url.trim() || !c.model.trim()) throw new Error('请先在「札记 → 独立 API 设置」里填写地址和模型名（札记不会借用正文或摘要的 API）。');
   let url: URL; try { url = new URL(c.url); } catch { throw new Error('札记的 API 地址不是有效的网址。'); }
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('札记的 API 地址要写完整的 http(s) 地址，不能带账号、? 参数或 #。');
+}
+/** 札记 API 不可用的原因(与 validateNotesChannel 同一套检查);可用时返回空串。供界面判断是否显示「生成札记」。 */
+export function notesChannelIssue(): string {
+  try { validateNotesChannel(); return ''; } catch (error) { return error instanceof Error ? error.message : '札记 API 不可用。'; }
 }

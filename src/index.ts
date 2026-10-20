@@ -20,6 +20,7 @@ import { syncTopBarButton } from '@/topbar';
 import { syncQuickReplyButton } from '@/quickReply';
 import { syncRecallQuickReply } from '@/recallQuickReply';
 import { bindFloorPanel } from '@/floorPanel';
+import { bindNotesPanel } from '@/notesPanel';
 import { registerPublicInterface } from '@/public/register';
 import { ui } from '@/state/ui';
 import { guardEditableArrowKeys } from '@/st/keyboard';
@@ -170,6 +171,8 @@ function bindMemoryWhenReady(attempt = 0) {
       refreshInjection();
       // 楼内摘要锚点:按设置开关注入(bindFloorPanel 内 watch 开关 + 主题,immediate 首次同步)
       bindFloorPanel();
+      // 聊天里的札记卡片:启用双子札记且札记页里「在聊天中显示札记」打开时,挂在最新正文楼层和有札记的楼层下方
+      bindNotesPanel();
       // 回复到达时记下生成前召回了什么(只在启用楼层面板时写入)
       bindFloorRecall();
       // 记录冲突的连续性提醒:回复到达后标为已提醒
