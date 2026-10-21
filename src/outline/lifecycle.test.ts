@@ -37,6 +37,10 @@ vi.mock('@/memory/store', () => ({
   memoryWriteIssue: vi.fn(() => ''),
 }));
 vi.mock('@/memory/inject', () => ({ selectHistoryNodesBefore: vi.fn(() => []), renderHistoryNodes: vi.fn(() => '') }));
+// 世界书读取走宿主接口,这里固定为空;读取阶段的取消与失效另见 lazy.test.ts。
+vi.mock('./sources', async importOriginal => ({
+  ...(await importOriginal<typeof import('./sources')>()), outlineWorldInfo: vi.fn(async () => ''),
+}));
 
 const completion = vi.mocked(requestCompletion);
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value));
@@ -110,11 +114,13 @@ function generatedDraft(): OutlineDraft {
   return { id: 'generated-test', createdAt: 123, sourceFloor: ctx.chat.length - 1,
     sourceHash: sourceHash(ctx, ctx.chat.length - 1), brief: '要求', content: content() };
 }
-function pendingRequest() {
+/** 先读世界书再发请求:等请求真正发出后再返回,之后的取消、切聊和改正文都发生在等待模型回复期间。 */
+async function pendingRequest() {
   const wait = deferred<string>(); completion.mockReturnValueOnce(wait.promise);
+  const calls = completion.mock.calls.length;
   const task = generateOutline('新的创作要求', 2);
   expect(outlineRun.busy).toBe(true);
-  expect(completion).toHaveBeenCalled();
+  await vi.waitFor(() => expect(completion.mock.calls.length).toBe(calls + 1));
   const options = completion.mock.calls.at(-1)![2]!;
   return { ...wait, task, options };
 }
@@ -237,7 +243,9 @@ describe('大纲双向讨论与显式修订', () => {
     await sendOutlineDiscussion('调整节奏', 'active');
     const reference = captureOutlineRefinement('active'), before = copy(saved());
     const wait = deferred<string>(); completion.mockReturnValueOnce(wait.promise);
+    const calls = completion.mock.calls.length;
     const task = generateOutline('按讨论修订', 2, reference);
+    await vi.waitFor(() => expect(completion.mock.calls.length).toBe(calls + 1));
     await clearOutlineDiscussion(discussionState.revision);
     wait.resolve(reply('过期草稿')); await task;
     expect(saved()).toEqual(before);
@@ -386,7 +394,7 @@ describe('真实 core：草稿、确认、独立注入与阶段控制', () => {
     bindOutlineLifecycle(); await active();
     await setOutlineExitCriteria(0, '  在档案室找到署名  ');
     expect(saved().active?.content.chapters[0].exitCriteria).toBe('在档案室找到署名');
-    expect(latestInjection()).toContain('推进条件（由用户核对进度）：在档案室找到署名');
+    expect(latestInjection()).toContain('推进条件（由用户或推进条件检查核对）：在档案室找到署名');
     await setOutlineExitCriteria(1, '见到署名者本人');
     const after = saved().active!;
     expect(after.content.chapters[1].exitCriteria).toBe('见到署名者本人');
@@ -470,7 +478,7 @@ describe('真实 store：保存事务、只读和并发版本保护', () => {
   });
 
   it('旧 revision 的手工保存和模型提交都拒绝；并发返回不覆盖用户新草稿', async () => {
-    const revision = outlineState.revision, generated = generatedDraft(); const pending = pendingRequest();
+    const revision = outlineState.revision, generated = generatedDraft(); const pending = await pendingRequest();
     const newer = await draft('用户最新编辑');
     await expect(saveOutlineDraft(content(), '旧编辑', revision)).rejects.toThrow('版本已变化');
     await expect(commitGeneratedOutline(generated, revision)).rejects.toThrow('已经变化');
@@ -492,7 +500,7 @@ describe('真实 store：保存事务、只读和并发版本保护', () => {
   });
 
   it('模型等待期间外部 metadata 变化，即使 revision 未变也拒绝旧回复', async () => {
-    const pending = pendingRequest(); const external = { version: 99, opaque: '不可覆盖' };
+    const pending = await pendingRequest(); const external = { version: 99, opaque: '不可覆盖' };
     ctx.chatMetadata[OUTLINE_DATA_KEY] = external;
     pending.resolve(reply()); await pending.task;
     expect(ctx.chatMetadata[OUTLINE_DATA_KEY]).toBe(external); expect(ctx.saveMetadata).not.toHaveBeenCalled();
@@ -579,7 +587,7 @@ describe('真实 source 与消息事件：历史失效、重新确认、托管�
   it.each(['legacy-body', 'time-tagged-body'] as const)('%s 的真实托管旁注/札记/隐藏标记不取消请求或误伤来源', async mode => {
     if (mode === 'time-tagged-body') ctx.chat[1].mes = '<bbs_start>上午</bbs_start>她走进房间。<bbs_end>中午</bbs_end>';
     bindOutlineLifecycle(); await active(); const revision = outlineState.revision;
-    const pending = pendingRequest(), body = cleanBody(ctx.chat[1].mes), source = captureOutlineSource(ctx);
+    const pending = await pendingRequest(), body = cleanBody(ctx.chat[1].mes), source = captureOutlineSource(ctx);
     ctx.chat[1].mes = writeVarLogTag(writeItemLogTag(ctx.chat[1].mes, '获得 钥匙 ×1'), '变更 信任 +1');
     ctx.chat[1].mes += '\n<aftertalk>只是未确认的札记提案</aftertalk>';
     ctx.chat[1].is_system = true; ctx.chat[1].extra!.bbs_hidden = true;
@@ -612,7 +620,7 @@ describe('真实 source 与消息事件：历史失效、重新确认、托管�
 describe('真实 service：取消、迟到响应、错误边界与生命周期', () => {
   it.each(['cancel', 'chat', 'mutable-chat', 'body-edit', 'append', 'disable'] as const)
   ('%s 后迟到流与完成不得保存或写入新聊天', async mode => {
-    bindOutlineLifecycle(); const pending = pendingRequest(); const oldMetadata = ctx.chatMetadata;
+    bindOutlineLifecycle(); const pending = await pendingRequest(); const oldMetadata = ctx.chatMetadata;
     pending.options.onDelta?.('临时预览'); expect(outlineRun.draft).toBe('临时预览');
     if (mode === 'cancel') cancelOutline();
     if (mode === 'chat') { current = context('chat-b'); emit('CHAT_CHANGED'); }
@@ -632,7 +640,7 @@ describe('真实 service：取消、迟到响应、错误边界与生命周期',
   });
 
   it.each(['mutable-chat', 'body-edit', 'append', 'disable'] as const)('无宿主事件时 %s 也靠值检查拒绝迟到结果', async mode => {
-    const pending = pendingRequest(); const old = ctx.chatMetadata;
+    const pending = await pendingRequest(); const old = ctx.chatMetadata;
     if (mode === 'mutable-chat') {
       const next = context('chat-b'); Object.assign(ctx, { chat: next.chat, chatMetadata: next.chatMetadata, getCurrentChatId: next.getCurrentChatId });
     }
@@ -646,7 +654,7 @@ describe('真实 service：取消、迟到响应、错误边界与生命周期',
   });
 
   it('取消旧请求后新请求可运行；旧流/错误/finally 不清理新 run', async () => {
-    const old = pendingRequest(); cancelOutline(); const newer = pendingRequest();
+    const old = await pendingRequest(); cancelOutline(); const newer = await pendingRequest();
     newer.options.onDelta?.('新请求预览'); old.options.onDelta?.('旧流');
     old.reject(new Error('旧请求上游密钥')); await old.task;
     expect(outlineRun.busy).toBe(true); expect(outlineRun.draft).toBe('新请求预览'); expect(outlineRun.error).toBe('');
@@ -655,7 +663,7 @@ describe('真实 service：取消、迟到响应、错误边界与生命周期',
   });
 
   it('busy 时重复生成不会再发请求或覆盖正在生成的参数', async () => {
-    const pending = pendingRequest(); await generateOutline('重复点击', 1);
+    const pending = await pendingRequest(); await generateOutline('重复点击', 1);
     expect(completion).toHaveBeenCalledTimes(1); pending.resolve(reply()); await pending.task;
     expect(saved().draft?.brief).toBe('新的创作要求');
   });
@@ -678,7 +686,7 @@ describe('真实 service：取消、迟到响应、错误边界与生命周期',
   });
 
   it.each(['normal', 'regenerate', 'swipe', 'continue'])('正文 %s 开始取消规划，结束后方可重新规划', async type => {
-    bindOutlineLifecycle(); const pending = pendingRequest(); emit('GENERATION_STARTED', type, {}, false);
+    bindOutlineLifecycle(); const pending = await pendingRequest(); emit('GENERATION_STARTED', type, {}, false);
     expect(pending.options.signal?.aborted).toBe(true); pending.resolve(reply()); await pending.task;
     await generateOutline('正文还在生成', 2); expect(outlineRun.error).toContain('正文生成结束');
     expect(completion).toHaveBeenCalledTimes(1); emit('GENERATION_ENDED');
@@ -687,7 +695,7 @@ describe('真实 service：取消、迟到响应、错误边界与生命周期',
 
   it.each([['quiet', false], ['impersonate', false], ['normal', true]] as const)
   ('%s dryRun=%s 不取消规划或阻止下一次规划', async (type, dryRun) => {
-    bindOutlineLifecycle(); const pending = pendingRequest(); emit('GENERATION_STARTED', type, {}, dryRun);
+    bindOutlineLifecycle(); const pending = await pendingRequest(); emit('GENERATION_STARTED', type, {}, dryRun);
     expect(pending.options.signal?.aborted).toBe(false); expect(outlineRun.busy).toBe(true);
     pending.resolve(reply()); await pending.task; expect(outlineRun.error).toBe('');
     await generateOutline('第二次规划', 2); expect(completion).toHaveBeenCalledTimes(2); expect(outlineRun.error).toBe('');
@@ -710,7 +718,7 @@ describe('真实 service：取消、迟到响应、错误边界与生命周期',
   it('绑定幂等，卸载取消请求/撤下注入/解绑所有事件，不留幽灵监听', async () => {
     bindOutlineLifecycle(); const count = vi.mocked(ctx.eventSource.on).mock.calls.length;
     bindOutlineLifecycle(); expect(ctx.eventSource.on).toHaveBeenCalledTimes(count);
-    const pending = pendingRequest(); unbindOutlineLifecycle();
+    const pending = await pendingRequest(); unbindOutlineLifecycle();
     expect(pending.options.signal?.aborted).toBe(true); expect(latestInjection()).toBe('');
     expect(ctx.eventSource.off).toHaveBeenCalledTimes(count);
     const revision = outlineState.revision; ctx.chat[1].mes += '卸载后变化'; emit('MESSAGE_EDITED');

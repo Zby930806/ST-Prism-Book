@@ -12,7 +12,7 @@ describe('v0.13 通用请求合同（不等于模型语义通过）',()=>{
   it.each([0,1,2])('第%s层明确条款阈值及逐条映射',level=>{
     const s=level?p.buildResummaryPrompt({...args,level}).system:p.buildSummaryPrompt(args).system;
     for(const text of ['条件中的程度、门槛和适用范围不可删','甲→乙、丙→丁不能合成甲或丙→乙且丁','【先选后写的停止条件】']) expect(s).toContain(text);
-    expect(s.match(/【命题原义传递】/g)).toHaveLength(1);
+    expect(s.match(/^【命题原义传递】/gm)).toHaveLength(1);
   });
   it.each([0,1,2])('第%s层局部离场不扩大到父区域',level=>{
     const s=level?p.buildResummaryPrompt({...args,level}).system:p.buildSummaryPrompt(args).system;
@@ -31,7 +31,7 @@ describe('v0.13 通用请求合同（不等于模型语义通过）',()=>{
   it('停止条件不靠砍伤势、技术参数或互动来缩短',()=>{
     expect(p.RULE_SUMMARY_COMPOSITION).toContain('候选细节默认不入选');
     expect(p.RULE_SUMMARY_COMPOSITION).toContain('数字或具体描写本身不是入选理由');
-    expect(p.RULE_SUMMARY_COMPOSITION).toContain('不能用本规则抹掉临时伤势');
+    expect(p.RULE_SUMMARY_COMPOSITION).toContain('不能用本规则抹掉临时伤情');
     expect(p.RULE_LONGTERM_DB).toContain('不是把每个状态字段再抄一遍');
     expect(p.SUMMARY_FACT_PREPARATION.length+p.SUMMARY_FACT_VERIFICATION.length).toBeLessThan(600);
   });

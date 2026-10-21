@@ -95,7 +95,7 @@ function fmtNpcSummaryLine(n: NpcSummaryView): string {
   const state: string[] = [];
   if (oneLine(n.desc)) state.push(`既有外貌记录:${oneLine(n.desc)}`);
   if (oneLine(n.outfit)) state.push(`最后记录着装:${oneLine(n.outfit)}`);
-  if (oneLine(n.condition)) state.push(`最后记录状态:${oneLine(n.condition)}`);
+  if (oneLine(n.condition)) state.push(`最后记录身体状态:${oneLine(n.condition)}`);
   const stateStr = state.length ? ` 〔${state.join(';')}〕` : '';
   return `  - ${star}${oneLine(n.name)}${bracket}${mark}${place}${title}${stateStr}`;
 }
@@ -171,4 +171,4 @@ export function fmtNpcAffinity(npc: NpcAffinity, partial = false, includeNote = 
 }
 
 /** 只在确有好感记录时注入;估计不能变成读心、剧情事实或强制行为指令。 */
-export const NPC_AFFINITY_BRIEFING = '内心好感与外在态度是对主角的五档定性估计,不是精确分数或既定事实。内在是真实倾向估计,外在是相对稳定的对待方式,二者独立且通常保持;一次语气/情绪变化不等于关系跨档。未知不等于中性。以明确剧情与人设为准,好感不等于爱情、信任、服从或同意;内在估计不代表主角或其他角色知情,不得读心、揭穿伪装或复述档位,按视角自然表现即可。估计是既有剧情的总结,不是对本轮的上限或禁令,关系仍可随剧情继续发展或转折。';
+export const NPC_AFFINITY_BRIEFING = '内心好感与外在态度是对主角的五档定性估计,不是精确分数或既定事实。内在是真实倾向估计,外在是相对稳定的对待方式,二者独立且通常保持;一次语气/情绪变化不等于关系跨档。未知不等于中性。以明确剧情与人设为准,好感不等于爱情、信任、服从或同意;内在估计不代表主角或其他角色知情,不得读心、揭穿伪装或复述档位,按视角自然表现即可。估计是既有剧情的总结,不是对本轮的上限或禁令。';

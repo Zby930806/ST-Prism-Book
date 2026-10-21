@@ -71,7 +71,7 @@ const timeTagOverBudget = computed(() => apiSettings.autoSummaryEnabled && !fitT
 
     <SettingRow
       label="伤势进展提醒"
-      hint="主角、主要角色及在场、同区域角色的伤情记录超过一天未更新时，提醒正文模型按伤势轻重写出恢复进展；没有故事时间时按回复楼层数计算。伤情记录更新后重新计时。"
+      hint="主角、主要角色及在场、同区域角色的伤情记录超过一天未更新时，提醒正文模型在写到伤处或相关行动时按轻重写出进展，与本轮无关时不必提及；没有故事时间时按回复楼层数计算。伤情记录更新后重新计时。"
       details="只提醒随正文发送的角色：主角需开启「主角信息」，其他角色需开启「NPC 名册」。超过七天或三十天时提醒措辞加重。提醒只影响正文模型看到的内容，伤情记录本身仍以正文为准更新。"
     >
       <input v-model="apiSettings.injection.injuryReminder" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode" />

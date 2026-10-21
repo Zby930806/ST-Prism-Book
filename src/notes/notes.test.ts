@@ -8,7 +8,7 @@ import * as api from '@/api/settings';
 import { requestCompletion } from '@/api/client';
 import { classifyHttpFailure, truncatedReply } from '@/api/errors';
 import { clampToTimeTags, cleanBody } from '@/memory/timeTag';
-import { ORIGINAL_NOTES_PROMPT, ORIGINAL_NOTES_PROMPT_SHA256, EXECUTABLE_NOTES_PROMPT } from './prompt';
+import { ORIGINAL_NOTES_PROMPT, ORIGINAL_NOTES_PROMPT_SHA256, EXECUTABLE_NOTES_PROMPT, TIDY_NOTES_PROMPT } from './prompt';
 import { stripAftertalk, extractAftertalk, parseQuestions, noteText, fingerprint } from './protocol';
 import { notesSettings, settingsIssue, hydrateNotesSettings, saveNotesSettings, validateNotesChannel, NOTES_SETTINGS_KEY } from './settings';
 import { sourceHash, latestStoryFloor } from './source';
@@ -93,12 +93,27 @@ describe('原提示词和 aftertalk 协议', () => {
     expect(createHash('sha256').update(ORIGINAL_NOTES_PROMPT, 'utf8').digest('hex')).toBe(ORIGINAL_SHA256);
     expect(ORIGINAL_NOTES_PROMPT_SHA256).toBe(ORIGINAL_SHA256);
   });
-  it('可执行提示词只展开 setvar、移除注释/trim，保留全部规则和检查清单', () => {
-    const expected = ORIGINAL_NOTES_PROMPT.replace(/\{\{setvar::[^:}]+::([\s\S]*?)\}\}/g, '$1').replace(/\{\{(?:\/\/[\s\S]*?|trim)\}\}/g, '').trim();
-    expect(EXECUTABLE_NOTES_PROMPT).toBe(expected);
+  it('运行时使用整理版：与原文同样只展开 setvar、移除注释/trim，规则、检查清单和输出格式保留', () => {
+    const expand = (text: string) => text.replace(/\{\{setvar::[^:}]+::([\s\S]*?)\}\}/g, '$1').replace(/\{\{(?:\/\/[\s\S]*?|trim)\}\}/g, '').trim();
+    expect(EXECUTABLE_NOTES_PROMPT).toBe(expand(TIDY_NOTES_PROMPT));
     expect(EXECUTABLE_NOTES_PROMPT).not.toMatch(/\{\{(?:setvar|trim|\/\/)/);
     expect(EXECUTABLE_NOTES_PROMPT).toContain('用户决策才算数');
     expect(EXECUTABLE_NOTES_PROMPT).toContain('凝嘤嘤');
+    // 原文的各节标题在整理版中逐项保留
+    for (const section of ['定义:', '注意:', '进度清单（重要）:', '触发条件:', '写法:', '用户回复识别:', '用户决策才算数（重要）:', '格式:']) {
+      expect(expand(ORIGINAL_NOTES_PROMPT)).toContain(section);
+      expect(EXECUTABLE_NOTES_PROMPT).toContain(section);
+    }
+    // aftertalk 输出格式(探头、进度清单、Q1–Q4 与暂定、收尾)与原文逐字相同,解析结果一致
+    const format = (text: string) => text.slice(text.indexOf('<aftertalk status="out_of_story">'), text.indexOf('</aftertalk>') + '</aftertalk>'.length);
+    expect(format(EXECUTABLE_NOTES_PROMPT)).toBe(format(expand(ORIGINAL_NOTES_PROMPT)));
+    const questions = parseQuestions(format(EXECUTABLE_NOTES_PROMPT));
+    expect(questions.map(q => q.id)).toEqual(['Q1', 'Q2', 'Q3', 'Q4']);
+    expect(questions.every(q => q.proposal === '写出一个明确的后续处理方案。')).toBe(true);
+    // 插件里没有「节奏挡位」,整理版改为跟随当前剧情节奏;setvar 展开出的两段仍在
+    expect(EXECUTABLE_NOTES_PROMPT).not.toContain('节奏挡位');
+    expect(EXECUTABLE_NOTES_PROMPT).toContain('按<aftertalk_rule>要求输出双子札记');
+    expect(EXECUTABLE_NOTES_PROMPT).toContain('【问题】凝嘤嘤规划:');
   });
   it.each([
     ['正文<aftertalk>提案</aftertalk>结尾', '正文结尾'],

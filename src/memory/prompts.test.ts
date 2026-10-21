@@ -140,7 +140,7 @@ describe('summary fact workflow', () => {
     expect(THINKING_CHECKLIST).toContain('物品/计划/变量按本楼新事件更新记录,不重复结算');
     expect(THINKING_CHECKLIST).toContain('暂时离场不删除NPC');
     expect(THINKING_CHECKLIST).toContain('已取消/失败与已完成分清');
-    expect(THINKING_CHECKLIST).toContain('只有新证据才能刷新位置、衣着和伤势');
+    expect(THINKING_CHECKLIST).toContain('只有新证据才能刷新位置、衣着和伤情');
   });
 
   it('covers evidence, temporal boundaries, comparisons and reverse verification without story examples', () => {
@@ -164,7 +164,7 @@ describe('summary fact workflow', () => {
       '检查行动转变与有效限制是否被装饰细节挤掉',
       '关键事实、限定与了结结果在 summary 中实际保留',
       '不能只写入状态字段',
-      '不删重要参数、有效伤势及互动',
+      '不删重要参数、有效伤情及互动',
     ]) expect(SUMMARY_FACT_VERIFICATION).toContain(rule);
     // Unchanged evidence invariants remain in the shared system rules, not duplicated in the short final check.
     expect(RULE_SUMMARY_FIDELITY).toContain('保留证据强度、程度与说话人');
@@ -198,7 +198,7 @@ describe('summary fact workflow', () => {
   it('gives compression its own checklist and prefill without ledger updates', () => {
     expectFactWorkflow(RESUMMARY_THINKING_CHECKLIST);
     expect(RESUMMARY_THINKING_CHECKLIST).toContain(SUMMARY_OUTPUT_PROTOCOL);
-    expect(RESUMMARY_THINKING_CHECKLIST).toContain('待融合摘要就是本次事实来源');
+    expect(RESUMMARY_THINKING_CHECKLIST).toContain('待融合的摘要或总结就是本次事实来源');
     expect(RESUMMARY_THINKING_CHECKLIST).toContain('不得恢复输入中已缺失的事实');
     expect(RESUMMARY_THINKING_CHECKLIST).toContain('需要定位时沿用输入的 [编号]');
     expect(RESUMMARY_THINKING_CHECKLIST).toContain('不逐段填表');
@@ -208,7 +208,7 @@ describe('summary fact workflow', () => {
   });
 
   it('checks state operations without permitting off-screen invention', () => {
-    for (const rule of ['明确变化同时更新对应状态', '删除、清空或 resolve 须有依据', '整体覆盖保留未失效的旧要点', '只有新证据才能刷新位置、衣着和伤势', '不重复结算']) expect(THINKING_CHECKLIST).toContain(rule);
+    for (const rule of ['明确变化同时更新对应状态', '删除、清空或 resolve 须有依据', '整体覆盖保留未失效的旧要点', '只有新证据才能刷新位置、衣着和伤情', '不重复结算']) expect(THINKING_CHECKLIST).toContain(rule);
     expect(THINKING_CHECKLIST).not.toContain('主要 NPC 离场演变');
     expect(RULE_SCENES).toContain('当次观察、实时读数、短暂在场或一次遭遇不能改写为地点的长期属性');
     expect(RULE_SCENES).toContain('不能为满足 desc 必填而编造恒常特征');
@@ -259,7 +259,7 @@ describe('relationship retention and departure protocol', () => {
     for (const contract of ['〔在场〕/〔同区域〕/〔不在场〕', '在场核对', '所在不明', 'location 填空字符串', 'sceneFocus.participants 改成与实际在场名单一致']) {
       expect(RULE_NPCS).toContain(contract);
     }
-    expect(SUMMARY_PROMPT).toContain('按**本楼开始前**的状态算好');
+    expect(SUMMARY_PROMPT).toContain('按本楼开始前的状态算好');
     expect(SUMMARY_PROMPT).toContain('离场去向未明填空字符串');
     expect(SUMMARY_PROMPT).toContain('同步修正 participants');
     expect(THINKING_CHECKLIST).toContain('在场核对');
@@ -273,14 +273,24 @@ describe('relationship retention and departure protocol', () => {
   });
 
   it('keeps the briefing end short while retaining each reminder', () => {
-    // 每次生成正文都会发并占注入预算:只留结论,但位置、计划、伤势、知情范围的提醒都要在。
-    // 伤势:离场本身不等于康复或恶化,但不再要求时间流逝后一直维持原伤(由伤势进展提醒配合)。
-    expect(Array.from(MEMORY_BRIEFING_END).length).toBeLessThan(260);
+    // 每次生成正文都会发并占注入预算:只留结论,但位置、计划、伤情、知情范围的提醒都要在。
+    // 伤情:离场本身不等于康复或恶化,但不再要求时间流逝后一直维持原伤(由伤势进展提醒配合)。
+    // prism.18 起加了一句「只在相关时体现」,上限从 260 放宽到 280,仍要求简短(最低注入预算下框定文字挤占状态份额)。
+    expect(Array.from(MEMORY_BRIEFING_END).length).toBeLessThan(280);
     for (const reminder of ['自然续写', '不要复述简报', '最后确认的位置可能已变', '不等于马上执行', '遵守其中的暂缓和前提',
-      '离场不等于康复或恶化', '伤势随时间按轻重好转', '人物只知道自己经历或得知的事', '文风跟随角色卡']) {
+      '离场不等于康复或恶化', '伤情随时间按轻重好转', '人物只知道自己经历或得知的事', '文风跟随角色卡']) {
       expect(MEMORY_BRIEFING_END).toContain(reminder);
     }
     expect(MEMORY_BRIEFING_END).not.toContain('时间流逝不是康复');
+  });
+
+  it('injuries stay in the briefing but are written only when relevant', () => {
+    // 伤情事实照常注入;写作指引只在牵涉伤处、影响行动或被人提及时体现,与本轮无关时不写。
+    expect(MEMORY_BRIEFING_END).toContain('身体状态按最后记录');
+    for (const clause of ['只在牵涉伤处', '影响行动', '被人提及时带出', '与本轮无关不写']) {
+      expect(MEMORY_BRIEFING_END).toContain(clause);
+    }
+    expect(MEMORY_BRIEFING_END).not.toMatch(/每轮(都)?(描写|体现|提及)伤/);
   });
 });
 
@@ -548,21 +558,22 @@ describe('v0.5 伤势保留及通用压缩示范', () => {
     // 全文只在主角规则里出现一次,NPC 规则引用它,内置请求和自定义模板的兼容协议都不重复发送。
     expect(RULE_PROTAGONIST).toContain(RULE_HEALTH_STATE);
     expect(RULE_NPCS).not.toContain(RULE_HEALTH_STATE);
-    expect(RULE_NPCS).toContain('按上方【临时伤势与恢复证据】,与主角同一标准');
+    expect(RULE_NPCS).toContain('按上方【临时伤情与恢复证据】,与主角同一标准');
     expect(RULE_HEALTH_STATE).toContain('主角与 NPC 通用');
     const system = buildSummaryPrompt(args).system;
     expect(system.split(RULE_HEALTH_STATE)).toHaveLength(2);
-    expect(system.indexOf(RULE_HEALTH_STATE)).toBeLessThan(system.indexOf('【NPC 规则】'));
+    // 主角规则开头会引用后文的【NPC 规则】,这里比较的是 NPC 规则一节本身的位置。
+    expect(system.indexOf(RULE_HEALTH_STATE)).toBeLessThan(system.indexOf('═══ 【NPC 规则】'));
     apiSettings.prompts.summary = 'CUSTOM {{content}}';
     expect(buildSummaryPrompt(args).system.split(RULE_HEALTH_STATE)).toHaveLength(2);
     for (const clause of ['临时不等于不重要', '超过预计休养天数时均保留', '没有新证据就省略 condition',
-      '不是自动失效时间', '闪回中的健康不能覆盖当前伤势', '保留其他尚未解除的伤情和限制',
-      '不等于所有伤势痊愈', '历史受伤与当前已恢复可以并存']) expect(RULE_HEALTH_STATE).toContain(clause);
+      '不是自动失效时间', '闪回中的健康不能覆盖当前伤情', '保留其他尚未解除的伤情和限制',
+      '不等于所有伤情痊愈', '历史受伤与当前已恢复可以并存']) expect(RULE_HEALTH_STATE).toContain(clause);
   });
   it('外貌、装备与伤情分开,允许显式纠错而不复活旧伤', () => {
     expect(RULE_NPCS).toContain('刀鞘、佩刀等当下装备不属于固定外貌');
     expect(RULE_NPCS).toContain('desc 省略=保持,空字符串=明确清空');
-    expect(RULE_NPCS).toContain('不能仅凭旧 desc 把已痊愈伤势重新写回 condition');
+    expect(RULE_NPCS).toContain('不能仅凭旧 desc 把已痊愈伤情重新写回 condition');
     expect(RULE_HEALTH_STATE).toContain('稳定体貌未知就省略');
   });
   it.each(['detailed', 'concise'] as const)('三层共享示范且不扩散进自定义模板: %s', verbosity => {

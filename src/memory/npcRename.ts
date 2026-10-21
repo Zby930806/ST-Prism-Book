@@ -50,7 +50,7 @@ export function validateNpcRenames(parsed: Record<string, unknown>, options: Npc
     if (targets.has(norm(to))) throw new NpcRenameError(path + '.to「' + to + '」与本楼另一项改名重复。');
     if (!evidence) throw new NpcRenameError(path + '.evidence 缺失;请连续照录本楼正文中含新名字的原句。');
     if (!squash(evidence).includes(squash(to))) throw new NpcRenameError(path + '.evidence 中没有新名字「' + to + '」;请照录正文中报出或称呼该名字的原句。');
-    if (!matches(evidence)) throw new NpcRenameError(path + '.evidence 与本楼正文不匹配;请连续照录【待摘要正文】中的原句,不改写、不拼接,不引用旧名册或历史。');
+    if (!matches(evidence)) throw new NpcRenameError(path + '.evidence 与本楼正文不匹配;请连续照录【本轮对话】中的原句,不改写、不拼接,不引用旧名册或历史。');
     map.set(norm(from), to);
     targets.add(norm(to));
     delete entry.evidence;

@@ -17,7 +17,8 @@ describe('v0.15 三层通用请求合同（仅验证指令与材料传递，不�
    expect(built.user).toContain(f.content);
    expect(built.system).toContain(f.rule);
    expect(built.system).toContain('最小合并单位是完整命题');
-   expect(built.system).toContain('不要求沿用含糊的交易用语');
+   // 交易用语一条与【关键短语保真】合并为一处表述。
+   expect(built.system).toContain('不强制使用财务术语');
    expect(built.system).not.toMatch(/林舟|小A|小B|归雁|钟楼/);
  });
  it('单楼不受长期计划准入门槛限制，快照不重复下一步',()=>{
@@ -35,7 +36,7 @@ describe('v0.15 三层通用请求合同（仅验证指令与材料传递，不�
  it('二次总结有独立阶段化取舍，临时伤势与否定不丢',()=>{
    const s=p.buildResummaryPrompt({...args,level:2}).system;
    expect(s).toContain('【二次总结流程：阶段与有效后果】');
-   expect(s).toContain('临时但尚未解除的伤势或限制仍属有效后果');
+   expect(s).toContain('临时但尚未解除的伤情或限制仍属有效后果');
    expect(s).toContain('每个阶段只保留改变走向的节点与必要的代表性互动');
    expect(s).toContain('不能把尚未执行的方案写成经历');
  });

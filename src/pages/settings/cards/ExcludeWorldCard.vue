@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 排除世界书内容：摘要和总结时不带这些整本世界书的条目，或按条目名过滤；另含「渲染世界书模板」开关。
+ * 排除世界书内容：摘要、总结和生成创作规划时不带这些整本世界书的条目，或按条目名过滤；另含「渲染世界书模板」开关。
  * 世界书名从 ST 的 getWorldInfoNames()（全部已加载的世界书文件）取，只在弹窗打开时取。
  */
 import Collapsible from '@/components/Collapsible.vue';
@@ -64,7 +64,7 @@ function removeWiPattern(pat: string) {
 <template>
   <Collapsible class="prism-settings-card" title="排除世界书内容" :open="false">
     <p class="bbs-field-hint">
-      摘要和总结时会激活世界书作为参考。可在此排除与剧情记忆无关的条目（如全局挂载的知识书、规则说明），以节省 token、减少干扰。只影响摘要和总结，不改动正文使用的世界书。
+      摘要、总结和生成创作规划时会激活世界书作为参考。可在此排除与剧情记忆无关的条目（如全局挂载的知识书、规则说明），以节省 token、减少干扰。只影响这几项，不改动正文使用的世界书。
     </p>
 
     <!-- 渲染世界书模板:配合「提示词模板(ST-Prompt-Template)」等插件 -->
@@ -73,7 +73,7 @@ function removeWiPattern(pat: string) {
       <input v-model="apiSettings.renderWorldInfoTemplates" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" />
     </label>
     <p class="bbs-field-hint">
-      摘要前展开世界书条目中的宏并执行提示词模板（EJS）代码，使摘要使用渲染后的内容。条目中含修改变量的代码时，每次摘要会额外执行一次，此时可关闭。
+      摘要和生成创作规划前展开世界书条目中的宏并执行提示词模板（EJS）代码，使用渲染后的内容。条目中含修改变量的代码时，每次摘要和生成规划都会额外执行一次，此时可关闭。
     </p>
 
     <hr class="bbs-rule" />
@@ -93,7 +93,7 @@ function removeWiPattern(pat: string) {
         </button>
       </li>
     </ul>
-    <p v-else class="bbs-field-hint">未排除任何世界书，激活的条目均作为摘要参考。</p>
+    <p v-else class="bbs-field-hint">未排除任何世界书，激活的条目均作为摘要和规划的参考。</p>
 
     <hr class="bbs-rule" />
 

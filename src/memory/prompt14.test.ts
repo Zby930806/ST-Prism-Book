@@ -21,13 +21,14 @@ describe('v0.14 保真操作与信息取舍合同（不等于模型语义实测�
     expect(p.RULE_SUMMARY_WRITE).toContain('不是详写原文的缩小版');
     expect(p.RULE_SCENE_FOCUS).toContain('能用一句表达就不补第二句');
     expect(p.RULE_SCENE_FOCUS).toContain('已经结束且不再限制下一步的过程不重播');
-    expect(p.RULE_SUMMARY_COMPOSITION).toContain('不能用本规则抹掉临时伤势');
+    expect(p.RULE_SUMMARY_COMPOSITION).toContain('不能用本规则抹掉临时伤情');
     expect(p.RULE_FACT_TRANSFER).toContain('条件中的程度、门槛和适用范围不可删');
   });
   it('三种最终核查先回源对词再删冗余，无新输出schema',()=>{
     for(const s of [p.buildSummaryThinking('测试者').checklist,p.RESUMMARY_THINKING_CHECKLIST]){
       expect(s).toContain('回源对词：时段、程度、方位保留原限定');
-      expect(s).toContain('再删无结果的检查与收纳');
+      // 删冗余一句只在【摘要复核】里写一次,两份核查都引用该段。
+      expect(s).toContain('再删没有结果的检查收纳与重复背景');
     }
     expect(p.RESUMMARY_THINKING_CHECKLIST.length).toBeLessThan(1300);
     expect(p.SUMMARY_FACT_PREPARATION.length+p.SUMMARY_FACT_VERIFICATION.length).toBeLessThan(600);

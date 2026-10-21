@@ -10,7 +10,7 @@ import type { OutlineContent, OutlineDraft, OutlineSettings } from '@/outline/ty
 import { OUTLINE_LIMITS as L } from '@/outline/limits';
 import { validateOutlineContent } from '@/outline/protocol';
 import { outlineSettings, outlineSettingsIssue, resolveOutlineChannel, saveOutlineSettings } from '@/outline/settings';
-import { outlineRun, generateOutline, cancelOutline, discussionRun } from '@/outline/service';
+import { outlineRun, generateOutline, generateOutlineAuto, cancelOutline, discussionRun } from '@/outline/service';
 import { autoAdvanceForCurrentStage, checkOutlineProgress, clearOutlineProgressResult, dismissOutlineProgress, outlineProgress, progressForCurrentStage } from '@/outline/progress';
 import { discussionState } from '@/outline/discussionStore';
 import {
@@ -70,7 +70,7 @@ function sourceCurrent(record: OutlineDraft): boolean {
 const activeCurrent = computed(() => !!active.value && sourceCurrent(active.value));
 const draftCurrent = computed(() => !!outlineState.draft && sourceCurrent(outlineState.draft));
 
-type Confirmation = { kind: 'generate' | 'activate' | 'reconfirm'; revision: number; id: string | null; chat: Chat };
+type Confirmation = { kind: 'generate' | 'auto' | 'activate' | 'reconfirm'; revision: number; id: string | null; chat: Chat };
 // 聊天快照保留原始引用，不能被深层响应式代理改变身份比较。
 const confirmation = shallowRef<Confirmation | null>(null);
 function loadEditor() {
@@ -372,6 +372,29 @@ async function startGeneration(confirmed = false) {
   catch (cause) { if (sameChat(chat)) error.value = errorText(cause); }
   finally { generating.value = false; }
 }
+
+/* —— 一键生成:不填要求、不指定阶段数,由模型根据角色卡、世界书、记忆和最近剧情规划;成功后展开草稿供核对 —— */
+const canAutoGenerate = computed(() => engineEnabled.value && !locked.value && !protectedSettings.value && !configurationIssue.value);
+// 从空白提示处发起时,生成过程(流式预览、取消)就在提示处显示,不必展开下方的工作台
+const autoFromEmpty = ref(false);
+async function startAutoGeneration(confirmed = false, fromEmpty = false) {
+  if (!canAutoGenerate.value) return;
+  if (!sameChat(editorChat) || expectedRevision.value !== outlineState.revision) {
+    confirmation.value = null;
+    error.value = '聊天或规划已经变了，请等重新载入后再生成。';
+    return;
+  }
+  if (outlineState.draft || active.value) {
+    if (!confirmed) { requestConfirmation('auto'); return; }
+    if (!validConfirmation('auto')) return;
+  }
+  const chat = captureChat(), previous = outlineState.draft?.id;
+  generating.value = true; autoFromEmpty.value = fromEmpty; error.value = ''; notice.value = '';
+  try { await generateOutlineAuto(); }
+  catch (cause) { if (sameChat(chat)) error.value = errorText(cause); }
+  finally { generating.value = false; autoFromEmpty.value = false; }
+  if (sameChat(chat) && outlineState.draft && outlineState.draft.id !== previous) void showDraftEditor();
+}
 </script>
 
 <template>
@@ -464,6 +487,18 @@ async function startGeneration(confirmed = false) {
       </details>
     </section>
 
+    <section v-if="!active && !outlineState.draft" class="planner-card planner-quick" aria-label="一键生成规划">
+      <h3>一键生成规划</h3>
+      <p class="hint">无需填写要求。模型根据角色卡、世界书、宝书记忆和最近剧情规划后续 3～6 个阶段，结果先存为草稿，核对并确认加入计划后才生效。</p>
+      <div class="actions">
+        <button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canAutoGenerate" @click="startAutoGeneration(false, true)">{{ autoFromEmpty ? '生成中…' : '一键生成' }}</button>
+        <button v-if="autoFromEmpty" type="button" class="bbs-btn" @click="cancelOutline">取消生成</button>
+      </div>
+      <p v-if="configurationIssue" class="bbs-callout is-warning">{{ configurationIssue }} <button type="button" class="bbs-btn bbs-btn-sm" @click="showApiSettings">打开规划 API 设置</button></p>
+      <pre v-if="autoFromEmpty && outlineRun.draft" class="stream" aria-label="正在生成的草稿">{{ outlineRun.draft }}</pre>
+      <p class="hint">需要指定发展方向或阶段数时，展开下方「生成规划草稿」填写要求。</p>
+    </section>
+
     <OutlineDiscussion :disabled="locked" :unsaved="dirty" :configuration-issue="configurationIssue" :api-dirty="apiDirty" @view-draft="showDraftEditor" @open-api="showApiSettings" />
     <details ref="workbenchEl" class="bbs-disclosure is-card planner-workbench">
       <summary>{{ active ? '修改或重新生成规划' : '生成规划草稿' }}<span v-if="dirty" class="bbs-disclosure-meta">有未保存的修改</span></summary>
@@ -474,16 +509,22 @@ async function startGeneration(confirmed = false) {
           <div class="planner-row">
             <label class="planner-count">分几个阶段（1–12）<input v-model.number="chapterCount" class="bbs-input" type="number" min="1" max="12" step="1" inputmode="numeric" /></label>
             <button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canGenerate" @click="startGeneration()">{{ outlineState.draft || active ? '重新生成规划草稿' : '生成规划草稿' }}</button>
+            <button type="button" class="bbs-btn" :disabled="!canAutoGenerate" @click="startAutoGeneration()">一键生成</button>
           </div>
+          <p class="hint">「一键生成」不使用上面的要求和阶段数，由模型根据角色卡、世界书、宝书记忆和最近剧情自行规划 3～6 个阶段。</p>
         </fieldset>
-        <button v-if="outlineRun.busy || generating" type="button" class="bbs-btn" @click="cancelOutline">取消生成</button>
+        <button v-if="(outlineRun.busy || generating) && !autoFromEmpty" type="button" class="bbs-btn" @click="cancelOutline">取消生成</button>
         <p v-if="configurationIssue" class="bbs-callout is-warning">{{ configurationIssue }} <button type="button" class="bbs-btn bbs-btn-sm" @click="apiOpen = true">打开规划 API 设置</button></p>
         <p v-if="apiDirty" class="hint">API 设置尚未保存，生成时使用上次保存的设置。</p>
         <div v-if="confirmation?.kind === 'generate'" class="confirmation">
           <p>重新生成会再请求一次 API。成功后会替换当前草稿（包括没保存的修改），正在用的规划不受影响。</p>
           <div class="actions"><button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canGenerate" @click="startGeneration(true)">确认重新生成</button><button type="button" class="bbs-btn" @click="confirmation = null">取消</button></div>
         </div>
-        <pre v-if="outlineRun.draft" class="stream" aria-label="正在生成的草稿">{{ outlineRun.draft }}</pre>
+        <div v-if="confirmation?.kind === 'auto'" class="confirmation">
+          <p>一键生成不使用上面填写的要求，由模型自行规划，会再请求一次 API。成功后会替换当前草稿（包括没保存的修改），正在用的规划不受影响。</p>
+          <div class="actions"><button type="button" class="bbs-btn bbs-btn-primary" :disabled="!canAutoGenerate" @click="startAutoGeneration(true)">确认一键生成</button><button type="button" class="bbs-btn" @click="confirmation = null">取消</button></div>
+        </div>
+        <pre v-if="outlineRun.draft && !autoFromEmpty" class="stream" aria-label="正在生成的草稿">{{ outlineRun.draft }}</pre>
       </section>
 
       <section v-if="editor" class="planner-section" aria-label="未确认的规划草稿编辑器">
@@ -612,7 +653,7 @@ async function startGeneration(confirmed = false) {
 .plain { white-space:pre-wrap; }
 .stage-editor { border-top:1px solid var(--bbs-line); margin-top:12px; }
 .stage-list > li + li { border-top:1px solid var(--bbs-line); margin-top:12px; padding-top:6px; }
-.outline-planner :is(button,input,select,textarea,summary):focus-visible { outline:2px solid var(--bbs-accent); outline-offset:2px; }
+.outline-planner :is(button,input,select,textarea,summary,[tabindex="-1"]):focus-visible { outline:2px solid var(--bbs-accent); outline-offset:2px; }
 @media(max-width:480px) { .planner-card { padding:14px; } .planner-stage > div { grid-template-columns:minmax(0,1fr); gap:2px; } }
 @media(max-width:360px) { .planner-card { padding:10px; } .actions { gap:6px; } }
 </style>

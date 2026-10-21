@@ -33,8 +33,8 @@ function response(summary: string, delta: SummaryDelta = {}) {
   return JSON.stringify({ summary, ...delta, stateChanges: Object.keys(delta).filter(k => !['time', 'timeStart', 'timeEnd'].includes(k)) });
 }
 const textOf = (messages: ChatMsg[]) => messages.map(m => m.content).join('\n');
-const isLite = (messages: ChatMsg[]) => messages.some(m => m.content.includes('【多层摘要的事实整理与核查】'));
-const isResummary = (messages: ChatMsg[]) => messages.some(m => m.content.includes('【压缩任务的事实整理与核查】'));
+const isLite = (messages: ChatMsg[]) => messages.some(m => m.content.includes('【合并摘要的事实整理与核查】'));
+const isResummary = (messages: ChatMsg[]) => messages.some(m => m.content.includes('【总结与二次总结的事实整理与核查】'));
 const liteFloorsOf = (messages: ChatMsg[]) => [...(messages.find(m => m.role === 'user')?.content ?? '').matchAll(/═══ 楼层 #(\d+) ═══/g)].map(m => Number(m[1]));
 const liteReply = (floors: number[], time = (f: number) => `第${f}天`) =>
   JSON.stringify({ floors: floors.map(f => ({ floor: f, summary: `楼层${f}的简要摘要。`, timeStart: time(f), timeEnd: time(f) })) });

@@ -18,7 +18,7 @@ describe('v0.12 跨字段与取舍请求合同（非模型语义测试）',()=>{
   it.each([0,1,2])('第%s层来源、条款范围和概率程度同源', level=>{
     const s=level?p.buildResummaryPrompt({...args,level}).system:p.buildSummaryPrompt(args).system;
     for(const clause of ['【命题原义传递】','把来源和限定随命题一起复制','此前/此后、已发生/将发生不可互换','极可能不能降成可能','没有提供具体参数的核对/检查不算新增情报','历史衣着若不用于识别或对照则删']) expect(s).toContain(clause);
-    expect(s.match(/【命题原义传递】/g)).toHaveLength(1);
+    expect(s.match(/^【命题原义传递】/gm)).toHaveLength(1);
   });
   it('局势卡示意不再诱导把多来源压成单一确认',()=>{
     expect(p.SUMMARY_PROMPT).toContain('末态行动/阻碍;口述与判断各带来源,不合并背书');

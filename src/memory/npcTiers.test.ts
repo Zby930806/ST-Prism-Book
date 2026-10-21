@@ -63,7 +63,8 @@ describe('三类人物的记录规则', () => {
     const old = buildSummaryPrompt(args).system;
     expect(old).toContain('【棱镜宝书角色分档兼容协议】');
     expect(old).toContain('本协议更新旧模板中「NPC 默认不记、宁可漏记」');
-    expect(old.split('【主要角色规则】')).toHaveLength(2);
+    // 主角规则开头会引用后文的【主要角色规则】,这里统计的是规则一节本身,仍只出现一次。
+    expect(old.split('═══ 【主要角色规则】')).toHaveLength(2);
     expect(old).toContain('【主角只指 沈遥】');
     settings.apiSettings.prompts.summary = SUMMARY_PROMPT.replace('{{content}}', '{{content}}\n');
     expect(buildSummaryPrompt(args).system).not.toContain('【棱镜宝书角色分档兼容协议】');

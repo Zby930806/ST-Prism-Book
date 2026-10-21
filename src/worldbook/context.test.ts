@@ -160,7 +160,7 @@ describe('请求内容', () => {
     expect(modify).toMatch(/- replace：[\s\S]*- rewrite：/);
     for (const p of [create, supplement, modify]) {
       expect(p).toContain('{"actions":[]}');
-      expect(p).toContain('宝书已经在追踪的临时状态');
+      expect(p).toContain('记忆系统已经在追踪的临时状态');
       expect(p).toContain('不要编造索引中没有的 uid');
     }
     expect(worldbookPromptExport().match(/===== 修改权限：/g)).toHaveLength(3);

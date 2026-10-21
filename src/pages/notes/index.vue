@@ -10,7 +10,7 @@ import {
   setDecisionStatus, importLegacyNotes, deleteNote,
 } from '@/notes/store';
 import type { NoteRecord, NoteDecision } from '@/notes/types';
-import { ORIGINAL_NOTES_PROMPT } from '@/notes/prompt';
+import { ORIGINAL_NOTES_PROMPT, TIDY_NOTES_PROMPT } from '@/notes/prompt';
 import { useNotesModelCatalog } from '@/notes/modelCatalog';
 import { getContext } from '@/st/context';
 import { pageFocus, takePageFocus } from '@/state/pageFocus';
@@ -513,6 +513,12 @@ function importNotes() {
           <p v-if="notice" class="notes-status" role="status">{{ notice }}</p>
           <p v-if="actionError" class="bbs-callout is-danger" role="alert">{{ actionError }}</p>
         </div>
+      </details>
+
+      <details class="bbs-disclosure">
+        <summary>整理版提示词 <span class="bbs-disclosure-meta">实际使用 · 只读</span></summary>
+        <p class="bbs-field-hint">生成札记时使用此版本。以原版为底本合并重复条目、统一问题话题，问题编号、暂定写法和收尾格式与原版相同。</p>
+        <pre class="notes-prompt" aria-label="整理版札记提示词，实际使用，只读">{{ TIDY_NOTES_PROMPT }}</pre>
       </details>
 
       <details class="bbs-disclosure">

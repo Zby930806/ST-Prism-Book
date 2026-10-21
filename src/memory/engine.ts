@@ -321,7 +321,7 @@ function sortWorldInfoEntriesLikeST(entries: WorldInfoEntry[]): WorldInfoEntry[]
  * checkWorldInfo 取不到(旧版/路径变动)→ 降级到 getWorldInfoPrompt(不过滤,但摘要照常带书,不崩)。
  * 无激活条目 / 角色卡无世界书 / 出错 → 返回空串(不影响摘要正常运行)。
  */
-async function fetchWorldInfo(chat: STMessage[], targets: number[], name1: string, name2: string): Promise<string> {
+export async function fetchWorldInfo(chat: STMessage[], targets: number[], name1: string, name2: string): Promise<string> {
   const scanText = buildScanText(chat, targets, name1, name2);
   if (!scanText.length) return '';
   // 变量时点代表楼:取本批**最后一个 target 楼**(= 这段剧情结束时的状态,与「总结这段发生了什么」最匹配)。

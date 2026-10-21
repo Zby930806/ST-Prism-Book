@@ -119,6 +119,13 @@ describe('伤势进展提醒的阈值', () => {
     expect(buildStateInjectionText()).toBe('');
     expect(memory.protagonist.condition).toBe('左腿扭伤');
   });
+  it('提醒只要求写到伤处或相关行动时体现进展,与本轮无关时不必提及', () => {
+    // 提醒在伤情记录更新前每轮都在;措辞不能让正文为回应提醒而每轮硬写伤情。
+    expect(INJURY_REMINDER_TAIL).toContain('下次写到伤处或相关行动时');
+    expect(INJURY_REMINDER_TAIL).toContain('按轻重和经过的时间体现进展');
+    expect(INJURY_REMINDER_TAIL).toContain('与本轮情节无关时不必提及伤情');
+    expect(INJURY_REMINDER_TAIL).not.toContain('在正文中合理体现进展');
+  });
   it('时间倒退或无法比较时不按天提醒', () => {
     expect(injuryElapsed({ name: '甲', condition: '伤', conditionTime: '2042/5/9', conditionFloor: 0 }, '2042/5/1', () => 50)).toMatchObject({ level: 0 });
     expect(injuryElapsed({ name: '甲', condition: '伤', conditionTime: '霜月3日', conditionFloor: 0 }, '雪月9日', () => 12)).toMatchObject({ level: 1, floors: 12 });

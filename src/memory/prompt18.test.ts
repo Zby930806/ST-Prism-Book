@@ -65,7 +65,7 @@ describe('v0.18 内容边界（不代表模型语义通过）', () => {
     }
   });
 
-  it('关闭内容边界时内置摘要与两层压缩都回到原规则，开头是执行顺序', () => {
+  it('关闭内容边界时内置摘要与两层压缩都回到原规则，开头是任务说明，执行顺序紧随其后', () => {
     const variants = [
       { system: p.buildSummaryPrompt(args, { contentBoundary: false }).system, body: p.SUMMARY_TASK_ORDER },
       ...[1, 2].map(level => ({ system: p.buildResummaryPrompt({ ...args, level }, { contentBoundary: false }).system, body: p.SUMMARY_TASK_ORDER })),
@@ -73,7 +73,8 @@ describe('v0.18 内容边界（不代表模型语义通过）', () => {
     ];
     for (const { system, body } of variants) {
       expect(system).not.toContain('【内容边界');
-      expect(system.trimStart().startsWith(body)).toBe(true);
+      expect(system.trimStart().startsWith('═══ 【任务】 ═══')).toBe(true);
+      expect(system.split(body)).toHaveLength(2);
       expect(system.length).toBeGreaterThan(1000);
     }
     expect(p.buildSummaryPrompt(args, { contentBoundary: false }).system).toBe(p.buildSummaryPrompt(args, { contentBoundary: true }).system.replace(`${p.RULE_CONTENT_BOUNDARY}\n\n`, ''));

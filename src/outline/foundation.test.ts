@@ -341,7 +341,7 @@ describe('只读上下文与通用未来提示词', () => {
     expect(result.at(-1)!.content).toContain('approach 发展方式');
     expect(selectHistoryNodesBefore).toHaveBeenCalledWith(boundary.memory.summaries, ctx.chat, 2);
   });
-  it('允许被宝书隐藏的正文，不读札记记录、世界书或独立注入', () => {
+  it('允许被宝书隐藏的正文；构建上下文时不自行读取札记记录、世界书或独立注入（世界书与已确认安排由调用方传入）', () => {
     ctx.chat = [message('已隐藏正文事实', { is_system: true, extra: { bbs_hidden: true } })];
     for (const key of ['extensionPrompts', 'worldInfo', 'notesState']) Object.defineProperty(ctx, key, { get() { throw new Error('越界读取'); } });
     Object.defineProperty(ctx.chatMetadata, 'prism_book_notes_data', { get() { throw new Error('禁止札记'); } });

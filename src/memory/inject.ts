@@ -339,7 +339,7 @@ function fmtSceneContext(scenes: MemScene[], here: string, locationPath?: string
     .filter(s => !chainIds.has(s.id))
     .map(s => s.path.join(' › '));
   if (others.length) {
-    lines.push(`其他已知地点(仅名称,勿重复记录):\n${others.map(o => `  - ${o}`).join('\n')}`);
+    lines.push(`其他已知地点(仅列名称):\n${others.map(o => `  - ${o}`).join('\n')}`);
   }
   return lines.join('\n');
 }
@@ -367,7 +367,7 @@ function aiFloorsAfter(chat: STMessage[] | null, floor: number): number {
 
 /**
  * 伤势进展提醒:主角、主要角色、在场与同区域的 NPC 中,伤情记录满一天(故事时间不明时按回复楼层数)未更新的,
- * 提醒正文模型按伤势轻重体现进展。只覆盖随正文发送的角色(主角信息、NPC 名册的开关);不改记录。
+ * 提醒正文模型写到伤处或相关行动时按轻重体现进展,与本轮无关时不必提及。只覆盖随正文发送的角色(主角信息、NPC 名册的开关);不改记录。
  */
 function buildInjuryReminder(protagonistOn: boolean, npcsOn: boolean): string {
   const chat = getContext()?.chat ?? null;
@@ -403,7 +403,7 @@ function fmtProtagonistContext(protagonist: MemProtagonist, name: string, now: s
     ['身份', protagonist.identity],
     ['外貌', protagonist.appearance],
     ['着装', protagonist.outfit],
-    ['状态', protagonist.condition],
+    ['身体状态', protagonist.condition],
   ];
   const lines = fields
     .filter(([, value]) => oneLine(value))
@@ -416,7 +416,7 @@ function fmtProtagonistContext(protagonist: MemProtagonist, name: string, now: s
 function npcStateTail(n: MemNpc, withPlace: boolean): string {
   const tail: string[] = [];
   if (oneLine(n.outfit)) tail.push(`最后记录着装:${oneLine(n.outfit)}`);
-  if (oneLine(n.condition)) tail.push(`最后记录状态:${oneLine(n.condition)}`);
+  if (oneLine(n.condition)) tail.push(`最后记录身体状态:${oneLine(n.condition)}`);
   if (withPlace) {
     if (n.follow) tail.push('随行');
     else tail.push(npcLocationLabel(n));
@@ -524,7 +524,7 @@ export function fmtNpcContextBlocks(npcs: MemNpc[], scenes: MemScene[], here: st
         return `  - ${head}${profile.length ? ` —— ${profile.join(';')}` : ''}${affinity ? ` 〔好感估计:${affinity}〕` : ''}${npcStateTail(n, true)}`;
       })
       .join('\n');
-    out.main = withPreface('[主要角色](快照为最后记录,离场后不得推测持续或演变)', detailed);
+    out.main = withPreface('[主要角色](快照为最后记录,离场后不凭空推测延续或演变)', detailed);
   }
   const npcParts: string[] = [];
   if (present.length) {
@@ -751,7 +751,7 @@ export function buildStateInjectionText(): string {
     if (secretBlock) st.push(secretBlock);
   }
 
-  // 伤势进展提醒:伤情记录满一天(没有故事时间时按回复楼层数)未更新,提醒正文模型按轻重体现进展;只提醒随正文发送的角色。
+  // 伤势进展提醒:伤情记录满一天(没有故事时间时按回复楼层数)未更新,提醒正文模型在相关时按轻重体现进展;只提醒随正文发送的角色。
   if (inj.injuryReminder) {
     const reminder = buildInjuryReminder(inj.protagonist, npcsOn);
     if (reminder) st.push(reminder);
@@ -765,7 +765,7 @@ export function buildStateInjectionText(): string {
   // 近期已完成的计划/悬念:防 AI 把刚了结的当未完成又去推进。与副API摘要同口径,只差截止点
   // (这里用全量 memory.plans;副API用 deriveMemory(chat, beforeIndex).plans)。
   const recentResolved = selectRecentResolvedPlans(memory.plans, apiSettings.recentResolvedPlansCount);
-  if (recentResolved.length) st.push(`近期已了结(已结案,含了结方式/原因;勿当未完成再推进/重复记录):\n${fmtResolvedPlans(recentResolved)}`);
+  if (recentResolved.length) st.push(`近期已了结(已结案,含了结方式与原因;不要当作未完成再推进):\n${fmtResolvedPlans(recentResolved)}`);
 
   // 不在场的 NPC:按最近出场分块,排在计划之后
   if (npcBlocks?.absent.length) st.push(...npcBlocks.absent);
