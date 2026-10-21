@@ -145,6 +145,14 @@ describe('原提示词和 aftertalk 协议', () => {
       { id: 'Q2', label: 'Q2', prompt: '乙？', proposal: '方案乙' },
     ]);
   });
+  it('漏写「凝嘤嘤」只写「暂定:」时仍识别提案；问题里不带冒号的「暂定」不算提案', () => {
+    const qs = parseQuestions('Q1. 许曼要不要留？凝嘤嘤偏心她。暂定: 让林岚试探她\nQ2. 要不要先暂定一个碰头地点？凝嘤嘤暂定: 码头钟楼下\nQ3. 还缺什么？暂定一下再说');
+    expect(qs).toEqual([
+      { id: 'Q1', label: 'Q1', prompt: '许曼要不要留？凝嘤嘤偏心她。', proposal: '让林岚试探她' },
+      { id: 'Q2', label: 'Q2', prompt: '要不要先暂定一个碰头地点？', proposal: '码头钟楼下' },
+      { id: 'Q3', label: 'Q3', prompt: '还缺什么？暂定一下再说', proposal: '' },
+    ]);
+  });
   it('来源指纹覆盖中部内容而非只取首尾', () => {
     expect(fingerprint('x'.repeat(1000) + '甲' + 'y'.repeat(1000))).not.toBe(fingerprint('x'.repeat(1000) + '乙' + 'y'.repeat(1000)));
   });

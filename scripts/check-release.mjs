@@ -17,7 +17,7 @@ assert.equal(manifest.homePage, undefined);
 const built = await read('dist/index.js');
 assert(built.includes(pkg.version), '构建版本不一致');
 assert(built.includes('棱镜宝书'), '构建品牌缺失');
-assert(built.includes('内部版采用手动更新'), '内部更新保护未构建');
+assert(built.includes('插件自己不检查更新'), '更新保护说明未构建');
 for (const p of ['src/memory/update.ts', 'dist/index.js']) {
   const text = await read(p);
   assert(!text.includes('raw.githubusercontent.com/baibai-git'), '仍有上游更新端点：' + p);

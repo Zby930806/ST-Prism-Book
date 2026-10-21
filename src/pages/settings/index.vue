@@ -33,7 +33,7 @@ const masterDescId = useId();
 
 /* —— 检测更新:版本区块 + 确认弹窗 —— */
 const updateConfirmOpen = ref(false);
-// 内部版不触发远程更新检查。
+// 插件不触发远程更新检查，更新由酒馆的「管理扩展」完成。
 function openUpdateConfirm() {
   if (updateState.available) updateConfirmOpen.value = true;
 }
@@ -75,7 +75,7 @@ function goToSettingsGroup(id: string) {
     >
       <template #actions>
         <div class="bbs-ver-row">
-          <span class="bbs-ver" :title="INTERNAL_UPDATE_NOTICE">v{{ updateState.current || '—' }} · 内部版</span>
+          <span class="bbs-ver" :title="INTERNAL_UPDATE_NOTICE">v{{ updateState.current || '—' }}</span>
           <button
             v-if="updateState.available"
             class="bbs-btn bbs-btn-primary bbs-btn-sm"

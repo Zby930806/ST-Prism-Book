@@ -12,7 +12,8 @@ export function parseQuestions(text: string): NoteQuestion[] {
   return headings.flatMap((m, i) => {
     const id = m[1]; if (seen.has(id)) return []; seen.add(id);
     const body = text.slice(m.index! + m[0].length, headings[i+1]?.index ?? text.length).split(/\n\s*(?:收尾|凝嘤嘤收尾)[：:]/)[0].trim();
-    const marker = /(?:\*\*)?凝嘤嘤暂定(?:写法)?(?:\*\*)?\s*[：:]/.exec(body);
+    // 模型偶尔漏写「凝嘤嘤」只写「暂定:」，这时按「暂定」加冒号认提案；问题里「先暂定一个地点」这类不带冒号的不算。
+    const marker = /(?:\*\*)?凝嘤嘤暂定(?:写法)?(?:\*\*)?\s*[：:]/.exec(body) ?? /(?:\*\*)?暂定(?:写法)?(?:\*\*)?\s*[：:]/.exec(body);
     return [{ id, label: id, prompt: (marker ? body.slice(0, marker.index) : body).trim(), proposal: marker ? body.slice(marker.index + marker[0].length).trim() : '' }];
   });
 }

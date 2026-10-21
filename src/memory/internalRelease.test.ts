@@ -36,9 +36,10 @@ describe('棱镜宝书内部发行约束', () => {
     for (const value of ['st-baibai-book:ready', 'st-baibai-book:changed', '.STBaiBaiBook = api']) expect(register).toContain(value);
     expect(read('src/index.ts')).toContain('bbs_generateInterceptor');
   });
-  it('设置页标识内部版本并保留原作出处', () => {
+  it('设置页显示版本和更新方式并保留原作出处', () => {
     const settings = read('src/pages/settings/index.vue');
-    expect(settings).toContain('内部版'); expect(settings).toContain('INTERNAL_UPDATE_NOTICE');
+    expect(settings).not.toContain('内部版'); expect(settings).toContain('INTERNAL_UPDATE_NOTICE');
+    expect(INTERNAL_UPDATE_NOTICE).toContain('管理扩展'); expect(INTERNAL_UPDATE_NOTICE).toContain('在扩展更新时通知');
     expect(settings).not.toContain('checkForUpdate');
     expect(read('NOTICE.md')).toContain('https://github.com/baibai-git/ST-BaiBai-Book');
     expect(read('NOTICE.md')).toContain('不重新许可第三方代码');
