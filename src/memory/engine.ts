@@ -7,8 +7,10 @@ import type { TaskType } from '@/api/settings';
 import type { STMessage, WorldInfoEntry } from '@/st/context';
 import { getContext, getCheckWorldInfo, getEjsTemplate, mainApiModelName, setMessageText } from '@/st/context';
 import { toast } from '@/st/toast';
-import { addSummary, classifyNpcPresence, deriveMemory, finalizeDelta, fmtVarOpsInline, getLeaf, invalidateSummaryAncestors, itemChangesOf, leafValid, makeLeafId, pruneBrokenComps, syncItemLogFromMessage } from './apply';
+import { addSummary, classifyNpcPresence, deriveAfterDelta, deriveMemory, finalizeDelta, fmtVarOpsInline, getLeaf, invalidateSummaryAncestors, itemChangesOf, leafValid, makeLeafId, pruneBrokenComps, syncItemLogFromMessage } from './apply';
 import { extractJsonObject } from './json';
+import { npcMentioned } from './npcLabel';
+import { planAutoEnrichment, readEnrichRecord, runAutoEnrichment, writeEnrichRecords, type EnrichRecordUpdate } from './npcEnrich';
 import { parseSummaryResponse, SummaryResponseError } from './summaryResponse';
 import { buildConditionPatchContext } from './conditionPatch';
 import { clearInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
@@ -18,7 +20,7 @@ import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import type { ViewNode } from './select';
 import { memory, memoryWriteIssue, checkCompatibility, recomputeDerived, scheduleLeafFlush } from './store';
 import { legacyLeafIssue } from './compatibility';
-import type { LeafConflict, LeafExtra, MemSummary, StoredDelta, SummaryDelta } from './types';
+import type { LeafConflict, LeafExtra, MemSummary, NpcEnrichment, StoredDelta, SummaryDelta } from './types';
 import { scheduleVectorIndex } from './vector';
 import { invalidateRecallCache } from './vector/cache';
 import { clearRecallInjection } from './vector/recall';
@@ -592,7 +594,11 @@ export async function handleGenerationIntercept(
   abort: (immediately: boolean) => void,
 ): Promise<boolean> {
   if (!engineActiveHere()) return false; // 排除角色/总开关关:不拦
-  if (!apiSettings.autoSummaryEnabled) return false; // 自动摘要关 → 拦截一并关
+  if (!apiSettings.autoSummaryEnabled) {
+    // 自动摘要关 → 拦截一并关。状态注入仍按当前记录刷新一次(伤势进展提醒按经过的时间和楼层数计算)。
+    refreshInjection();
+    return false;
+  }
   // 要产出新正文的生成才拦:normal(发消息)/regenerate(重新生成)/swipe(翻页)。
   // 与摘要触发(GENERATION_STARTED 监听器)同口径,否则重生/翻页时「补摘」与「生成」会并行。
   // continue(续写)/quiet(安静)/impersonate(扮演)放行,不该被洞挡。
@@ -681,7 +687,7 @@ export async function handleGenerationIntercept(
       `发生了什么：前面有楼层还没有摘要。为了让剧情连贯，要先把它们补上才能继续发消息。`,
       `怎么做：点左下角魔法棒打开棱镜宝书，在「摘要」页的「未摘要楼层」里逐层补摘，或点「批量补摘」一次处理。`,
       `补摘失败：摘要页会写明原因（比如回复被截断、密钥不对），照提示调整，或换个 API 再试。`,
-      `补摘成功后：删掉这条提示，就能继续正常生成了。`
+      `补摘完成后：关闭棱镜宝书窗口时，这条提示会自动删除，之后即可正常生成；它后面已有新消息时，请手动删除。这条提示不会发给正文模型。`
     ].join('{{newline}}');
     try {
       await exec(`/sendas name="棱镜宝书" ${text}`);
@@ -1109,8 +1115,9 @@ interface Sender {
   /** 是否发送内容边界:DeepSeek 模型不发,其余模型发。 */
   contentBoundary: boolean;
 }
+export type { Sender };
 
-function resolveSender(task: TaskType): Sender | { error: string } {
+export function resolveSender(task: TaskType): Sender | { error: string } {
   const channel = getChannelForTask(task);
   if (channel) {
     return {
@@ -1224,6 +1231,10 @@ interface PendingFloorSummary {
   /** 生成时「本楼之前状态」的指纹;只在预览模式记录 */
   stateKey: string;
   replaceLeaf?: LeafExtra;
+  /** 回看原文补档案的结果(随叶子写入;重新摘要时沿用原叶子的结果) */
+  enriched: NpcEnrichment[];
+  /** 提交时要写的补档记录(请求过的角色才有) */
+  enrichRecords: EnrichRecordUpdate[];
   /** 聊天、来源正文、页码等没变才放行,否则抛错 */
   assertUnchanged: () => void;
 }
@@ -1319,6 +1330,7 @@ function applyLeafForFloor(
   delta: SummaryDelta,
   stateBefore: ReturnType<typeof deriveMemory>,
   replaceLeaf?: LeafExtra,
+  enriched: NpcEnrichment[] = [],
 ): void {
   if (!chat[aiFloor]) {
     throw new Error(`摘要没有保存：楼层 #${aiFloor} 已经不在了（可能在请求期间被删除）。`);
@@ -1342,6 +1354,7 @@ function applyLeafForFloor(
     v: 1,
   };
   if (parts.conflicts?.length) leaf.conflicts = parts.conflicts;
+  if (enriched.length) leaf.enriched = enriched;
   if (replaceLeaf) invalidateSummaryAncestors(replaceLeaf.id);
   chat[aiFloor].extra = { ...(chat[aiFloor].extra ?? {}), bbs_leaf: leaf };
   // 叶子正文/摘要已变 → 召回读到的向量内容会变,立即失效召回缓存(防重生成/翻页复用旧召回)。
@@ -1421,6 +1434,8 @@ async function summarizeFloorWork(
   const openPlansOrdered = stateBefore.plans.filter(p => p.status === 'open');
   const priorTime = latestStoryTime(chat.slice(0, beforeIndex)) || storyTimeValue(stateBefore.state.time);
   const fictionalOpening = !priorTime && !!initialStoryTime() && ctx.chatMetadata?.[INITIAL_TIME_ORIGIN_KEY] === 'fictional';
+  // 本楼正文(不含段落编号):判断角色是否在本楼被提到(名册简列、回看原文补档案都用它)
+  const floorText = targets.map(i => cleanBody(chat[i].mes)).join('\n');
   const prompt = buildSummaryPrompt({
     user: ctx.name1,
     char: ctx.name2,
@@ -1433,9 +1448,14 @@ async function summarizeFloorWork(
     items: stateBefore.items.map(i => ({ name: i.name, qty: i.qty, desc: i.desc, carried: i.carried, location: i.location })),
     itemLog: stateBefore.itemLog,
     scenes: stateBefore.scenes.map(s => ({ path: s.path, desc: s.desc })),
-    npcs: stateBefore.npcs.map(n => ({ name: n.name, gender: n.gender, age: n.age, ageTime: n.ageTime, relation: n.relation, affinityInner: n.affinityInner, affinityOuter: n.affinityOuter, affinityNote: n.affinityNote, ties: n.ties, title: n.title, personality: n.personality, important: n.important, desc: n.desc, outfit: n.outfit, condition: n.condition, follow: n.follow, location: n.location, locationStale: n.locationStale, lastKnownLocation: n.lastKnownLocation,
+    npcs: stateBefore.npcs.map(n => {
       // 在场标记按「本楼之前」的状态算,要 AI 逐个对照做离场/归场对账(与注入端同一权威判定)
-      presence: classifyNpcPresence(n, stateBefore.scenes, stateBefore.state.location, stateBefore.state.locationPath) })),
+      const presence = classifyNpcPresence(n, stateBefore.scenes, stateBefore.state.location, stateBefore.state.locationPath);
+      // NPC 本楼前不在场、本楼正文也没提到时只给一行;主要角色、在场/同区域、被提到的保留完整档案(外貌、身份是整段覆盖,模型要看到旧值)
+      const brief = !n.important && (presence === 'absent' || presence === 'unknown') && !npcMentioned(floorText, n.name, n.formerNames);
+      return { name: n.name, gender: n.gender, age: n.age, ageTime: n.ageTime, relation: n.relation, affinityInner: n.affinityInner, affinityOuter: n.affinityOuter, affinityNote: n.affinityNote, ties: n.ties, title: n.title, personality: n.personality, important: n.important, desc: n.desc, outfit: n.outfit, condition: n.condition, follow: n.follow, location: n.location, locationStale: n.locationStale, lastKnownLocation: n.lastKnownLocation,
+        formerNames: n.formerNames, presence, ...(brief ? { brief: true } : {}) };
+    }),
     openPlans: openPlansOrdered.map(p => ({ kind: p.kind, content: p.content, createdTime: p.createdTime, targetTime: p.targetTime })),
     // 未结案信息差:顺序即 s1/s2…(与 finalizeDelta 翻译稳定 id 同口径)
     secrets: stateBefore.secrets.filter(s => s.status === 'open').map(s => ({ content: s.content, knownBy: s.knownBy, unaware: s.unaware })),
@@ -1480,6 +1500,8 @@ async function summarizeFloorWork(
       sourceContent: content,
       sourceTexts: targets.map(i => cleanBody(chat[i].mes)),
       conditionContext: { ...stateBefore, content, strict: builtin },
+      npcRoster: stateBefore.npcs.map(n => n.name),
+      userName: ctx.name1,
       finalize: value => finalizeDelta(value, openPlansOrdered, stateBefore.lifeDetails, stateBefore.secrets.filter(s => s.status === 'open')),
     });
     if (initialStoryTime()) {
@@ -1507,10 +1529,27 @@ async function summarizeFloorWork(
   });
   assertUnchanged();
 
+  // 回看原文补档案:主摘要解析之后、写入叶子之前。本楼新增或被提到、档案缺外貌/身份/性别的角色,
+  // 到建档之前的原文里检索并发一个小请求;失败不影响本楼摘要,只在提交时记下状态。
+  // 重新摘要(含先对比)只沿用原叶子的补档结果,不发新请求;设置里关闭时同样只沿用、不请求。
+  const parts = buildLeafParts(chat, aiFloor, delta, stateBefore);
+  const after = deriveAfterDelta(stateBefore, parts.delta, { time: parts.timeEnd || parts.timeStart || '', floor: aiFloor });
+  const enrichPlan = planAutoEnrichment({
+    chat, aiFloor, beforeIndex, before: stateBefore, after, floorText,
+    replaceLeaf: options.replaceLeaf, charName: ctx.name2,
+    record: readEnrichRecord(ctx.chatMetadata as Record<string, unknown> | undefined),
+    allowRequests: apiSettings.npcEnrichAuto,
+  });
+  const enrichment = await runAutoEnrichment(enrichPlan, aiFloor, request => { assertUnchanged(); return sender.send(request); },
+    { user: ctx.name1, char: ctx.name2, contentBoundary: sender.contentBoundary });
+  assertUnchanged();
+
   const pending: PendingFloorSummary = {
     chat, aiFloor, delta, stateBefore, beforeIndex,
     stateKey: options.onPrepared ? JSON.stringify(stateBefore) : '',
     replaceLeaf: options.replaceLeaf,
+    enriched: enrichment.entries,
+    enrichRecords: enrichment.records,
     assertUnchanged,
   };
   // 预览模式:交出结果就停,不落叶;用户选「用新的」后由 applyFloorPreview 提交。
@@ -1521,8 +1560,10 @@ async function summarizeFloorWork(
 /** 落叶并刷新派生/注入/落盘/向量;提交前再核对一次聊天和这层正文没变。 */
 function commitFloorSummary(p: PendingFloorSummary): void {
   p.assertUnchanged();
-  applyLeafForFloor(p.chat, p.aiFloor, p.delta, p.stateBefore, p.replaceLeaf);
+  applyLeafForFloor(p.chat, p.aiFloor, p.delta, p.stateBefore, p.replaceLeaf, p.enriched);
   engineState.lastRunAt = Date.now();
+  // 补档记录随叶子一起提交:预览后选「保留现在的」时不写,之后仍可再补
+  writeEnrichRecords(p.enrichRecords);
 
   // 立刻反映到派生与注入;落盘走防抖(隐藏由收尾的 syncWindowHiddenState 统一负责)
   recomputeDerived();

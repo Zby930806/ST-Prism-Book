@@ -33,7 +33,7 @@ defineExpose({ focusName: () => nameInput.value?.focus() });
     <template v-if="draft">
       <label class="bbs-modal-field">
         <span class="bbs-modal-label">名字</span>
-        <input ref="nameInput" v-model="draft.name" class="bbs-input" type="text" placeholder="角色名" @keydown.enter="onEnter" />
+        <input ref="nameInput" v-model="draft.name" class="bbs-input" type="text" placeholder="角色名；没有名字可写职业加字母，如酒保A" @keydown.enter="onEnter" />
       </label>
       <label class="bbs-modal-field">
         <span class="bbs-modal-label">性别</span>
@@ -82,7 +82,7 @@ defineExpose({ focusName: () => nameInput.value?.focus() });
       <label class="bbs-modal-field bbs-modal-check">
         <input v-model="draft.important" type="checkbox" class="bbs-checkbox" />
         <span class="bbs-modal-label">
-          {{ apiSettings.summaryOnlyMode ? '主要角色（核心主演，仅在棱镜宝书内重点追踪状态）' : '主要角色（核心主演，始终全量发送、重点追踪状态）' }}
+          {{ apiSettings.summaryOnlyMode ? '主要角色（除主角外的主要登场角色，仅在棱镜宝书内单独列出）' : '主要角色（除主角外的主要登场角色，档案与当前状态始终随正文发送）' }}
         </span>
       </label>
       <label class="bbs-modal-field bbs-modal-check">

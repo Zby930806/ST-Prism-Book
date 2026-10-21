@@ -4,8 +4,8 @@ import * as settings from '@/api/settings';
 import * as context from '@/st/context';
 import * as notices from '@/st/toast';
 import type { STContext, STMessage } from '@/st/context';
-import { currentSummaryPromise, engineState, handleGenerationIntercept, maybeSummarizePrevAi, summarizeFloor } from './engine';
-import { ensureOpeningStoryTime, initialTimeEditIssue, saveInitialStoryTime } from './initialTime';
+import { currentSummaryPromise, engineState, handleGenerationIntercept, maybeSummarizePrevAi, regenerateFloor, summarizeFloor } from './engine';
+import { currentStoryTimeTarget, ensureOpeningStoryTime, initialTimeEditIssue, saveCurrentStoryTime, saveInitialStoryTime } from './initialTime';
 import { memory, loadMemory, recomputeDerived, derivedMeta } from './store';
 import { createEmptyMemory, MEMORY_KEY, MEMORY_VERSION } from './types';
 import { cleanBody, FICTIONAL_OPENING_TIME, INITIAL_TIME_KEY, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, latestStoryTime, parseTimeRange, TIME_PENDING, timeTagPrompt } from './timeTag';
@@ -384,5 +384,109 @@ describe('一次性虚构开场时钟的生产链', () => {
     expect(JSON.stringify(ctx.chatMetadata)).toBe(before);
     expect(initialStoryTime()).toBe('');
     expect(ctx.saveMetadata).not.toHaveBeenCalled();
+  });
+});
+
+describe('旧聊天补设当前故事时间', () => {
+  const noTime = JSON.stringify({ summary: '她走进房间。', stateChanges: [], timeStart: TIME_PENDING, timeEnd: TIME_PENDING, time: TIME_PENDING });
+  const userMessage = (mes = '继续。'): STMessage => ({ ...message(mes), name: '玩家', is_user: true });
+  /** 旧聊天：三层回复都已摘要，但正文没有时间标签、也没有开场时间，摘要里都没有时间。 */
+  async function oldChat(summarized = [0, 2, 4]) {
+    ctx.chat = [message('第一层。'), userMessage(), message('第二层。'), userMessage('再继续。'), message('第三层。')];
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(noTime);
+    for (const floor of summarized) await summarizeFloor(floor);
+    expect(ctx.chat.filter(m => m.extra?.bbs_leaf)).toHaveLength(summarized.length);
+    expect(latestStoryTime(ctx.chat)).toBe('');
+    vi.mocked(client.requestViaMainApi).mockClear();
+    vi.mocked(ctx.saveChat).mockClear();
+  }
+
+  it('已经开始的聊天不能再设开场时间，但可以设定截至最新一层摘要的当前时间', async () => {
+    await oldChat();
+    expect(initialTimeEditIssue()).toContain('开场时间不能再改');
+    expect(currentStoryTimeTarget()).toEqual({ floor: 4, issue: '' });
+  });
+
+  it('只写最新一层摘要的结束时间和状态时间：不改正文、不改其他摘要、不写开场时间', async () => {
+    await oldChat();
+    const before = structuredClone(ctx.chat);
+    expect(await saveCurrentStoryTime('永和十五年八月初七 傍晚')).toBe(4);
+    expect(ctx.saveChat).toHaveBeenCalledOnce();
+    const leaf = ctx.chat[4].extra?.bbs_leaf;
+    expect(leaf).toMatchObject({ id: before[4].extra?.bbs_leaf?.id, text: before[4].extra?.bbs_leaf?.text, timeEnd: '永和十五年八月初七 傍晚', delta: { time: '永和十五年八月初七 傍晚' } });
+    expect(leaf?.timeStart).toBeUndefined();
+    for (const floor of [0, 1, 2, 3]) expect(ctx.chat[floor]).toEqual(before[floor]);
+    expect(ctx.chat.map(m => m.mes)).toEqual(before.map(m => m.mes));
+    expect(ctx.chatMetadata[INITIAL_TIME_KEY]).toBeUndefined();
+    expect(initialStoryTime()).toBe('');
+    // 年龄、相对时间、注入用的「现在」都有了
+    expect(derivedMeta.latestStoryTime).toBe('永和十五年八月初七 傍晚');
+    expect(memory.state.time).toBe('永和十五年八月初七 傍晚');
+    expect(slots.get('baibai_book_time_tag')).toContain('当前主线时间基准:永和十五年八月初七 傍晚');
+    // 设定后不能再补设，修正改走摘要列表
+    expect(currentStoryTimeTarget().issue).toContain('已经有故事时间（永和十五年八月初七 傍晚，来自 #4 楼）');
+    await expect(saveCurrentStoryTime('故事第2天')).rejects.toThrow('已经有故事时间');
+    expect(client.requestViaMainApi).not.toHaveBeenCalled();
+  });
+
+  it('之后的楼层从这个时间往后推算；重新摘要更早的楼层拿不到它', async () => {
+    await oldChat();
+    await saveCurrentStoryTime('故事第30天 20:00');
+    ctx.chat.push(userMessage('又过了一会儿。'), message('第四层。'));
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(JSON.stringify({ summary: '她走进房间。', stateChanges: [], timeStart: '故事第30天 21:00', timeEnd: '故事第30天 22:00' }));
+    await summarizeFloor(6);
+    expect(vi.mocked(client.requestViaMainApi).mock.calls[0][0].map(m => m.content).join('\n')).toContain('故事第30天 20:00');
+    expect(ctx.chat[6].extra?.bbs_leaf).toMatchObject({ timeStart: '故事第30天 21:00', timeEnd: '故事第30天 22:00' });
+    expect(memory.state.time).toBe('故事第30天 22:00');
+
+    vi.mocked(client.requestViaMainApi).mockClear().mockResolvedValue(noTime);
+    expect(await regenerateFloor(2)).toBe(true);
+    expect(vi.mocked(client.requestViaMainApi).mock.calls[0][0].map(m => m.content).join('\n')).not.toContain('故事第30天');
+    expect(ctx.chat[2].extra?.bbs_leaf?.timeEnd).toBeUndefined();
+    expect(ctx.chat[4].extra?.bbs_leaf?.timeEnd).toBe('故事第30天 20:00');
+  });
+
+  it('最新几层还没摘要时先补摘；完全没有摘要时先补摘最新一层', async () => {
+    await oldChat([0]);
+    expect(currentStoryTimeTarget()).toMatchObject({ floor: -1 });
+    expect(currentStoryTimeTarget().issue).toContain('#2–#4 还有 2 层没有摘要');
+    await oldChat([0, 2]); // 只剩最后一层没摘（正常状态）
+    expect(currentStoryTimeTarget()).toEqual({ floor: 2, issue: '' });
+    ctx.chat = [message('第一层。'), userMessage(), message('第二层。')];
+    recomputeDerived();
+    expect(currentStoryTimeTarget().issue).toContain('还没有楼层摘要');
+    await expect(saveCurrentStoryTime('初秋')).rejects.toThrow('先补摘');
+  });
+
+  it('旧版合并时间标签、正文时间标签都算已有时间；摘要进行中不能设定；不接受空值和标签', async () => {
+    await oldChat();
+    const leaf = ctx.chat[0].extra!.bbs_leaf!;
+    ctx.chat[0].extra = { ...ctx.chat[0].extra, bbs_leaf: { ...leaf, timeLabel: '初春 - 初夏' } };
+    recomputeDerived();
+    expect(currentStoryTimeTarget().issue).toContain('已经有故事时间');
+    ctx.chat[0].extra = { ...ctx.chat[0].extra, bbs_leaf: leaf };
+    ctx.chat[2].mes = '<bbs_start>霜月初三</bbs_start>第二层。<bbs_end>霜月初三</bbs_end>';
+    expect(currentStoryTimeTarget().issue).toContain('来自 #2 楼');
+    ctx.chat[2].mes = '第二层。';
+    expect(currentStoryTimeTarget().issue).toBe('');
+    engineState.running = true;
+    expect(currentStoryTimeTarget().issue).toContain('摘要正在进行');
+    engineState.running = false;
+    await expect(saveCurrentStoryTime('未知')).rejects.toThrow('具体的故事时间');
+    await expect(saveCurrentStoryTime('<bbs_end>x</bbs_end>')).rejects.toThrow('具体的故事时间');
+    expect(ctx.saveChat).not.toHaveBeenCalled();
+  });
+
+  it('保存失败时撤回，摘要保持原样', async () => {
+    await oldChat();
+    const before = structuredClone(ctx.chat[4]);
+    vi.mocked(ctx.saveChat).mockRejectedValueOnce(new Error('secret-disk-error'));
+    const error = await saveCurrentStoryTime('初秋').catch(e => e as Error);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('没能确认保存成功');
+    expect((error as Error).message).not.toContain('secret');
+    expect(ctx.chat[4]).toEqual(before);
+    expect(derivedMeta.latestStoryTime).toBe('');
+    expect(currentStoryTimeTarget()).toEqual({ floor: 4, issue: '' });
   });
 });

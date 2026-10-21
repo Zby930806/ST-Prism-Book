@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue';
 import OutlineDiscussion from './OutlineDiscussion.vue';
+import IconButton from '@/components/IconButton.vue';
+import ModalShell from '@/components/ModalShell.vue';
 import { getContext } from '@/st/context';
 import type { ApiChannel } from '@/api/settings';
 import { engineActiveHere } from '@/api/settings';
@@ -9,11 +11,11 @@ import { OUTLINE_LIMITS as L } from '@/outline/limits';
 import { validateOutlineContent } from '@/outline/protocol';
 import { outlineSettings, outlineSettingsIssue, resolveOutlineChannel, saveOutlineSettings } from '@/outline/settings';
 import { outlineRun, generateOutline, cancelOutline, discussionRun } from '@/outline/service';
-import { checkOutlineProgress, dismissOutlineProgress, outlineProgress, progressForCurrentStage } from '@/outline/progress';
+import { autoAdvanceForCurrentStage, checkOutlineProgress, clearOutlineProgressResult, dismissOutlineProgress, outlineProgress, progressForCurrentStage } from '@/outline/progress';
 import { discussionState } from '@/outline/discussionStore';
 import {
   outlineState, saveOutlineDraft, activateOutlineDraft, setOutlineEnabled,
-  setOutlineChapter, reconfirmOutline, outlineSourceCurrent,
+  setOutlineChapter, setOutlineExitCriteria, reconfirmOutline, outlineSourceCurrent,
 } from '@/outline/store';
 import { useNotesModelCatalog } from '@/notes/modelCatalog';
 import { pageFocus, takePageFocus } from '@/state/pageFocus';
@@ -191,8 +193,9 @@ function moveStage(index: number) {
     ? '规划已结束，不再注入正文。' : '已切换到新的阶段。');
 }
 
-/* —— 推进条件检查:结果只作提示,切换仍由用户操作 —— */
+/* —— 推进条件检查:默认只作提示;开启自动切换后,自动检查判定满足时切到下一阶段 —— */
 const progressShown = computed(() => progressForCurrentStage());
+const autoAdvanced = computed(() => autoAdvanceForCurrentStage());
 async function checkProgress() {
   if (locked.value || outlineProgress.busy) return;
   error.value = ''; notice.value = '';
@@ -203,6 +206,49 @@ function advanceFromProgress() {
   if (!value) return;
   dismissOutlineProgress();
   return moveStage(value.currentChapter + 1);
+}
+function undoAutoAdvance() {
+  const advanced = autoAdvanced.value;
+  if (!advanced) return;
+  outlineProgress.advanced = null;
+  return moveStage(advanced.from);
+}
+
+/* —— 手动修改推进条件:已确认规划的任一阶段,弹窗编辑,只改这一项;当前阶段已有的检查结果随之作废 —— */
+const criteriaTarget = ref<number | null>(null);
+const criteriaDraft = ref('');
+const criteriaError = ref('');
+const criteriaSaving = ref(false);
+const criteriaStage = computed(() => criteriaTarget.value === null ? null : active.value?.content.chapters[criteriaTarget.value] ?? null);
+const criteriaChanged = computed(() => !!criteriaStage.value && !!criteriaDraft.value.trim() && criteriaDraft.value.trim() !== criteriaStage.value.exitCriteria);
+function editCriteria(index: number) {
+  const stage = active.value?.content.chapters[index];
+  if (!stage || locked.value) return;
+  criteriaTarget.value = index;
+  criteriaDraft.value = stage.exitCriteria;
+  criteriaError.value = '';
+}
+function closeCriteria() {
+  if (criteriaSaving.value) return;
+  criteriaTarget.value = null;
+  criteriaError.value = '';
+}
+async function saveCriteria() {
+  const index = criteriaTarget.value;
+  if (index === null || criteriaSaving.value || !criteriaChanged.value) return;
+  criteriaSaving.value = true;
+  criteriaError.value = '';
+  try {
+    await setOutlineExitCriteria(index, criteriaDraft.value);
+    if (index === active.value?.currentChapter) clearOutlineProgressResult();
+    criteriaTarget.value = null;
+    error.value = '';
+    notice.value = `已修改第 ${index + 1} 阶段的推进条件。`;
+  } catch (cause) {
+    criteriaError.value = errorText(cause);
+  } finally {
+    criteriaSaving.value = false;
+  }
 }
 // 自动检查的开关和间隔:改了立即保存,失败回滚并提示
 function saveProgressSetting(patch: Partial<OutlineSettings['progressCheck']>) {
@@ -220,6 +266,12 @@ const progressAuto = computed({
   get: () => outlineSettings.progressCheck.auto,
   set: (value: boolean) => saveProgressSetting({ auto: value }),
 });
+// 自动切换依赖自动检查:打开时一并打开自动检查;自动检查关掉后它不起作用,界面显示为停用
+const progressAutoAdvance = computed({
+  get: () => outlineSettings.progressCheck.autoAdvance,
+  set: (value: boolean) => saveProgressSetting(value ? { autoAdvance: true, auto: true } : { autoAdvance: false }),
+});
+const autoAdvanceOn = computed(() => outlineSettings.progressCheck.auto && outlineSettings.progressCheck.autoAdvance);
 const progressInterval = ref(outlineSettings.progressCheck.interval);
 watch(() => outlineSettings.progressCheck.interval, value => { progressInterval.value = value; });
 function commitProgressInterval() {
@@ -348,7 +400,7 @@ async function startGeneration(confirmed = false) {
           <div><dt>阶段目标</dt><dd class="plain">{{ currentStage.goal }}</dd></div>
           <div><dt>剧情要点</dt><dd><ul><li v-for="(beat, index) in currentStage.beats" :key="index">{{ beat }}</li></ul></dd></div>
           <div><dt>发展方式</dt><dd class="plain">{{ currentStage.approach }}</dd></div>
-          <div><dt>推进条件</dt><dd class="plain">{{ currentStage.exitCriteria }}</dd></div>
+          <div><dt>推进条件</dt><dd class="plain planner-criteria"><span>{{ currentStage.exitCriteria }}</span><IconButton icon="edit" size="sm" label="修改推进条件" :disabled="locked" @click="editCriteria(active.currentChapter)" /></dd></div>
         </dl>
       </template>
       <div class="actions">
@@ -357,7 +409,13 @@ async function startGeneration(confirmed = false) {
         <button type="button" class="bbs-btn" :disabled="locked || active.currentChapter === 0" @click="moveStage(active.currentChapter - 1)">上一阶段</button>
         <button v-if="currentStage" type="button" class="bbs-btn" :disabled="locked" @click="moveStage(active.currentChapter + 1)">{{ active.currentChapter + 1 === active.content.chapters.length ? '结束规划' : '下一阶段' }}</button>
       </div>
-      <p class="hint">阶段需手动切换；切换只表示规划进度，不表示剧情已发生。</p>
+      <p class="hint">{{ autoAdvanceOn ? '推进条件满足时自动切换到下一阶段，也可手动切换；最后一个阶段需手动结束。切换只表示规划进度，不表示剧情已发生。' : '阶段需手动切换；切换只表示规划进度，不表示剧情已发生。' }}</p>
+      <div v-if="autoAdvanced" class="bbs-callout is-success planner-advanced" role="status">
+        <p>第 {{ autoAdvanced.floor }} 楼自动检查判定推进条件已满足，已从第 {{ autoAdvanced.from + 1 }} 阶段切换到第 {{ autoAdvanced.to + 1 }} 阶段「{{ autoAdvanced.title }}」。依据：{{ autoAdvanced.reason || '（未给出依据）' }}</p>
+        <div class="actions">
+          <button type="button" class="bbs-btn" :disabled="locked" @click="undoAutoAdvance">退回第 {{ autoAdvanced.from + 1 }} 阶段</button>
+        </div>
+      </div>
       <div v-if="currentStage" class="planner-progress">
         <div class="actions">
           <button type="button" class="bbs-btn" :disabled="locked || outlineProgress.busy || !engineEnabled || !activeCurrent || !active.enabled" @click="checkProgress">{{ outlineProgress.busy ? '检查中…' : '检查推进条件' }}</button>
@@ -366,6 +424,10 @@ async function startGeneration(confirmed = false) {
             <span>每</span>
             <input v-model.number="progressInterval" class="bbs-input" type="number" min="1" max="20" step="1" aria-label="自动检查间隔（AI 楼数）" :disabled="protectedSettings" @change="commitProgressInterval" />
             <span>个 AI 楼自动检查</span>
+          </label>
+          <label class="checkbox planner-progress-auto" :class="{ 'is-off': !progressAuto }">
+            <input v-model="progressAutoAdvance" type="checkbox" class="bbs-switch" :disabled="protectedSettings" />
+            <span>满足时自动切换阶段</span>
           </label>
         </div>
         <div v-if="progressShown && outlineProgress.met && !outlineProgress.dismissed" class="bbs-callout is-success" role="status">
@@ -380,7 +442,7 @@ async function startGeneration(confirmed = false) {
           <p>{{ outlineProgress.error }}</p>
           <details v-if="outlineProgress.errorDetail"><summary>技术细节</summary><p>{{ outlineProgress.errorDetail }}</p></details>
         </div>
-        <p class="hint">检查使用规划 API，每次请求一次；结果仅作提示，不会自动切换阶段。</p>
+        <p class="hint">{{ autoAdvanceOn ? '检查使用规划 API，每次请求一次；自动检查判定满足时切换到下一阶段，手动检查的结果只作提示。' : '检查使用规划 API，每次请求一次；结果仅作提示，不会自动切换阶段。' }}</p>
       </div>
       <div v-if="confirmation?.kind === 'reconfirm'" class="confirmation">
         <p>先对照当前剧情看一遍下面的各阶段。确认后会以当前剧情为准，重新启用当前阶段。</p>
@@ -396,7 +458,7 @@ async function startGeneration(confirmed = false) {
             <p class="plain"><strong>阶段目标：</strong>{{ stage.goal }}</p>
             <ul><li v-for="(beat, beatIndex) in stage.beats" :key="beatIndex">{{ beat }}</li></ul>
             <p class="plain"><strong>发展方式：</strong>{{ stage.approach }}</p>
-            <p class="plain"><strong>推进条件：</strong>{{ stage.exitCriteria }}</p>
+            <p class="plain planner-criteria"><span><strong>推进条件：</strong>{{ stage.exitCriteria }}</span><IconButton icon="edit" size="sm" :label="`修改第 ${index + 1} 阶段的推进条件`" :disabled="locked" @click="editCriteria(index)" /></p>
           </li>
         </ol>
       </details>
@@ -479,6 +541,19 @@ async function startGeneration(confirmed = false) {
         </form>
       </details>
     </details>
+
+    <ModalShell :open="criteriaTarget !== null" title="修改推进条件" @close="closeCriteria">
+      <template v-if="criteriaStage && criteriaTarget !== null">
+        <p class="bbs-modal-label">第 {{ criteriaTarget + 1 }} 阶段「{{ criteriaStage.title }}」{{ criteriaTarget === active?.currentChapter ? '（当前阶段）' : '' }}</p>
+        <textarea v-model="criteriaDraft" class="bbs-input bbs-modal-textarea" rows="4" :maxlength="L.exitCriteria" aria-label="推进条件" :disabled="criteriaSaving" />
+        <p class="hint">写成正文里能看到的具体结果，例如「在档案室找到与来信笔迹一致的署名」。保存后，这一阶段已有的检查结果作废，下次检查按新条件判断。</p>
+        <p v-if="criteriaError" class="bbs-callout is-danger" role="alert">{{ criteriaError }}</p>
+      </template>
+      <template #footer>
+        <button type="button" class="bbs-btn" :disabled="criteriaSaving" @click="closeCriteria">取消</button>
+        <button type="button" class="bbs-btn bbs-btn-primary" :disabled="criteriaSaving || !criteriaChanged" @click="saveCriteria">{{ criteriaSaving ? '保存中…' : '保存' }}</button>
+      </template>
+    </ModalShell>
   </div>
 </template>
 
@@ -509,6 +584,14 @@ async function startGeneration(confirmed = false) {
 .planner-progress .actions { align-items:center; }
 .outline-planner .planner-progress-auto { margin:0; flex-wrap:wrap; gap:6px; min-height:38px; }
 .outline-planner .planner-progress-auto .bbs-input { width:64px; flex:0 0 64px; min-height:34px; text-align:center; }
+/* 自动检查关闭时,自动切换不起作用:次要色表示停用,仍可直接打开(会一并打开自动检查) */
+.outline-planner .planner-progress-auto.is-off span { color:var(--bbs-ink-muted); }
+.planner-advanced { margin:0; }
+.planner-advanced p { margin:0 0 6px; }
+/* 推进条件后面跟一个小号编辑键:文字占满,编辑键贴在行尾 */
+.planner-criteria { display:flex; align-items:flex-start; gap:6px; }
+.planner-criteria > span { flex:1 1 auto; min-width:0; }
+.planner-criteria .bbs-icon-btn { flex:0 0 auto; margin-top:-4px; }
 .planner-progress .bbs-callout p { margin:0 0 4px; }
 .outline-planner h3 { margin:0; font-size:15px; font-weight:650; }
 .outline-planner h4 { margin:8px 0; font-size:13px; }

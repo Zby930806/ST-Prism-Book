@@ -61,39 +61,60 @@ export interface NpcSummaryView extends NpcAffinity {
   presence?: NpcPresence;
   locationStale?: boolean;
   lastKnownLocation?: MemNpc['lastKnownLocation'];
+  /** 改名前用过的名字(派生) */
+  formerNames?: string[];
+  /** 简列:NPC 本楼前不在场、本楼正文也没提到时只给名字、身份和所在地(由 engine 判定) */
+  brief?: boolean;
 }
 
-/** 给摘要模型的已登场 NPC 名册。长期关系必须随既有状态一起给模型，才能做整体覆盖更新。 */
-export function fmtNpcSummaryList(npcs: NpcSummaryView[]): string {
-  if (!npcs.length) return '  (无)';
-  return npcs
-    .map(n => {
-      const star = n.important ? '★ ' : '';
-      const inBracket: string[] = [];
-      if (oneLine(n.gender)) inBracket.push(oneLine(n.gender));
-      if (oneLine(n.age)) inBracket.push(`${oneLine(n.age)}${n.ageTime ? `·记于${oneLine(n.ageTime)}` : ''}`);
-      const bracket = inBracket.length ? `(${inBracket.join('·')})` : '';
-      // 在场标记:只给摘要名册用(presence 由 engine 计算),要 AI 拿它做离场/归场对账而非自行推理。
-      const mark = n.presence === 'present' ? '〔在场〕'
-        : n.presence === 'nearby' ? '〔同区域〕'
-          : n.presence === 'absent' ? '〔不在场〕' : n.presence === 'unknown' ? '〔当前位置未确认〕' : '';
-      const place = n.follow ? ' [随行]' : ' [' + npcLocationLabel(n) + ']';
-      const tail: string[] = [];
-      if (oneLine(n.title)) tail.push(oneLine(n.title));
-      if (oneLine(n.relation)) tail.push(`与主角:${oneLine(n.relation)}`);
-      if (oneLine(n.ties)) tail.push(`人际:${oneLine(n.ties)}`);
-      if (oneLine(n.personality)) tail.push(`性格:${oneLine(n.personality)}`);
-      const affinity = fmtNpcAffinity(n);
-      if (affinity) tail.push(`对主角的好感与态度估计[${affinity}]`);
-      const title = tail.length ? ` —— ${tail.join(';')}` : '';
-      const state: string[] = [];
-      if (oneLine(n.desc)) state.push(`既有外貌记录:${oneLine(n.desc)}`);
-      if (oneLine(n.outfit)) state.push(`最后记录着装:${oneLine(n.outfit)}`);
-      if (oneLine(n.condition)) state.push(`最后记录状态:${oneLine(n.condition)}`);
-      const stateStr = state.length ? ` 〔${state.join(';')}〕` : '';
-      return `  - ${star}${oneLine(n.name)}${bracket}${mark}${place}${title}${stateStr}`;
-    })
-    .join('\n');
+function fmtNpcSummaryLine(n: NpcSummaryView): string {
+  const star = n.important ? '★ ' : '';
+  const inBracket: string[] = [];
+  if (oneLine(n.gender)) inBracket.push(oneLine(n.gender));
+  if (!n.brief && oneLine(n.age)) inBracket.push(`${oneLine(n.age)}${n.ageTime ? `·记于${oneLine(n.ageTime)}` : ''}`);
+  const bracket = inBracket.length ? `(${inBracket.join('·')})` : '';
+  // 在场标记:只给摘要名册用(presence 由 engine 计算),要 AI 拿它做离场/归场对账而非自行推理。
+  const mark = n.presence === 'present' ? '〔在场〕'
+    : n.presence === 'nearby' ? '〔同区域〕'
+      : n.presence === 'absent' ? '〔不在场〕' : n.presence === 'unknown' ? '〔当前位置未确认〕' : '';
+  const place = n.follow ? ' [随行]' : ' [' + npcLocationLabel(n) + ']';
+  const former = (n.formerNames ?? []).map(oneLine).filter(Boolean);
+  if (n.brief) {
+    const tail = [oneLine(n.title), former.length ? `原记为:${former.join('、')}` : ''].filter(Boolean);
+    return `  - ${star}${oneLine(n.name)}${bracket}${mark}${place}${tail.length ? ` —— ${tail.join(';')}` : ''}〔简列〕`;
+  }
+  const tail: string[] = [];
+  if (oneLine(n.title)) tail.push(oneLine(n.title));
+  if (former.length) tail.push(`原记为:${former.join('、')}`);
+  if (oneLine(n.relation)) tail.push(`与主角:${oneLine(n.relation)}`);
+  if (oneLine(n.ties)) tail.push(`人际:${oneLine(n.ties)}`);
+  if (oneLine(n.personality)) tail.push(`性格:${oneLine(n.personality)}`);
+  const affinity = fmtNpcAffinity(n);
+  if (affinity) tail.push(`对主角的好感与态度估计[${affinity}]`);
+  const title = tail.length ? ` —— ${tail.join(';')}` : '';
+  const state: string[] = [];
+  if (oneLine(n.desc)) state.push(`既有外貌记录:${oneLine(n.desc)}`);
+  if (oneLine(n.outfit)) state.push(`最后记录着装:${oneLine(n.outfit)}`);
+  if (oneLine(n.condition)) state.push(`最后记录状态:${oneLine(n.condition)}`);
+  const stateStr = state.length ? ` 〔${state.join(';')}〕` : '';
+  return `  - ${star}${oneLine(n.name)}${bracket}${mark}${place}${title}${stateStr}`;
+}
+
+/**
+ * 给摘要模型的已登场名册。长期关系必须随既有状态一起给模型，才能做整体覆盖更新。
+ * tiers=true 时按「主角 / 主要角色 / NPC」三组列出:主角只占一行(档案另有专门一块,不进名册),
+ * 简列的 NPC 只给名字、身份和所在地,外貌等档案不展示。
+ */
+export function fmtNpcSummaryList(npcs: NpcSummaryView[], opts: { tiers?: boolean; user?: string } = {}): string {
+  if (!opts.tiers) return npcs.length ? npcs.map(fmtNpcSummaryLine).join('\n') : '  (无)';
+  const mains = npcs.filter(n => n.important);
+  const others = npcs.filter(n => !n.important);
+  const brief = others.some(n => n.brief);
+  const lines: string[] = [];
+  if (oneLine(opts.user)) lines.push(`  主角:${oneLine(opts.user)}(只写 protagonist,档案见「主角当前档案」,不进名册)`);
+  lines.push(mains.length ? '  主要角色:' : '  主要角色:(无)', ...mains.map(fmtNpcSummaryLine));
+  lines.push(others.length ? (brief ? '  NPC(标〔简列〕的只列了名字、身份和所在地):' : '  NPC:') : '  NPC:(无)', ...others.map(fmtNpcSummaryLine));
+  return lines.join('\n');
 }
 
 export const NPC_AFFINITY_LABELS = {

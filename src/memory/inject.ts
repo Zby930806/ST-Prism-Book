@@ -19,6 +19,8 @@ import { getContext } from '@/st/context';
 import { buildSceneLocationIndex, classifyNpcPresence, findCurrentSceneId, getLeaf, itemReachableAtScene, leafValid } from './apply';
 import { fmtItems, fmtPlans, fmtResolvedPlans, renderVarsState, selectRecentResolvedPlans, MEMORY_BRIEFING_NOTE, MEMORY_BRIEFING_END } from './prompts';
 import { fmtLifeDetail } from './lifeDetails';
+import { fmtInjuryReminder, type InjuryReminderSubject } from './injuryReminder';
+import { isNpcLabelName } from './npcLabel';
 import { fmtNpcAffinity, fmtNpcTiesContext, NPC_AFFINITY_BRIEFING } from './npcRelations';
 import { memory, memoryWriteIssue } from './store';
 import { compactTimeLabel, formatRange, latestStoryTime, splitTimeLabel, timeTagPrompt } from './timeTag';
@@ -352,6 +354,47 @@ function oneLine(s: string | undefined): string {
   return (s ?? '').replace(/\s*[\r\n]+\s*/g, ' ').trim();
 }
 
+/** 主角档案中会注入的文字字段(锚点等派生数字不在其中)。 */
+const PROTAGONIST_TEXT_FIELDS = ['gender', 'age', 'identity', 'appearance', 'outfit', 'condition'] as const;
+
+/** 锚点楼层之后的回复楼层数(与可追踪 AI 楼同口径:不含番外楼、提示楼和原生系统楼)。 */
+function aiFloorsAfter(chat: STMessage[] | null, floor: number): number {
+  if (!chat) return 0;
+  let count = 0;
+  for (let i = Math.max(0, floor + 1); i < chat.length; i++) if (isTrackableAiMessage(chat[i])) count++;
+  return count;
+}
+
+/**
+ * 伤势进展提醒:主角、主要角色、在场与同区域的 NPC 中,伤情记录满一天(故事时间不明时按回复楼层数)未更新的,
+ * 提醒正文模型按伤势轻重体现进展。只覆盖随正文发送的角色(主角信息、NPC 名册的开关);不改记录。
+ */
+function buildInjuryReminder(protagonistOn: boolean, npcsOn: boolean): string {
+  const chat = getContext()?.chat ?? null;
+  const subjects: InjuryReminderSubject[] = [];
+  if (protagonistOn && oneLine(memory.protagonist.condition)) {
+    subjects.push({ name: getContext()?.name1?.trim() || '主角', condition: memory.protagonist.condition, conditionTime: memory.protagonist.conditionTime, conditionFloor: memory.protagonist.conditionFloor });
+  }
+  if (npcsOn) {
+    const here = memory.state.location || '';
+    const locPath = memory.state.locationPath;
+    const injured = memory.npcs.filter(n => oneLine(n.condition));
+    const rank = (n: MemNpc): number => {
+      if (n.important) return 0;
+      const p = classifyNpcPresence(n, memory.scenes, here, locPath);
+      return p === 'present' ? 1 : p === 'nearby' ? 2 : -1;
+    };
+    injured
+      .map(n => ({ n, r: rank(n) }))
+      .filter(x => x.r >= 0)
+      .sort((a, b) => a.r - b.r)
+      .forEach(({ n }) => subjects.push({ name: n.name, condition: n.condition, conditionTime: n.conditionTime, conditionFloor: n.conditionFloor }));
+  }
+  if (!subjects.length) return '';
+  const now = latestStoryTime(chat) || memory.state.time;
+  return fmtInjuryReminder(subjects, now, floor => aiFloorsAfter(chat, floor));
+}
+
 /** 主角不参与 NPC 在场分档;已有字段始终完整注入。年龄按锚点+当前故事时间推算(now)。 */
 function fmtProtagonistContext(protagonist: MemProtagonist, name: string, now: string): string {
   const fields: Array<[string, string | undefined]> = [
@@ -395,18 +438,38 @@ function relationHead(relation: string | undefined): string {
 }
 
 /**
- * 渲染 NPC 名册注入块(分四档省 token):
- *  - **主要角色**(important):永远全量置顶,**突出即时状态面板**(着装/状态/所在),身份/性格/外貌从简。
- *  - 与其他角色的长期关系(ties)独立全局输出一次，不受以下在场分档影响。
- *  - 在场(随行 / 所在地=主角当前节点)→ 全量:名 + 性别 + 年龄 + 身份 + 关系 + 性格 + 外貌 + 即时状态。
- *  - **同区域**(抬头最多一级就与主角共处)→ 轻量:名 + 性别 + 年龄 + 身份 + 关系 + 性格 + 所在地。留个性格,免得 AI
- *    临时拉其出场时凭空 OOC;省略外貌与着装,保留身体状态以免漏掉行动限制。
- *  - 不在场(更上级祖先/更远旁支)→ 发 名 + 性别 + 关系称谓 + 身份(title) + 已有好感档位(省略说明) + 最后记录身体状态。
- * **性别在所有档都发**(包括不在场),防 AI 搞错性别;关系的**称谓头**同理(把亲哥写成陌生人同级严重)。
- * 年龄按锚点+当前故事时间(now)推算后注入,时间跳跃自动长岁。无 NPC 返回空串。
+ * 不在场的有名字 NPC 最多列出的人数(按最近出场排序),以及每个预算单元的行数。
+ * 不在场的人与眼前剧情关系最远:放在计划之后、按块进入注入预算,预算紧张时先省略这些块,
+ * 不连累主要角色、在场角色和计划。超出人数的只说明数量。
  */
-function fmtNpcContext(npcs: MemNpc[], scenes: MemScene[], here: string, locationPath: string[] | undefined, now: string): string {
-  if (!npcs.length) return '';
+export const ABSENT_NPC_LIMIT = 24;
+export const ABSENT_NPC_CHUNK = 8;
+
+/** NPC 名册分段注入:主要角色、NPC(在场与同区域)、不在场 NPC(分块)。 */
+export interface NpcContextBlocks {
+  /** [主要角色] 段;没有主要角色时为空串 */
+  main: string;
+  /** [NPC名册] 段:在场与同区域的 NPC;都没有时为空串 */
+  npc: string;
+  /** 不在场或位置未确认、有名字的 NPC,每块一个预算单元 */
+  absent: string[];
+}
+
+/**
+ * 渲染 NPC 名册注入块(主要角色与 NPC 分开,NPC 再按在场分档省 token):
+ *  - **主要角色**(important):不论在场与否都单列一段,带身份、关系、外貌、性格与即时状态(着装/状态/所在)。
+ *  - 与其他角色的长期关系(ties)全局输出一次，不受在场分档影响。
+ *  - NPC 在场(随行 / 所在地=主角当前节点)→ 全量:名 + 性别 + 年龄 + 身份 + 关系 + 性格 + 外貌 + 即时状态。
+ *  - NPC **同区域**(抬头最多一级就与主角共处)→ 轻量:名 + 性别 + 年龄 + 身份 + 关系 + 性格 + 所在地。留个性格,免得 AI
+ *    临时拉其出场时凭空 OOC;省略外貌与着装,保留身体状态以免漏掉行动限制。
+ *  - NPC 不在场(更上级祖先/更远旁支/位置未确认)→ 有名字的发一行:名 + 性别 + 关系称谓 + 身份 + 位置 + 已有好感档位(省略说明)
+ *    + 最后记录身体状态;「职业 + 字母」的无名角色不发(回到对应地点会重新在场)。最多 ABSENT_NPC_LIMIT 人,按最近出场排序。
+ * **性别在所有档都发**(包括不在场),防 AI 搞错性别;关系的**称谓头**同理(把亲哥写成陌生人同级严重)。
+ * 年龄按锚点+当前故事时间(now)推算后注入,时间跳跃自动长岁。
+ */
+export function fmtNpcContextBlocks(npcs: MemNpc[], scenes: MemScene[], here: string, locationPath: string[] | undefined, now: string): NpcContextBlocks {
+  const empty: NpcContextBlocks = { main: '', npc: '', absent: [] };
+  if (!npcs.length) return empty;
   const main: MemNpc[] = [];
   const present: MemNpc[] = [];
   const nearby: MemNpc[] = [];
@@ -416,7 +479,7 @@ function fmtNpcContext(npcs: MemNpc[], scenes: MemScene[], here: string, locatio
     const p = classifyNpcPresence(n, scenes, here, locationPath); // 与 NPC 页共用同一权威判定
     if (p === 'present') present.push(n);
     else if (p === 'nearby') nearby.push(n);
-    else absent.push(n);
+    else if (!isNpcLabelName(n.name)) absent.push(n); // 无名角色不在场时不发
   }
   const age = (n: MemNpc): string => oneLine(ageDisplay(n.age, n.ageTime, now));
   // 好感注入开关(设置页「注入设置」):关闭后名册照发,只不附带好感估计。
@@ -431,23 +494,39 @@ function fmtNpcContext(npcs: MemNpc[], scenes: MemScene[], here: string, locatio
     return condition ? ` 身体状态(最后记录):${condition}` : '';
   };
 
-  const lines: string[] = [];
-  if (npcs.some(n => aff(n))) lines.push(NPC_AFFINITY_BRIEFING);
+  // 不在场名单按最近出场排序取前 ABSENT_NPC_LIMIT 人(派生的 lastFloor,旧数据回退 updatedAt)
+  absent.sort((a, b) => (b.lastFloor ?? -1) - (a.lastFloor ?? -1) || b.updatedAt - a.updatedAt);
+  const absentShown = absent.slice(0, ABSENT_NPC_LIMIT);
+  const absentHidden = absent.length - absentShown.length;
+
+  // 好感说明与长期关系各输出一次,放在第一段有内容的名册前面
+  const preface: string[] = [];
+  if ([...main, ...present, ...nearby, ...absentShown].some(n => aff(n))) preface.push(NPC_AFFINITY_BRIEFING);
   const ties = fmtNpcTiesContext(npcs);
-  if (ties) lines.push(ties);
+  if (ties) preface.push(ties);
+  const withPreface = (header: string, body: string): string => {
+    const head = preface.length ? `${header}\n${preface.splice(0).join('\n')}` : header;
+    return `${head}\n${body}`;
+  };
+
+  const out: NpcContextBlocks = { ...empty, absent: [] };
   if (main.length) {
-    // 主要角色:状态面板优先。身份/关系留一句帮定位,外貌/性格从简(卡里通常已有),重点是即时状态。
+    // 主要角色:身份、关系、外貌、性格,加即时状态面板(着装/状态/所在)。
     const detailed = main
       .map(n => {
         const inBracket = [oneLine(n.gender), age(n), oneLine(n.title)].filter(Boolean);
         const head = inBracket.length ? `${n.name}(${inBracket.join('·')})` : n.name;
-        const rel = oneLine(n.relation) ? ` —— 与主角:${oneLine(n.relation)}` : '';
+        const profile: string[] = [];
+        if (oneLine(n.relation)) profile.push(`与主角:${oneLine(n.relation)}`);
+        if (oneLine(n.desc)) profile.push(`外貌:${oneLine(n.desc)}`);
+        if (oneLine(n.personality)) profile.push(`性格:${oneLine(n.personality)}`);
         const affinity = aff(n);
-        return `  - ${head}${rel}${affinity ? ` 〔好感估计:${affinity}〕` : ''}${npcStateTail(n, true)}`;
+        return `  - ${head}${profile.length ? ` —— ${profile.join(';')}` : ''}${affinity ? ` 〔好感估计:${affinity}〕` : ''}${npcStateTail(n, true)}`;
       })
       .join('\n');
-    lines.push(`主要角色(快照为最后记录,离场后不得推测持续或演变):\n${detailed}`);
+    out.main = withPreface('[主要角色](快照为最后记录,离场后不得推测持续或演变)', detailed);
   }
+  const npcParts: string[] = [];
   if (present.length) {
     const detailed = present
       .map(n => {
@@ -465,7 +544,7 @@ function fmtNpcContext(npcs: MemNpc[], scenes: MemScene[], here: string, locatio
         return `  - ${parts.join('')}${place}${profileStr}${npcStateTail(n, false)}`;
       })
       .join('\n');
-    lines.push(`在场角色:\n${detailed}`);
+    npcParts.push(`在场:\n${detailed}`);
   }
   if (nearby.length) {
     // 同区域保留性格及最后身体状态,省略外貌着装,不因未照面丢掉行动限制。
@@ -483,22 +562,34 @@ function fmtNpcContext(npcs: MemNpc[], scenes: MemScene[], here: string, locatio
         return `  - ${n.name}${bracket}${pers}${place}${lastCondition(n)}`;
       })
       .join('\n');
-    lines.push(`同区域角色(在附近但未必照面;需要时可让其自然登场,勿凭空改设定):\n${brief}`);
+    npcParts.push(`同区域(在附近但未必照面;需要时可让其自然登场,勿凭空改设定):\n${brief}`);
   }
-  if (absent.length) {
+  if (npcParts.length) out.npc = withPreface('[NPC名册]', npcParts.join('\n'));
+  if (absentShown.length) {
     // 不在场仍附最后身体状态;没有更新证据时不擅自清除或改变。
-    const brief = absent
-      .map(n => {
-        const inBracket = [oneLine(n.gender), relationHead(n.relation), oneLine(n.title)].filter(Boolean);
-        const bracket = inBracket.length ? `(${inBracket.join('·')})` : '';
-        const loc = npcLocationLabel(n);
-        const affinity = aff(n, false, false);
-        return `  - ${n.name}${bracket}${loc ? ` [${loc}]` : ''}${affinity ? ` 〔好感估计:${affinity}〕` : ''}${lastCondition(n)}`;
-      })
-      .join('\n');
-    lines.push(`其他已知角色(不在场或当前位置未确认,不能据旧地点断言现在的去向):\n${brief}`);
+    const lines = absentShown.map(n => {
+      const inBracket = [oneLine(n.gender), relationHead(n.relation), oneLine(n.title)].filter(Boolean);
+      const bracket = inBracket.length ? `(${inBracket.join('·')})` : '';
+      const loc = npcLocationLabel(n);
+      const affinity = aff(n, false, false);
+      return `  - ${n.name}${bracket}${loc ? ` [${loc}]` : ''}${affinity ? ` 〔好感估计:${affinity}〕` : ''}${lastCondition(n)}`;
+    });
+    if (absentHidden > 0) lines.push(`  (另有 ${absentHidden} 位较久未出场的角色未列出;未列出不代表不存在)`);
+    for (let i = 0; i < lines.length; i += ABSENT_NPC_CHUNK) {
+      const header = i === 0
+        ? '[NPC名册·其他已知角色](不在场或当前位置未确认,不能据旧地点断言现在的去向)'
+        : '[NPC名册·其他已知角色(续)]';
+      const body = lines.slice(i, i + ABSENT_NPC_CHUNK).join('\n');
+      out.absent.push(i === 0 ? withPreface(header, body) : `${header}\n${body}`);
+    }
   }
-  return lines.join('\n');
+  return out;
+}
+
+/** 前往草稿等需要整段文本的场合:三段按顺序拼起来。 */
+function fmtNpcContext(npcs: MemNpc[], scenes: MemScene[], here: string, locationPath: string[] | undefined, now: string): string {
+  const blocks = fmtNpcContextBlocks(npcs, scenes, here, locationPath, now);
+  return [blocks.main, blocks.npc, ...blocks.absent].filter(Boolean).join('\n');
 }
 
 /**
@@ -577,7 +668,7 @@ export function buildTravelDraft(target: MemScene): string {
   blocks.push(...fmtItemContext(memory.items, memory.scenes, here, locationPath));
 
   const npcBlock = fmtNpcContext(memory.npcs, memory.scenes, here, locationPath, memory.state.time);
-  if (npcBlock) blocks.push(`NPC名册:\n${npcBlock}`);
+  if (npcBlock) blocks.push(npcBlock);
 
   return [
     `前往「${destination}」，请从抵达后继续剧情。`,
@@ -648,16 +739,22 @@ export function buildStateInjectionText(): string {
   // 注:近期物品变动不在此注入。改为摘要后写进对应楼层正文 </bbs_end> 之后(见 engine.ts),
   // 窗口内全文楼层天然可见、滚出窗口自然消失 —— 符合「物品变动只在那段时间有用」的取舍。
 
-  // NPC 名册按在场分档压缩,但所有档均保留身体状态;最终仍受原注入预算与开关约束。
-  if (npcsOn) {
-    const npcBlock = fmtNpcContext(memory.npcs, memory.scenes, here, locPath, memory.state.time);
-    if (npcBlock) st.push(`NPC名册:\n${npcBlock}`);
-  }
+  // 人物分三段:主角(上方 [主角当前状态])、主要角色、NPC 名册。NPC 按在场分档压缩,但所有档均保留身体状态;
+  // 不在场的 NPC 按块放到计划之后,预算紧张时先省略它们。最终仍受原注入预算与开关约束。
+  const npcBlocks = npcsOn ? fmtNpcContextBlocks(memory.npcs, memory.scenes, here, locPath, memory.state.time) : null;
+  if (npcBlocks?.main) st.push(npcBlocks.main);
+  if (npcBlocks?.npc) st.push(npcBlocks.npc);
 
   // 信息差:依赖名册的在场判定,随名册开关;记录始终开启,这里只管注入
   if (npcsOn && inj.secrets) {
     const secretBlock = fmtSecretContext(memory.secrets, memory.npcs, memory.scenes, here, locPath, memory.state.sceneFocus, getContext()?.name1 ?? '');
     if (secretBlock) st.push(secretBlock);
+  }
+
+  // 伤势进展提醒:伤情记录满一天(没有故事时间时按回复楼层数)未更新,提醒正文模型按轻重体现进展;只提醒随正文发送的角色。
+  if (inj.injuryReminder) {
+    const reminder = buildInjuryReminder(inj.protagonist, npcsOn);
+    if (reminder) st.push(reminder);
   }
 
   const openPlans = memory.plans
@@ -669,6 +766,9 @@ export function buildStateInjectionText(): string {
   // (这里用全量 memory.plans;副API用 deriveMemory(chat, beforeIndex).plans)。
   const recentResolved = selectRecentResolvedPlans(memory.plans, apiSettings.recentResolvedPlansCount);
   if (recentResolved.length) st.push(`近期已了结(已结案,含了结方式/原因;勿当未完成再推进/重复记录):\n${fmtResolvedPlans(recentResolved)}`);
+
+  // 不在场的 NPC:按最近出场分块,排在计划之后
+  if (npcBlocks?.absent.length) st.push(...npcBlocks.absent);
 
   // 自定义变量:发当前状态 + 各字段「含义」给主模型(帮它理解并保持数值/设定连贯),明确框定为只读。
   // ⚠️ 绝不注入「变化规则」(rule)——那是给副API摘要用的「如何增删改」指令(含 set/assign 命令语法);
@@ -686,7 +786,7 @@ export function buildStateInjectionText(): string {
 
   // 状态块在有任何有意义内容时才注入(物品/计划即使空也会有「(无)」占位,
   // 但只要存在摘要或时间/地点就值得带上整块)
-  const hasProtagonist = inj.protagonist && Object.values(memory.protagonist).some(value => !!oneLine(value));
+  const hasProtagonist = inj.protagonist && PROTAGONIST_TEXT_FIELDS.some(key => !!oneLine(memory.protagonist[key]));
   const hasState = memory.state.time || memory.state.location || (inj.sceneFocus && memory.state.sceneFocus) || hasProtagonist || (itemsOn && memory.items.length) || (scenesOn && memory.scenes.length) || (npcsOn && memory.npcs.length) || openPlans.length || hasVarState || (inj.lifeDetails && memory.lifeDetails.length);
   if (!hasState) return '';
   // 首尾私密简报框定,避免主模型把状态快照当成要复述/输出的模板(正文后跟吐一份状态)

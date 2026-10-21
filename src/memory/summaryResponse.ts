@@ -1,4 +1,5 @@
 import { NpcLocationEvidenceError, validateNpcLocationEvidence } from './npcLocationEvidence';
+import { NpcRenameError, validateNpcRenames } from './npcRename';
 import { extractJsonObject } from './json';
 import { ConditionPatchError, materializeConditionPatches, type ConditionContext } from './conditionPatch';
 import type { StoredDelta, SummaryDelta } from './types';
@@ -43,6 +44,10 @@ export function parseSummaryResponse(raw: string, options: {
   /** 未附来源编号/提示的原消息，每条独立匹配，不允许跨消息拼接。 */
   sourceTexts?: readonly string[];
   conditionContext?: ConditionContext;
+  /** 本楼之前的名册名字(校验 npcs.rename);缺省时取 conditionContext 的名册 */
+  npcRoster?: readonly string[];
+  /** 主角名;改名不能改成主角 */
+  userName?: string;
   requireStateChanges: boolean;
   finalize: (delta: SummaryDelta) => StoredDelta;
 }): SummaryDelta & { summary: string } {
@@ -73,8 +78,24 @@ export function parseSummaryResponse(raw: string, options: {
   }
   validatePatchPlacement(parsed);
   if (hasPatch && !options.conditionContext) throw new SummaryResponseError('conditionPatch 缺少本楼前状态，不能静默丢弃操作。');
+  // 改名先于伤情补丁校验:同一楼改名后的角色用新名字更新伤情,要能找回改名前的旧伤情片段。
+  let renames = new Map<string, string>();
+  if (record(npcOps) && 'rename' in npcOps) {
+    const roster = options.npcRoster ?? options.conditionContext?.npcs.map(n => n.name);
+    if (!roster) throw new SummaryResponseError('npcs.rename 缺少本楼之前的名册，不能静默丢弃改名。');
+    try {
+      renames = validateNpcRenames(parsed, { roster, userName: options.userName, sourceTexts: options.sourceTexts ?? options.sourceContent ?? '' });
+    } catch (error) {
+      if (error instanceof NpcRenameError) throw new SummaryResponseError(error.message);
+      throw error;
+    }
+  }
   if (options.conditionContext) {
-    try { materializeConditionPatches(parsed, { ...options.conditionContext, sourceTexts: options.sourceTexts ?? options.conditionContext.sourceTexts }); }
+    const ctx = options.conditionContext;
+    const npcsAfterRename = renames.size
+      ? ctx.npcs.map(n => ({ ...n, name: renames.get(n.name.trim().toLowerCase()) ?? n.name }))
+      : ctx.npcs;
+    try { materializeConditionPatches(parsed, { ...ctx, npcs: npcsAfterRename, sourceTexts: options.sourceTexts ?? ctx.sourceTexts }); }
     catch (error) {
       if (error instanceof ConditionPatchError) throw new SummaryResponseError(error.message);
       throw error;
@@ -104,7 +125,8 @@ export function parseSummaryResponse(raw: string, options: {
     const group = parsed[key];
     if (!record(group)) throw new SummaryResponseError(key + ' 必须是包含操作数组的对象。');
     const cleaned = stored[key] as Record<string, unknown> | undefined;
-    const allowed = key === 'items' || key === 'npcs' ? ['add', 'update', 'remove']
+    const allowed = key === 'items' ? ['add', 'update', 'remove']
+      : key === 'npcs' ? ['add', 'update', 'rename', 'remove']
       : key === 'scenes' ? ['add', 'update', 'reparent']
       : key === 'plans' || key === 'secrets' ? ['add', 'update', 'resolve'] : ['add', 'update', 'archive', 'remove'];
     for (const [op, values] of Object.entries(group)) {

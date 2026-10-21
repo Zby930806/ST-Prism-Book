@@ -11,7 +11,7 @@ assert.equal(pkg.private, true);
 assert.equal(manifest.display_name, '棱镜宝书');
 assert.equal(manifest.version, pkg.version);
 assert.equal(manifest.js, 'dist/index.js?ver=' + encodeURIComponent(pkg.version));
-assert.equal(manifest.auto_update, false);
+assert.equal(manifest.auto_update, true);
 assert.equal(manifest.generate_interceptor, 'bbs_generateInterceptor');
 assert.equal(manifest.homePage, undefined);
 const built = await read('dist/index.js');
@@ -54,6 +54,6 @@ for (const p of paths) {
   const text = await read(p);
   for (const [kind, pattern] of checks) assert(!pattern.test(text), kind + '（只报告位置，不输出内容）：' + p);
 }
-assert.equal(paths.filter(p => /^docs\/prompts\/.*\.txt$/.test(p)).length, 10, '提示词导出必须包含10份txt');
+assert.equal(paths.filter(p => /^docs\/prompts\/.*\.txt$/.test(p)).length, 12, '提示词导出必须包含12份txt');
 console.log('发布检查通过：' + paths.length + '个受控文件；版本=' + pkg.version);
 console.log('说明：启发式敏感信息检查不等于全面秘密扫描；真实酒馆UI和模型语义需人工验收。');

@@ -179,7 +179,8 @@ export type NpcPresence = 'present' | 'nearby' | 'absent' | 'unknown';
  *  - **档案层**(title/desc/personality):「他是谁/长什么样」,高门槛、几乎不变,记一次。
  *  - **即时层**(outfit/condition):「他现在怎么样」,覆盖型、换就盖、不沉淀历史,鼓励跟剧情刷新。
  *    即时层之所以不违反「只记长期重要信息」铁律,正因它压根不进历史——和当前时间/地点同性质。
- * important=true 的「主要角色」:永远全量注入(跳过在场判定),界面/注入弱化档案、突出即时状态面板。
+ * 分档:主角不在名册里(见 MemProtagonist);important=true 的「主要角色」档案与即时状态都记,注入不受在场分档影响;
+ * 其余为「NPC 名单」,按在场分档注入。无名角色以「职业 + 字母」(如酒保A)为名,报出真名时经 npcs.rename 接续。
  */
 export interface MemNpc extends NpcAffinity {
   /** 派生证据:由位置补丁所属叶子盖章,不由模型填写。 */
@@ -213,14 +214,41 @@ export interface MemNpc extends NpcAffinity {
   outfit?: string;
   /** 当前状态/健康(即时层,覆盖型;受伤/疲惫/中毒等,无异常时空) */
   condition?: string;
-  /** 是否「主要角色」:剧情核心主演,永远全量注入,只追踪即时状态、不追档案 */
+  /** 派生锚点:当前 condition 记录时的故事内时间(重放时取所在叶子的结束时间,不由模型填写) */
+  conditionTime?: string;
+  /** 派生锚点:当前 condition 记录所在的楼层(chat 索引);故事时间未知时按其后的回复楼层数兜底 */
+  conditionFloor?: number;
+  /** 是否「主要角色」:除主角外的主要登场角色;档案与即时状态都记录,注入不受在场分档影响 */
   important?: boolean;
   /** 是否随行(随主角移动);省略/false=定点(按 location 匹配),true=同伴,永远在场 */
   follow?: boolean;
   /** 定点时的所在地(故事内地名);follow≠true 时用于与当前地点匹配。空=所在不明(离场且去向未明) */
   location?: string;
+  /** 派生:经 npcs.rename 改名前用过的名字(如「酒保A」),由旧到新;供标签查重、原文检索与界面显示 */
+  formerNames?: string[];
+  /** 派生:首次建档所在楼层(chat 索引);回看原文补档案只检索它之前的楼层 */
+  firstFloor?: number;
+  /** 派生:最近一次被叶子改动所在的楼层(chat 索引);不在场名单按它排序 */
+  lastFloor?: number;
   createdAt: number;
   updatedAt: number;
+}
+
+/** 回看原文补档案可以填写的字段(只填空,不覆盖)。 */
+export const NPC_ENRICH_FIELDS = ['gender', 'age', 'title', 'desc', 'personality'] as const;
+export type NpcEnrichField = typeof NPC_ENRICH_FIELDS[number];
+
+/**
+ * 一条回看原文补档案的结果,存在叶子的 enriched 上(不在 delta 里)。
+ * 重放时在该叶子的 delta 之后施加:只填该角色当时为空的字段,不新建角色、不覆盖已有值。
+ * 重新摘要该楼时沿用,不重复请求。
+ */
+export interface NpcEnrichment {
+  /** 角色名(该叶子之后的名字) */
+  name: string;
+  fields: Partial<Record<NpcEnrichField, string>>;
+  /** auto=摘要时自动补;manual=角色页手动补 */
+  source?: 'auto' | 'manual';
 }
 
 /**
@@ -243,6 +271,10 @@ export interface MemProtagonist {
   outfit?: string;
   /** 当前身体状态/健康(覆盖型;恢复正常后清空) */
   condition?: string;
+  /** 派生锚点:当前 condition 记录时的故事内时间(重放时取所在叶子的结束时间) */
+  conditionTime?: string;
+  /** 派生锚点:当前 condition 记录所在的楼层(chat 索引) */
+  conditionFloor?: number;
 }
 
 /**
@@ -338,6 +370,8 @@ export interface LeafExtra {
   lite?: boolean;
   /** 本楼正文与已有记录的矛盾(可选;旧叶子没有) */
   conflicts?: LeafConflict[];
+  /** 回看原文补档案的结果(可选;旧叶子没有)。重放时在 delta 之后只填空字段 */
+  enriched?: NpcEnrichment[];
   /** 叶子结构版本 */
   v: 1;
 }
@@ -593,7 +627,9 @@ export interface NpcDelta extends NpcAffinity {
   outfit?: string;
   /** 当前状态/健康(即时层,覆盖型) */
   condition?: string;
-  /** 是否「主要角色」(剧情核心主演,永远全量注入) */
+  /** 伤情锚点(仅手动 op / carryover 种子会带;模型输出经 finalizeDelta 剥离) */
+  conditionTime?: string;
+  /** 是否「主要角色」(除主角外的主要登场角色) */
   important?: boolean;
   /** 是否随行(随主角移动)。省略=定点;明确随主角同行的同伴填 true */
   follow?: boolean;
@@ -618,6 +654,14 @@ export interface ProtagonistDelta {
   appearance?: string;
   outfit?: string;
   condition?: string;
+  /** 伤情锚点(仅 carryover 种子会带;模型输出经 finalizeDelta 剥离) */
+  conditionTime?: string;
+}
+
+/** 改名:无名角色报出真名等情况,把名册中的 from 接续为 to(档案、伤情、位置随之保留)。 */
+export interface NpcRename {
+  from: string;
+  to: string;
 }
 
 /** 场景指令里单个地点的形状(AI / 手动共用) */
@@ -694,6 +738,8 @@ export interface SummaryDelta {
     add?: (NpcDelta & { locationEvidence?: string })[];
     /** 按名字更新已有 NPC(身份/描述/性格/随行/所在地) */
     update?: (NpcDelta & { conditionPatch?: ConditionPatch; locationEvidence?: string })[];
+    /** 改名接续(evidence 为本楼原句,仅校验,存储前移除);在同一叶子的 add/update/remove 之前施加 */
+    rename?: (NpcRename & { evidence?: string })[];
     /** 按名字移除(永久退场/死亡) */
     remove?: string[];
   };
@@ -768,6 +814,8 @@ export interface StoredDelta {
   npcs?: {
     add?: NpcDelta[];
     update?: NpcDelta[];
+    /** 改名接续:先于本叶子的 add/update/remove 施加 */
+    rename?: NpcRename[];
     /** 按 NPC 名移除(规范化匹配) */
     remove?: string[];
   };

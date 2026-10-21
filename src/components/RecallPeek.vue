@@ -7,6 +7,7 @@
 import EmptyState from '@/components/EmptyState.vue';
 import IconButton from '@/components/IconButton.vue';
 import RecallList from '@/components/RecallList.vue';
+import { useBackLayer } from '@/composables/useBackLayer';
 import { recallDebug } from '@/memory/vector/debug';
 import { recalledItems, recallPhase, recallStatusText } from '@/memory/vector/recallView';
 import { recallButtonRect } from '@/recallQuickReply';
@@ -82,6 +83,8 @@ watch(
   },
 );
 onUnmounted(unbind);
+// 返回键先收起速览
+useBackLayer(() => ui.recallPeekOpen, () => close(true));
 </script>
 
 <template>

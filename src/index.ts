@@ -1,10 +1,13 @@
 import { hydrateOutlineSettings } from '@/outline/settings';
 import { bindOutlineLifecycle, refreshOutlineInjection } from '@/outline/service';
 import { bindOutlineProgress } from '@/outline/progress';
+import { hydrateWorldbookSettings } from '@/worldbook/settings';
+import { bindWorldbookLifecycle } from '@/worldbook/service';
 import { hydrateNotesSettings } from '@/notes/settings';
 import { bindNotesLifecycle, refreshNotesInjection } from '@/notes/service';
 import { apiSettings, hydrateSettings } from '@/api/settings';
 import { bindEngine, handleGenerationIntercept } from '@/memory/engine';
+import { bindBacklogNoticeCleanup, stripBacklogNoticesFromPrompt } from '@/backlogNotice';
 import { runVectorRecall, shouldRecallForType } from '@/memory/vector/recall';
 import { recallDebugWrites } from '@/memory/vector/debug';
 import { armFloorRecall, beginGenerationRecall, bindFloorRecall } from '@/memory/vector/floorRecall';
@@ -39,12 +42,14 @@ const HOST_ID = 'bbs-app-host';
  * 这里委托给引擎判断「积压楼层过多」并按需拦截 + 插提示楼。挂在 globalThis 上供 ST 找到。
  */
 (globalThis as Record<string, unknown>).bbs_generateInterceptor = async (
-  _chat: unknown,
+  chat: unknown,
   _contextSize: number,
   abort: (immediately: boolean) => void,
   type: string | undefined,
 ): Promise<void> => {
   try {
+    // 「本次生成已拦截」提示只给用户看:从这次请求的消息副本里去掉,不发给正文模型(聊天本身不改)
+    stripBacklogNoticesFromPrompt(chat);
     // 作废上一轮没用上的召回登记(楼层面板的召回记录只认本次生成)
     beginGenerationRecall(type);
     // 用户选过「提醒正文模型」的记录冲突:本次生成注入一次
@@ -162,9 +167,14 @@ function bindMemoryWhenReady(attempt = 0) {
       bindOutlineLifecycle();
       // 规划推进条件:回复到达时按设置自动检查(默认关),切聊天清空结果
       bindOutlineProgress();
+      // 世界书建议:载入设置与本聊天的建议;自动建议默认关,开启后每隔 N 个 AI 楼层在正文生成结束后运行
+      hydrateWorldbookSettings();
+      bindWorldbookLifecycle();
       // 公共读取接口不依赖记忆引擎开关；聊天载入后立即暴露，供其它插件/脚本读取。
       void registerPublicInterface();
       bindEngine();
+      // 缺摘要的楼层补齐后,自动删除聊天末尾的「本次生成已拦截」提示
+      bindBacklogNoticeCleanup();
       // 时间标签:按开关注册/移除 ST 隐藏正则(幂等;开关变化的后续同步在 bindEngine 的 watch 里)
       syncTimeTagRegex();
       // 首屏:把当前聊天已有的记忆挂上注入

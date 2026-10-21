@@ -13,6 +13,7 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import Icon from '@/components/Icon.vue';
 import IconButton from '@/components/IconButton.vue';
 import { useDialogFocus } from '@/composables/useDialogFocus';
+import { useBackLayer } from '@/composables/useBackLayer';
 import { engineActiveHere } from '@/api/settings';
 import { getContext } from '@/st/context';
 import { copyText } from '@/st/clipboard';
@@ -89,6 +90,8 @@ function pickTarget(value: DiscussionTarget) {
 const open = ref(false), maximized = ref(false);
 const panelEl = ref<HTMLElement | null>(null);
 const { onDialogKeydown } = useDialogFocus(panelEl, () => open.value, () => close());
+// 返回键：草稿面板、更多操作菜单各算一层（在下方登记），都关掉后再关对话界面
+useBackLayer(() => open.value, () => close());
 function openPanel() { open.value = true; }
 function close() {
   if (sheet.value) { closeSheet(); return; }
@@ -162,6 +165,7 @@ function onMenuKeydown(event: KeyboardEvent) {
   items[(index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus();
 }
 onBeforeUnmount(() => document.removeEventListener('mousedown', onDocMousedown, true));
+useBackLayer(() => menuOpen.value, () => closeMenu(true));
 
 async function copyAll() {
   closeMenu(true);
@@ -233,6 +237,7 @@ function closeSheet() {
   sheet.value = null; sheetError.value = '';
   nextTick(() => draftButton.value?.focus({ preventScroll: true }));
 }
+useBackLayer(() => !!sheet.value, closeSheet);
 function onSheetKeydown(event: KeyboardEvent) {
   if (event.key !== 'Escape') return;
   event.preventDefault(); event.stopPropagation(); closeSheet();

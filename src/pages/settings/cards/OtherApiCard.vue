@@ -1,13 +1,14 @@
 <script setup lang="ts">
 /**
- * 札记与规划 API（提案 P3）：双子札记和创作规划各用独立的 API，设置项分别在札记页和摘要页。
- * 本卡片只读显示两者的配置状态，并提供跳转按钮：切到对应页面后展开并滚动到 API 设置（openPageSection，接收端由各页面处理）。
- * 不修改札记与规划的设置。
+ * 札记与规划 API（提案 P3）：双子札记、创作规划和世界书各用独立的 API，设置项分别在札记页、摘要页和世界书页。
+ * 本卡片只读显示三者的配置状态，并提供跳转按钮：切到对应页面后展开并滚动到 API 设置（openPageSection，接收端由各页面处理）。
+ * 不修改札记、规划和世界书的设置。
  */
 import Collapsible from '@/components/Collapsible.vue';
 import Icon from '@/components/Icon.vue';
 import { notesSettings } from '@/notes/settings';
 import { outlineSettings } from '@/outline/settings';
+import { worldbookSettings } from '@/worldbook/settings';
 import { openPageSection } from '@/state/pageFocus';
 import { computed } from 'vue';
 
@@ -23,19 +24,27 @@ const outlineApi = computed<ApiState & { mode: string }>(() =>
     ? { ...channelState(outlineSettings.channel), mode: '规划专用 API' }
     : { ...notesApi.value, mode: '使用札记的 API' },
 );
+const worldbookApi = computed<ApiState & { mode: string }>(() =>
+  worldbookSettings.apiMode === 'independent'
+    ? { ...channelState(worldbookSettings.channel), mode: '世界书专用 API' }
+    : { ...notesApi.value, mode: '使用札记的 API' },
+);
 
-/** 札记页展开并滚动到「独立 API 设置」；摘要页展开「创作规划 › 修改或重新生成规划 › 规划 API 设置」并滚动过去。 */
+/** 札记页展开并滚动到「独立 API 设置」；摘要页展开「创作规划 › 修改或重新生成规划 › 规划 API 设置」并滚动过去；世界书页展开底部「API 设置」。 */
 function goToNotesApi() {
   openPageSection('notes', 'notes-api');
 }
 function goToOutlineApi() {
   openPageSection('summary', 'outline-api');
 }
+function goToWorldbookApi() {
+  openPageSection('worldbook', 'worldbook-api');
+}
 </script>
 
 <template>
   <Collapsible class="prism-settings-card" title="札记与规划 API" :open="false">
-    <p class="prism-card-intro">双子札记和创作规划使用各自的 API，不借用摘要或正文的 API。此处显示配置状态，修改请前往对应页面。</p>
+    <p class="prism-card-intro">双子札记、创作规划和世界书使用各自的 API，不借用摘要或正文的 API。此处显示配置状态，修改请前往对应页面。</p>
     <ul class="prism-api-list">
       <li class="prism-api-row">
         <div class="prism-api-text">
@@ -62,8 +71,20 @@ function goToOutlineApi() {
           <Icon name="plans" /> 前往规划设置
         </button>
       </li>
+      <li class="prism-api-row">
+        <div class="prism-api-text">
+          <span class="bbs-field-label">世界书</span>
+          <span class="prism-api-meta">
+            <span class="prism-api-state" :class="worldbookApi.ready ? 'is-ready' : 'is-missing'">{{ worldbookApi.ready ? '已设置' : '未设置' }}</span>
+            <span class="prism-api-model">{{ worldbookApi.mode }} · {{ worldbookApi.text }}</span>
+          </span>
+        </div>
+        <button class="bbs-btn bbs-btn-sm" type="button" @click="goToWorldbookApi">
+          <Icon name="worldbook" /> 前往世界书设置
+        </button>
+      </li>
     </ul>
-    <p class="bbs-field-hint">札记 API 位于札记页底部「独立 API 设置」；规划 API 位于摘要页「创作规划 › 修改或重新生成规划 › 规划 API 设置」，默认使用札记的 API。</p>
+    <p class="bbs-field-hint">札记 API 位于札记页底部「独立 API 设置」；规划 API 位于摘要页「创作规划 › 修改或重新生成规划 › 规划 API 设置」；世界书 API 位于世界书页底部「API 设置」。规划和世界书默认使用札记的 API。</p>
   </Collapsible>
 </template>
 

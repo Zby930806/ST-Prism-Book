@@ -136,7 +136,7 @@ describe('summary fact workflow', () => {
 
   it('keeps specialized rules in the system rather than duplicating a full checklist', () => {
     const system = buildSummaryPrompt(args).system;
-    for (const rule of [RULE_ITEMS, RULE_SCENES, RULE_NPCS, RULE_PLANS, RULE_SCENE_FOCUS]) expect(system).toContain(rule.replaceAll('{{user}}', args.user));
+    for (const rule of [RULE_ITEMS, RULE_SCENES, RULE_NPCS, RULE_PLANS, RULE_SCENE_FOCUS]) expect(system).toContain(rule.replaceAll('{{user}}', args.user).replaceAll('{{char}}', args.char));
     expect(THINKING_CHECKLIST).toContain('物品/计划/变量按本楼新事件更新记录,不重复结算');
     expect(THINKING_CHECKLIST).toContain('暂时离场不删除NPC');
     expect(THINKING_CHECKLIST).toContain('已取消/失败与已完成分清');
@@ -274,11 +274,13 @@ describe('relationship retention and departure protocol', () => {
 
   it('keeps the briefing end short while retaining each reminder', () => {
     // 每次生成正文都会发并占注入预算:只留结论,但位置、计划、伤势、知情范围的提醒都要在。
+    // 伤势:离场本身不等于康复或恶化,但不再要求时间流逝后一直维持原伤(由伤势进展提醒配合)。
     expect(Array.from(MEMORY_BRIEFING_END).length).toBeLessThan(260);
     for (const reminder of ['自然续写', '不要复述简报', '最后确认的位置可能已变', '不等于马上执行', '遵守其中的暂缓和前提',
-      '离场和时间流逝不是康复或恶化的证据', '人物只知道自己经历或得知的事', '文风跟随角色卡']) {
+      '离场不等于康复或恶化', '伤势随时间按轻重好转', '人物只知道自己经历或得知的事', '文风跟随角色卡']) {
       expect(MEMORY_BRIEFING_END).toContain(reminder);
     }
+    expect(MEMORY_BRIEFING_END).not.toContain('时间流逝不是康复');
   });
 });
 

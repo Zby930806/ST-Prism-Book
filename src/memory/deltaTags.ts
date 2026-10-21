@@ -6,9 +6,9 @@ import { describeVarOp, planContentById, secretContentById } from './apply';
 import { fmtNpcAffinity } from './npcRelations';
 import type { ItemDelta, NpcDelta, StoredDelta, VarOp } from './types';
 
-export type DeltaOp = 'add' | 'update' | 'remove' | 'resolve' | 'reopen' | 'reparent';
+export type DeltaOp = 'add' | 'update' | 'remove' | 'resolve' | 'reopen' | 'reparent' | 'rename';
 // 单字符曾让人费解(「改」是什么?),改用明确词条 + 语义色徽标(见 .bbs-fp-op 的 op-* 着色)
-export const DELTA_OP_LABEL: Record<DeltaOp, string> = { add: '新增', update: '更新', remove: '移除', resolve: '了结', reopen: '重启', reparent: '迁移' };
+export const DELTA_OP_LABEL: Record<DeltaOp, string> = { add: '新增', update: '更新', remove: '移除', resolve: '了结', reopen: '重启', reparent: '迁移', rename: '改名' };
 
 // key 用于定位到 delta 里的具体桶+序号,如 'item:add:0'
 // text=主文本(名字/标题,一行),sub=副文本(描述/字段细节,淡色小字另起一行)。
@@ -56,6 +56,7 @@ function fmtNpc(x: NpcDelta): { text: string; sub?: string } {
   if (x.location) parts.push(`位置:${x.location}`);
   if (x.follow === true) parts.push('随行');
   if (x.important === true) parts.push('主要角色');
+  else if (x.important === false) parts.push('改为 NPC');
   return { text, sub: parts.length ? parts.join(' · ') : undefined };
 }
 
@@ -75,6 +76,8 @@ function npcTags(d: Delta): DeltaTag[] {
   const out: DeltaTag[] = [];
   (np.add ?? []).forEach((x, i) => out.push({ key: `npc:add:${i}`, op: 'add', bucket: 'add', idx: i, ...fmtNpc(x), editable: true }));
   (np.update ?? []).forEach((x, i) => out.push({ key: `npc:update:${i}`, op: 'update', bucket: 'update', idx: i, ...fmtNpc(x), editable: true }));
+  // 改名接续:只可删除,不就地改名(改名后的其他字段在 update 里)
+  (np.rename ?? []).forEach((x, i) => out.push({ key: `npc:rename:${i}`, op: 'rename', bucket: 'rename', idx: i, text: `${x.from} → ${x.to}`, sub: '档案、伤情和位置随之接续', editable: false }));
   (np.remove ?? []).forEach((name, i) => out.push({ key: `npc:remove:${i}`, op: 'remove', bucket: 'remove', idx: i, text: name, editable: true }));
   return out;
 }
@@ -90,6 +93,7 @@ function protagonistTags(d: Delta): DeltaTag[] {
     appearance: '外貌',
     outfit: '着装',
     condition: '状态',
+    conditionTime: '伤情记录时间',
   };
   const parts = (Object.keys(labels) as Array<keyof typeof protagonist>)
     .filter(key => protagonist[key] !== undefined)

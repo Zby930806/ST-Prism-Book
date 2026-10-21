@@ -2,6 +2,7 @@ import { reactive } from 'vue';
 import { getContext, type STContext } from '@/st/context';
 import { sourceHash } from '@/notes/source';
 import { validateOutlineContent } from './protocol';
+import { OUTLINE_LIMITS } from './limits';
 import { captureOutlineSource, sameOutlineChat, type OutlineSource } from './source';
 import { renderOutlineGuidance } from './injection';
 import type { OutlineActive, OutlineContent, OutlineData, OutlineDraft } from './types';
@@ -151,6 +152,18 @@ export async function setOutlineChapter(index: number): Promise<void> {
   // 历史失效后不因切章自动恢复；末章结束只改变规划进度，不写剧情事实。
   if (!outlineSourceCurrent(active) || index === active.content.chapters.length) active.enabled = false;
   active.currentChapter = index;
+  renderOutlineGuidance(active);
+  await persist(next, ctx);
+}
+/** 手动修改已确认规划中某一阶段的推进条件:只改这一项,阶段进度、启用状态和参考正文都不变;按大纲字段上限校验。 */
+export async function setOutlineExitCriteria(index: number, text: string): Promise<void> {
+  const ctx = editable(); const next = snapshot(); const active = next.active;
+  if (!active || !Number.isInteger(index) || index < 0 || index >= active.content.chapters.length) throw new Error('大纲章节序号无效。');
+  const value = text.trim();
+  if (!value) throw new Error('推进条件不能为空。');
+  if (value.length > OUTLINE_LIMITS.exitCriteria) throw new Error(`推进条件最多 ${OUTLINE_LIMITS.exitCriteria} 字，请精简。`);
+  active.content.chapters[index] = { ...active.content.chapters[index], exitCriteria: value };
+  active.content = validateOutlineContent(active.content);
   renderOutlineGuidance(active);
   await persist(next, ctx);
 }

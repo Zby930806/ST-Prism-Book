@@ -53,7 +53,7 @@ const timeTagOverBudget = computed(() => apiSettings.autoSummaryEnabled && !fitT
       <template #hint>当前地点及其上级地点（详细），以及其他已知地点（仅名称）。<strong>NPC 名册和物品信息依赖场景判断在场与可及范围，关闭此项后二者也不发送。</strong></template>
     </SettingRow>
 
-    <SettingRow label="NPC 名册" hint="在场角色发送完整信息，同一区域的从简，不在场的只发送名字和身份。需开启场景信息。">
+    <SettingRow label="NPC 名册" hint="主要角色发送档案与当前状态；NPC 在场的发送完整信息，同一区域的从简，不在场的只发送有名字者的名字和身份。需开启场景信息。">
       <input v-model="apiSettings.injection.npcs" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.scenes" />
     </SettingRow>
 
@@ -67,6 +67,14 @@ const timeTagOverBudget = computed(() => apiSettings.autoSummaryEnabled && !fitT
 
     <SettingRow label="信息差" hint="提醒在场的角色哪些事不知情，避免其说出或依据自己不知道的事行动。信息差始终记录，可在角色页查看；需要打开 NPC 名册。">
       <input v-model="apiSettings.injection.secrets" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.npcs || !apiSettings.injection.scenes" />
+    </SettingRow>
+
+    <SettingRow
+      label="伤势进展提醒"
+      hint="主角、主要角色及在场、同区域角色的伤情记录超过一天未更新时，提醒正文模型按伤势轻重写出恢复进展；没有故事时间时按回复楼层数计算。伤情记录更新后重新计时。"
+      details="只提醒随正文发送的角色：主角需开启「主角信息」，其他角色需开启「NPC 名册」。超过七天或三十天时提醒措辞加重。提醒只影响正文模型看到的内容，伤情记录本身仍以正文为准更新。"
+    >
+      <input v-model="apiSettings.injection.injuryReminder" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode" />
     </SettingRow>
   </Collapsible>
 </template>

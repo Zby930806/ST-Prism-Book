@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/* 摘要设置：摘要篇幅、全文保留范围、总结合并频率和失败重试次数。 */
+/* 摘要设置：摘要篇幅、全文保留范围、总结合并频率、失败重试次数和回看原文补全角色档案。 */
 import BbsSelect from '@/components/BbsSelect.vue';
 import Collapsible from '@/components/Collapsible.vue';
 import {
@@ -24,7 +24,7 @@ function onSummaryMaxCharsChange() {
 
 <template>
   <Collapsible class="prism-settings-card" title="摘要设置" :open="false">
-    <p class="prism-card-intro">摘要篇幅、全文保留范围、总结合并频率和失败重试次数。</p>
+    <p class="prism-card-intro">摘要篇幅、全文保留范围、总结合并频率、失败重试次数和角色档案补全。</p>
     <SettingRow label="启用自动摘要" hint="启用后自动摘要并隐藏旧楼层，同时启用正文时间标签（剧情时间的锚点）和积压拦截（有楼层漏摘时拦截发送并提示补摘）。">
       <input v-model="apiSettings.autoSummaryEnabled" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" />
     </SettingRow>
@@ -75,6 +75,13 @@ function onSummaryMaxCharsChange() {
     </SettingRow>
     <SettingRow kind="num" label="失败重试次数" hint="摘要或总结失败（报错或返回内容无法解析）时的最多重试次数。密钥错误、额度不足、输出被截断等重试无效的错误不重试。填 0 不重试，默认 1。">
       <input v-model.number="apiSettings.summaryMaxRetries" class="bbs-input bbs-num" type="number" min="0" />
+    </SettingRow>
+    <SettingRow
+      label="回看原文补全角色档案"
+      hint="摘要时，新登场或被提到的角色缺外貌、身份或性别，从之前的楼层查找原文补全，每次补全多发送一个请求。关闭后不再自动补全，已补全的内容保留；角色卡上的「从原文补全」照常可用。"
+      details="只检索该角色首次记录之前最近 40 个回复楼层（含已隐藏的楼层，不含番外楼），没有找到原文时不发送请求。每个角色自动补全一次，失败最多再试一次，失败不影响摘要。请求使用摘要任务的 API。"
+    >
+      <input v-model="apiSettings.npcEnrichAuto" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" />
     </SettingRow>
     <p class="bbs-field-hint">批量补摘按楼层顺序逐楼进行，每楼的人物、物品、计划保存后才处理下一楼；遇到失败即停止，取消在当前楼层完成后生效。</p>
   </Collapsible>

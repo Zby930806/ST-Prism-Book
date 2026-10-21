@@ -3,12 +3,18 @@ import Icon from '@/components/Icon.vue';
 import { PAGES } from '@/pages/registry';
 import { closeBook, ui } from '@/state/ui';
 import { updateState } from '@/memory/update';
+import { pendingCount } from '@/worldbook/service';
+import { computed } from 'vue';
 
 const props = defineProps<{ placement: 'top' | 'bottom'; narrow?: boolean }>();
 
-// 设置页有可用更新时,在「设置」导航项上亮一个红点角标(提示用户进设置页更新)。
-function showUpdateDot(id: string): boolean {
-  return id === 'settings' && updateState.available;
+// 设置页有可用更新时,在「设置」导航项上亮一个红点角标(提示用户进设置页更新);
+// 世界书有待审核的建议时,在「世界书」导航项上亮角标。
+const worldbookPending = computed(() => pendingCount());
+function dotNote(id: string): string {
+  if (id === 'settings' && updateState.available) return '有可用更新';
+  if (id === 'worldbook' && worldbookPending.value > 0) return worldbookPending.value + ' 条建议待审核';
+  return '';
 }
 
 // 移动端:再点一下当前页的导航按钮即关闭整窗(省得去够右上角的 ×);非当前页正常切页。
@@ -30,15 +36,15 @@ function onNavClick(id: string) {
       class="bbs-nav-item"
       :class="{ 'is-active': ui.activePage === p.id }"
       type="button"
-      :title="showUpdateDot(p.id) ? `${p.label}（有可用更新）` : p.label"
-      :aria-label="showUpdateDot(p.id) ? `${p.label}（有可用更新）` : p.label"
+      :title="dotNote(p.id) ? `${p.label}（${dotNote(p.id)}）` : p.label"
+      :aria-label="dotNote(p.id) ? `${p.label}（${dotNote(p.id)}）` : p.label"
       :aria-current="ui.activePage === p.id ? 'page' : undefined"
       @click="onNavClick(p.id)"
     >
       <span class="bbs-nav-icon-wrap">
         <Icon :name="p.id" class="bbs-nav-icon" />
-        <!-- 有可用更新:设置项亮红点角标 -->
-        <span v-if="showUpdateDot(p.id)" class="bbs-nav-dot" aria-hidden="true"></span>
+        <!-- 有可用更新、有待审核的世界书建议:亮角标 -->
+        <span v-if="dotNote(p.id)" class="bbs-nav-dot" :class="{ 'is-accent': p.id === 'worldbook' }" aria-hidden="true"></span>
       </span>
       <!-- 所有导航位置保留中文标签；窄屏采用上下图文，避免仅凭图标辨识 -->
       <span class="bbs-nav-label">{{ p.label }}</span>
@@ -47,7 +53,8 @@ function onNavClick(id: string) {
 </template>
 
 <style scoped>
-.bbs-nav { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:6px; flex:0 0 auto; padding:9px 24px; background:var(--bbs-bg); }
+/* 列数随注册的页面数变化（不写死列数），各项等宽。 */
+.bbs-nav { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); gap:6px; flex:0 0 auto; padding:9px 24px; background:var(--bbs-bg); }
 .bbs-nav.is-top { border-bottom:1px solid var(--bbs-line); }
 .bbs-nav-item { display:flex; align-items:center; justify-content:center; gap:8px; position:relative; min-width:0; min-height:44px; padding:8px; border:0; border-radius:8px; background:transparent; color:var(--bbs-ink-soft); cursor:pointer; font:500 13px/1.4 var(--bbs-font-sans); }
 .bbs-nav-item:hover { background:var(--bbs-surface-2); color:var(--bbs-ink); }
@@ -55,6 +62,7 @@ function onNavClick(id: string) {
 .bbs-nav-icon { font-size:19px; }
 .bbs-nav-icon-wrap { position:relative; display:inline-flex; align-items:center; justify-content:center; }
 .bbs-nav-dot { position:absolute; top:-3px; right:-4px; width:6px; height:6px; border-radius:50%; background:var(--bbs-danger); }
+.bbs-nav-dot.is-accent { background:var(--bbs-accent); box-shadow:0 0 0 2px var(--bbs-bg); }
 .bbs-nav-item:focus-visible { outline:2px solid var(--bbs-accent); outline-offset:2px; }
 .bbs-nav.is-bottom { border-top:1px solid var(--bbs-line); padding-bottom:max(8px,env(safe-area-inset-bottom)); }
 .bbs-nav.is-narrow { gap:0; padding:7px 8px; }

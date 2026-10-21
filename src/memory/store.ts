@@ -152,10 +152,11 @@ export function recomputeDerived(): void {
   memory.state.location = d.state.location;
   memory.state.locationPath = d.state.locationPath;
   memory.state.sceneFocus = d.state.sceneFocus;
-  // 年龄(age+ageTime 锚点对)也在 protagonist 上,漏拷会让 UI/注入永远读不到主角年龄
-  for (const key of ['gender', 'age', 'ageTime', 'identity', 'appearance', 'outfit', 'condition'] as const) {
+  // 年龄(age+ageTime 锚点对)也在 protagonist 上,漏拷会让 UI/注入永远读不到主角年龄;伤情锚点同理
+  for (const key of ['gender', 'age', 'ageTime', 'identity', 'appearance', 'outfit', 'condition', 'conditionTime'] as const) {
     memory.protagonist[key] = d.protagonist[key];
   }
+  memory.protagonist.conditionFloor = d.protagonist.conditionFloor;
   memory.items.splice(0, memory.items.length, ...d.items);
   memory.plans.splice(0, memory.plans.length, ...d.plans);
   memory.scenes.splice(0, memory.scenes.length, ...d.scenes);

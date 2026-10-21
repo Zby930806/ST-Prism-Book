@@ -11,6 +11,7 @@ import Icon from '@/components/Icon.vue';
 import { modalHost } from '@/state/ui';
 import { ref } from 'vue';
 import { useDialogFocus } from '@/composables/useDialogFocus';
+import { useBackLayer } from '@/composables/useBackLayer';
 
 const props = withDefaults(
   defineProps<{
@@ -50,6 +51,8 @@ const emit = defineEmits<{
 
 const dialogEl = ref<HTMLElement | null>(null);
 const { onDialogKeydown } = useDialogFocus(dialogEl, () => props.open, () => { if (!props.busy) cancel(); });
+// 返回键等同于取消；处理中（busy）不关闭，返回键继续拦截
+useBackLayer(() => props.open, () => { if (!props.busy) cancel(); });
 
 function cancel() {
   if (props.busy) return;

@@ -8,8 +8,8 @@ import { memory, memoryWriteIssue, assertMemoryWritable, recomputeDerived, saveM
 import { readItemsTagText, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { scheduleVectorIndex } from './vector';
 import { invalidateRecallCache } from './vector/cache';
-import { createEmptyMemory } from './types';
-import type { BaibaiMemory, ItemDelta, ItemLogEntry, JsonValue, LeafExtra, LifeDetailAdd, LifeDetailUpdate, MemLifeDetail, MemNpc, MemPlan, MemScene, MemSecret, MemSummary, NpcAffinity, NpcDelta, NpcPresence, PlanResolveItem, PlanUpdate, ProtagonistDelta, SceneDelta, SceneFocus, SceneOp, SceneReparent, SecretAdd, SecretUpdate, StoredDelta, SummaryDelta, VarOp, VarTemplate, VarTier } from './types';
+import { createEmptyMemory, NPC_ENRICH_FIELDS } from './types';
+import type { BaibaiMemory, ItemDelta, ItemLogEntry, JsonValue, LeafExtra, LifeDetailAdd, LifeDetailUpdate, MemLifeDetail, MemNpc, MemPlan, MemScene, MemSecret, MemSummary, NpcAffinity, NpcDelta, NpcEnrichment, NpcPresence, NpcRename, PlanResolveItem, PlanUpdate, ProtagonistDelta, SceneDelta, SceneFocus, SceneOp, SceneReparent, SecretAdd, SecretUpdate, StoredDelta, SummaryDelta, VarOp, VarTemplate, VarTier } from './types';
 
 // 供既有调用方继续从 apply 取在场类型;定义在 types.ts 与名册展示共用。
 export type { NpcPresence } from './types';
@@ -203,12 +203,24 @@ function cleanNpcDelta(raw: unknown, preserveEvidence = false): NpcDelta | null 
       locationStale: optBool(raw.locationStale),
       lastKnownLocation: isRecord(raw.lastKnownLocation) && typeof raw.lastKnownLocation.place === 'string' && raw.lastKnownLocation.place.trim()
         ? { place: raw.lastKnownLocation.place.trim(), time: scalarText(raw.lastKnownLocation.time), leafId: scalarText(raw.lastKnownLocation.leafId) } : undefined,
+      // 伤情锚点同属内部证据:手动改名、带数据建新对话时沿用原记录时间;模型输出不得自带。
+      conditionTime: optText(raw.conditionTime),
     } : {}),
   };
 }
 
 function cleanNpcList(v: unknown, preserveEvidence = false): NpcDelta[] {
   return arr(v).map(n => cleanNpcDelta(n, preserveEvidence)).filter((x): x is NpcDelta => !!x);
+}
+
+/** 改名:from/to 都要非空且不同;evidence 只用于解析校验,这里丢弃。 */
+function cleanNpcRenameList(v: unknown): NpcRename[] {
+  return arr(v).flatMap(raw => {
+    if (!isRecord(raw)) return [];
+    const from = scalarText(raw.from);
+    const to = scalarText(raw.to);
+    return from && to && norm(from) !== norm(to) ? [{ from, to }] : [];
+  });
 }
 
 /**
@@ -312,13 +324,16 @@ function cleanSecretUpdateList(v: unknown): SecretUpdate[] {
   return arr(v).map(cleanSecretUpdate).filter((x): x is SecretUpdate => !!x);
 }
 
-function cleanProtagonistDelta(raw: unknown): ProtagonistDelta | null {
+/** internal=true 时保留伤情锚点(带数据建新对话、手动编辑);模型输出走 finalizeDelta,不带锚点。 */
+function cleanProtagonistDelta(raw: unknown, internal = false): ProtagonistDelta | null {
   if (!isRecord(raw)) return null;
   const out: ProtagonistDelta = {};
   for (const key of ['gender', 'age', 'ageTime', 'identity', 'appearance', 'outfit', 'condition'] as const) {
     const value = patchText(raw[key]);
     if (value !== undefined) out[key] = value;
   }
+  const conditionTime = internal ? optText(raw.conditionTime) : undefined;
+  if (conditionTime) out.conditionTime = conditionTime;
   return Object.keys(out).length ? out : null;
 }
 
@@ -380,7 +395,7 @@ function cleanStoredDelta(raw: StoredDelta, seed = false): StoredDelta {
   if (raw.locationPath !== undefined) out.locationPath = locationPath;
   const sceneFocus = cleanSceneFocus(raw.sceneFocus);
   if (sceneFocus !== undefined) out.sceneFocus = sceneFocus;
-  const protagonist = cleanProtagonistDelta(raw.protagonist);
+  const protagonist = cleanProtagonistDelta(raw.protagonist, true);
   if (protagonist) out.protagonist = protagonist;
 
   if (isRecord(raw.items)) {
@@ -413,9 +428,11 @@ function cleanStoredDelta(raw: StoredDelta, seed = false): StoredDelta {
     const npcs: NonNullable<StoredDelta['npcs']> = {};
     const add = cleanNpcList(raw.npcs.add, true);
     const update = cleanNpcList(raw.npcs.update, true);
+    const rename = cleanNpcRenameList(raw.npcs.rename);
     const remove = cleanTextList(raw.npcs.remove, ['name', 'npc', 'id']);
     if (add.length) npcs.add = add;
     if (update.length) npcs.update = update;
+    if (rename.length) npcs.rename = rename;
     if (remove.length) npcs.remove = remove;
     if (Object.keys(npcs).length) out.npcs = npcs;
   }
@@ -481,7 +498,7 @@ export function legacyDeltaIssue(raw: unknown): string | null {
   }
   const operations: Record<string, string[]> = {
     items: ['add', 'update', 'remove'], scenes: ['add', 'update', 'reparent', 'remove', 'ops'],
-    npcs: ['add', 'update', 'remove'], plans: ['add', 'update', 'resolve', 'remove', 'reopen'],
+    npcs: ['add', 'update', 'rename', 'remove'], plans: ['add', 'update', 'resolve', 'remove', 'reopen'],
     lifeDetails: ['add', 'update', 'archive', 'remove'], secrets: ['add', 'update', 'resolve', 'remove', 'reopen'],
   };
   for (const [key, names] of Object.entries(operations)) {
@@ -911,15 +928,44 @@ function applyNpcPlacement(n: MemNpc, src: NpcDelta, evidence: { id: string; tim
   }
 }
 
+/** 伤情锚点所需的叶子信息:故事内时间与楼层(chat 索引)。 */
+interface ConditionStamp {
+  time: string;
+  floor?: number;
+}
+
+/**
+ * 伤情记录一有变化就盖派生锚点(时间取叶子的故事内时间,楼层取叶子所在楼层);清空则去掉锚点。
+ * 锚点只由程序计算;src.conditionTime 只来自手动改名或带数据建新对话,用来沿用原记录时间。
+ */
+function stampCondition(
+  n: { condition?: string; conditionTime?: string; conditionFloor?: number },
+  before: string | undefined,
+  src: { conditionTime?: string },
+  stamp: ConditionStamp,
+): void {
+  if (n.condition === before) return;
+  if (!n.condition) {
+    delete n.conditionTime;
+    delete n.conditionFloor;
+    return;
+  }
+  const time = src.conditionTime?.trim() || stamp.time;
+  if (time) n.conditionTime = time; else delete n.conditionTime;
+  if (typeof stamp.floor === 'number') n.conditionFloor = stamp.floor; else delete n.conditionFloor;
+}
+
 /**
  * 把 delta 里的「即时层」状态(outfit/condition)与 important 施加到 NPC 上。
  * 与档案层(desc/title)不同:即时层一旦 delta 给了就**直接覆盖**(它本就是当前快照,
  * 不像 desc 那样「实质变化才动」);add 与 update 同样处理,确保换装/受伤能即时刷新。
  */
-function applyNpcState(n: { outfit?: string; condition?: string; important?: boolean }, src: NpcDelta): void {
+function applyNpcState(n: MemNpc, src: NpcDelta, stamp: ConditionStamp): void {
+  const before = n.condition;
   if (typeof src.outfit === 'string') n.outfit = src.outfit.trim() || undefined;
   if (typeof src.condition === 'string') n.condition = src.condition.trim() || undefined;
   if (typeof src.important === 'boolean') n.important = src.important || undefined;
+  stampCondition(n, before, src, stamp);
 }
 
 /**
@@ -938,12 +984,81 @@ function applyAge(n: { age?: string; ageTime?: string }, src: { age?: string; ag
   }
 }
 
-/** 主角档案是纯覆盖快照;空字符串表示清除旧值。年龄走锚点机制(applyAge)。 */
-function applyProtagonistState(target: BaibaiMemory['protagonist'], src: ProtagonistDelta, storyTime: string): void {
+/** 主角档案是纯覆盖快照;空字符串表示清除旧值。年龄走锚点机制(applyAge),伤情记录变化时盖锚点。 */
+function applyProtagonistState(target: BaibaiMemory['protagonist'], src: ProtagonistDelta, storyTime: string, floor?: number): void {
+  const before = target.condition;
   for (const key of ['gender', 'identity', 'appearance', 'outfit', 'condition'] as const) {
     if (typeof src[key] === 'string') target[key] = src[key]!.trim() || undefined;
   }
   applyAge(target, src, storyTime);
+  stampCondition(target, before, src, { time: storyTime, floor });
+}
+
+/**
+ * 改名接续:名册里的 from 换成 to,其余档案、伤情、位置、好感与派生锚点原样保留,旧名记进 formerNames。
+ * 同步派生引用:生活小档案的所属人物、信息差的知情/不知情名单。to 已被别人占用或 from 不存在时跳过(不合并两条记录)。
+ */
+function renameNpcInMemory(mem: BaibaiMemory, r: NpcRename, t: number, floor?: number): void {
+  const from = r.from.trim();
+  const to = r.to.trim();
+  if (!from || !to) return;
+  const npc = mem.npcs.find(n => n.id === npcId(from));
+  if (!npc) return;
+  const toId = npcId(to);
+  if (toId !== npc.id && mem.npcs.some(n => n.id === toId)) return;
+  const oldName = npc.name;
+  npc.id = toId;
+  npc.name = to;
+  if (norm(oldName) !== norm(to)) {
+    npc.formerNames = [...(npc.formerNames ?? []).filter(n => norm(n) !== norm(oldName) && norm(n) !== norm(to)), oldName];
+  }
+  npc.updatedAt = t;
+  if (typeof floor === 'number') npc.lastFloor = floor;
+  const same = (name: string) => norm(name) === norm(oldName);
+  for (const d of mem.lifeDetails) {
+    const subject = lifeDetailSubject(d);
+    if (subject !== 'user' && same(subject)) d.subject = to;
+  }
+  for (const s of mem.secrets) {
+    s.knownBy = s.knownBy.map(name => (same(name) ? to : name));
+    s.unaware = s.unaware.map(name => (same(name) ? to : name));
+  }
+}
+
+/** 清洗叶子上的补档结果:名字非空、字段限定在可补字段内的非空字符串。 */
+export function cleanEnrichment(v: unknown): NpcEnrichment[] {
+  return arr(v).flatMap(raw => {
+    if (!isRecord(raw)) return [];
+    const name = scalarText(raw.name);
+    if (!name || !isRecord(raw.fields)) return [];
+    const fields: NpcEnrichment['fields'] = {};
+    for (const key of NPC_ENRICH_FIELDS) {
+      const value = scalarText(raw.fields[key]);
+      if (value) fields[key] = value;
+    }
+    if (!Object.keys(fields).length) return [];
+    return [{ name, fields, ...(raw.source === 'manual' || raw.source === 'auto' ? { source: raw.source } : {}) }];
+  });
+}
+
+/**
+ * 回看原文补档案:在叶子 delta 之后施加,只填该角色此刻为空的字段,不新建角色、不覆盖已有值。
+ * 年龄同样只补空,锚点取该叶子的故事内时间。
+ */
+function applyEnrichment(mem: BaibaiMemory, raw: unknown, storyTime: string): void {
+  for (const e of cleanEnrichment(raw)) {
+    const npc = mem.npcs.find(n => n.id === npcId(e.name));
+    if (!npc) continue;
+    for (const key of NPC_ENRICH_FIELDS) {
+      const value = e.fields[key];
+      if (!value) continue;
+      if (key === 'age') {
+        if (!npc.age) applyAge(npc, { age: value }, storyTime);
+      } else if (!npc[key]) {
+        npc[key] = value;
+      }
+    }
+  }
 }
 
 /**
@@ -1315,7 +1430,7 @@ export function finalizeVarOps(raw: unknown): VarOp[] {
   return out;
 }
 
-function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: string; createdAt: number; time: string; seed?: boolean }): void {
+function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: string; createdAt: number; time: string; seed?: boolean; floor?: number }): void {
   const t = leaf.createdAt;
   const logTime = leaf.time;
   const log = (kind: ItemLogEntry['kind'], name: string, from?: number, to?: number): void => {
@@ -1344,7 +1459,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
   if (oldScene !== newScene || crossedDay) {
     for (const npc of mem.npcs) if (!npc.follow) npc.locationStale = true;
   }
-  if (d.protagonist) applyProtagonistState(mem.protagonist, d.protagonist, logTime || mem.state.time);
+  if (d.protagonist) applyProtagonistState(mem.protagonist, d.protagonist, logTime || mem.state.time, leaf.floor);
 
   // 局势卡:undefined=不动;null=清空;对象=整卡覆盖,并盖上本叶子的故事内时间
   if (d.sceneFocus !== undefined) {
@@ -1431,11 +1546,22 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
     }
   }
 
-  // NPC(指令型:add 新登场 / update 改身份位置 / remove 退场)。施加序:add → update → remove。
+  // NPC(指令型:rename 改名接续 / add 新登场 / update 改身份位置 / remove 退场)。施加序:rename → add → update → remove。
+  // rename 先行:同一叶子里对改名角色的其他操作用的是新名字(解析时已校验)。
   // update 对不存在的名字按 upsert 创建,兼容迁移后名册为空、但后续摘要误产 update 的历史数据。
   if (d.npcs) {
     // 年龄锚点用「本叶子的故事内时间」;叶子无时间则退当前状态时间(delta.time 已在上方生效)
     const npcTime = logTime || mem.state.time;
+    const stamp: ConditionStamp = { time: npcTime, floor: leaf.floor };
+    const touch = (n: MemNpc): void => {
+      n.updatedAt = t;
+      if (typeof leaf.floor === 'number') n.lastFloor = leaf.floor;
+    };
+    const created = (n: MemNpc): MemNpc => {
+      if (typeof leaf.floor === 'number') { n.firstFloor = leaf.floor; n.lastFloor = leaf.floor; }
+      return n;
+    };
+    for (const r of d.npcs.rename ?? []) renameNpcInMemory(mem, r, t, leaf.floor);
     for (const add of d.npcs.add ?? []) {
       if (!add?.name?.trim()) continue;
       const id = npcId(add.name);
@@ -1453,11 +1579,11 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
         if (add.desc && !ex.desc) ex.desc = add.desc.trim();
         if (add.personality && !ex.personality) ex.personality = add.personality.trim();
         applyNpcAffinity(ex, add, true);
-        applyNpcState(ex, add);
+        applyNpcState(ex, add, stamp);
         applyNpcPlacement(ex, add, leaf);
-        ex.updatedAt = t;
+        touch(ex);
       } else {
-        const npc: BaibaiMemory['npcs'][number] = {
+        const npc: BaibaiMemory['npcs'][number] = created({
           id,
           name: add.name.trim(),
           gender: add.gender?.trim() || undefined,
@@ -1468,10 +1594,10 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
           personality: add.personality?.trim() || undefined,
           createdAt: t,
           updatedAt: t,
-        };
+        });
         applyNpcAffinity(npc, add);
         applyAge(npc, add, npcTime);
-        applyNpcState(npc, add);
+        applyNpcState(npc, add, stamp);
         applyNpcPlacement(npc, add, leaf);
         mem.npcs.push(npc);
       }
@@ -1481,7 +1607,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
       const id = npcId(upd.name);
       let n = mem.npcs.find(x => x.id === id);
       if (!n) {
-        n = {
+        n = created({
           id,
           name: upd.name.trim(),
           gender: upd.gender?.trim() || undefined,
@@ -1492,7 +1618,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
           personality: upd.personality?.trim() || undefined,
           createdAt: t,
           updatedAt: t,
-        };
+        });
         mem.npcs.push(n);
       }
       if (upd.gender) n.gender = upd.gender.trim();
@@ -1503,9 +1629,9 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
       if (typeof upd.desc === 'string') n.desc = upd.desc.trim() || undefined;
       if (upd.personality) n.personality = upd.personality.trim();
       applyNpcAffinity(n, upd); // 两侧独立覆盖,不做累加或自动联动
-      applyNpcState(n, upd); // 即时层(着装/状态/重要性)覆盖刷新
+      applyNpcState(n, upd, stamp); // 即时层(着装/状态/重要性)覆盖刷新
       applyNpcPlacement(n, upd, leaf); // 随行/所在地变更(NPC 移动)
-      n.updatedAt = t;
+      touch(n);
     }
     for (const name of d.npcs.remove ?? []) {
       if (!name?.trim()) continue;
@@ -1671,7 +1797,8 @@ export function deriveMemory(
     const leaf = getLeaf(chat[i])!;
     // 日志用「故事内时间」:结束时间优先(本段最后时刻),缺则起始,再缺旧 timeLabel,最后空串
     const time = optText(leaf.timeEnd) || optText(leaf.timeStart) || optText(leaf.timeLabel) || '';
-    applyStoredDeltaTo(mem, leaf.delta, { id: leaf.id, createdAt: leaf.createdAt, time, seed: leaf.seed });
+    applyStoredDeltaTo(mem, leaf.delta, { id: leaf.id, createdAt: leaf.createdAt, time, seed: leaf.seed, floor: i });
+    if (leaf.enriched) applyEnrichment(mem, leaf.enriched, time || mem.state.time);
   }
   // 只留最近若干条变动(注入/喂模型够用即可,省 token)
   if (mem.itemLog.length > ITEM_LOG_KEEP) mem.itemLog = mem.itemLog.slice(-ITEM_LOG_KEEP);
@@ -1680,6 +1807,22 @@ export function deriveMemory(
 
 /** 变动日志保留的最近条数(注入与喂摘要共用)。 */
 export const ITEM_LOG_KEEP = 8;
+
+/**
+ * 在「本楼之前的状态」上施加一份 delta(及补档结果),得到本楼之后的状态;不读 chat、不改入参。
+ * 供摘要落叶前判断哪些角色需要回看原文补档案(计划等稳定 id 不准确,只用于看角色)。
+ */
+export function deriveAfterDelta(
+  before: ReturnType<typeof deriveMemory>,
+  delta: StoredDelta,
+  leaf: { time: string; floor?: number; enriched?: NpcEnrichment[] },
+): ReturnType<typeof deriveMemory> {
+  const mem = createEmptyMemory();
+  Object.assign(mem, JSON.parse(JSON.stringify(before)));
+  applyStoredDeltaTo(mem, delta, { id: 'projection', createdAt: 0, time: leaf.time, floor: leaf.floor });
+  if (leaf.enriched) applyEnrichment(mem, leaf.enriched, leaf.time || mem.state.time);
+  return { state: mem.state, protagonist: mem.protagonist, items: mem.items, plans: mem.plans, scenes: mem.scenes, npcs: mem.npcs, itemLog: mem.itemLog, lifeDetails: mem.lifeDetails, secrets: mem.secrets, vars: mem.vars };
+}
 
 /**
  * 算「单条 delta 相对给定先前物品状态」产生的物品变动条目(供写进该楼正文)。
@@ -1845,13 +1988,15 @@ export function finalizeDelta(
   }
 
   if (isRecord(delta.npcs)) {
-    // 规范化:add/update 必须有名字才保留(无名 NPC 不记)
+    // 规范化:add/update 必须有名字才保留;rename 只留 from/to(证据在解析时已校验并移除)
     const npcs: NonNullable<StoredDelta['npcs']> = {};
     const add = cleanNpcList(delta.npcs.add);
     const update = cleanNpcList(delta.npcs.update);
+    const rename = cleanNpcRenameList(delta.npcs.rename);
     const remove = cleanTextList(delta.npcs.remove, ['name', 'npc', 'id']);
     if (add.length) npcs.add = add;
     if (update.length) npcs.update = update;
+    if (rename.length) npcs.rename = rename;
     if (remove.length) npcs.remove = remove;
     if (Object.keys(npcs).length) out.npcs = npcs;
   }
@@ -2310,6 +2455,8 @@ export function editNpc(
   // 用户真改了年龄才留空 ageTime,让重放盖上当前故事时间作新锚点。
   const age = patch.age !== undefined ? (patch.age.trim() || undefined) : prev?.age;
   const ageTime = age && age === prev?.age ? prev?.ageTime : undefined;
+  // 伤情锚点同理:伤情没改时沿用原记录时间,改名(删旧建新)也不重置伤势进展提醒;改了伤情才重新计时。
+  const conditionTime = condition && condition === prev?.condition ? prev?.conditionTime : undefined;
 
   // 改名也保留两侧和说明;未传不动,显式 null/空串可恢复未知/清空说明。
   const affinity: NpcAffinity = {};
@@ -2317,7 +2464,7 @@ export function editNpc(
   applyNpcAffinity(affinity, patch);
   const evidence = patch.location === undefined && patch.follow === undefined
     ? { locationStale: prev?.locationStale, lastKnownLocation: prev?.lastKnownLocation } : {};
-  const fields = { gender, age, ageTime, relation, ties, title, desc, personality, outfit, condition, important, follow, location, ...affinity, ...evidence };
+  const fields = { gender, age, ageTime, relation, ties, title, desc, personality, outfit, condition, conditionTime, important, follow, location, ...affinity, ...evidence };
   if (norm(newName) !== norm(oldName)) {
     return appendOpToLatestLeaf({
       npcs: { remove: [oldName], add: [{ name: newName, ...fields }] },
@@ -2354,6 +2501,32 @@ export function removeNpc(name: string): boolean {
   const nm = name.trim();
   if (!nm) return false;
   return appendOpToLatestLeaf({ npcs: { remove: [nm] } });
+}
+
+/**
+ * 手动「从原文补全档案」的写入:挂在最新一条有效叶子的 enriched 上(与其他手动操作同一路径),
+ * 重放时只填该角色此刻为空的字段。同名已有一条时合并字段,先写入的值保留。无有效叶子时返回 false。
+ * 重新摘要该叶子时 enriched 随之沿用,不会像 delta 里的手动操作那样被新结果替换。
+ */
+export function appendEnrichmentToLatestLeaf(entry: NpcEnrichment): boolean {
+  assertMemoryWritable();
+  const clean = cleanEnrichment([entry])[0];
+  if (!clean) return false;
+  const found = latestLeaf();
+  if (!found) return false;
+  const { index, leaf } = found;
+  const chat = getContext()!.chat;
+  const list = cleanEnrichment(leaf.enriched);
+  const same = list.find(e => norm(e.name) === norm(clean.name));
+  if (same) {
+    for (const key of NPC_ENRICH_FIELDS) if (clean.fields[key] && !same.fields[key]) same.fields[key] = clean.fields[key];
+    if (clean.source === 'manual') same.source = 'manual';
+  } else list.push(clean);
+  leaf.enriched = list;
+  chat[index].extra = { ...(chat[index].extra ?? {}), bbs_leaf: leaf };
+  recomputeDerived();
+  scheduleLeafFlush();
+  return true;
 }
 
 /* ============ 场景手动 op(写回最新叶子,与 editItem 同范式) ============ */

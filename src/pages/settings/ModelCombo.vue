@@ -5,6 +5,7 @@
  * 键盘：↓/↑ 在列表中移动（列表收起时 ↓ 展开），Enter 选中高亮项，Esc 只收起列表、不关闭所在弹窗。
  */
 import { computed, ref, useId } from 'vue';
+import { useBackLayer } from '@/composables/useBackLayer';
 
 const props = withDefaults(defineProps<{
   modelValue: string;
@@ -33,6 +34,8 @@ const filtered = computed<string[]>(() => {
 });
 /** 列表实际显示：展开且有可选模型 */
 const listShown = computed(() => menuOpen.value && props.options.length > 0);
+// 返回键只收起模型列表，不关所在的渠道弹窗（关弹窗会丢掉没保存的修改）
+useBackLayer(() => listShown.value, () => { menuOpen.value = false; activeIndex.value = -1; });
 
 const listId = useId();
 const optionId = (i: number) => `${listId}-${i}`;

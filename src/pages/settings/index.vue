@@ -26,6 +26,7 @@ import StripTagsCard from './cards/StripTagsCard.vue';
 import CarryoverCard from './cards/CarryoverCard.vue';
 import MigrateCard from './cards/MigrateCard.vue';
 import DataApiCard from './cards/DataApiCard.vue';
+import SettingsBackupCard from './cards/SettingsBackupCard.vue';
 
 /* 总开关：读屏名称固定为功能名，开关状态由 aria-checked 表达，说明文字作为描述。 */
 const masterDescId = useId();
@@ -54,7 +55,7 @@ const SETTINGS_GROUPS = [
   { id: 'memory', label: '记忆与召回', icon: 'summary', hint: '注入 · 向量记忆' },
   { id: 'prompts', label: '提示词', icon: 'edit', hint: '编辑 · 恢复默认' },
   { id: 'advanced', label: '高级过滤', icon: 'vars', hint: '排除 · 内容清洗' },
-  { id: 'data', label: '数据与迁移', icon: 'upload', hint: '新对话 · 旧版迁移' },
+  { id: 'data', label: '数据与迁移', icon: 'upload', hint: '新对话 · 旧版迁移 · 设置备份' },
 ] as const;
 function goToSettingsGroup(id: string) {
   // 限定在本页根节点内，兼容 ST 的 Shadow DOM，不修改宿主页面 hash。
@@ -166,12 +167,13 @@ function goToSettingsGroup(id: string) {
         <section class="prism-settings-group prism-group-data" aria-labelledby="prism-settings-data">
           <header class="prism-group-head">
             <h2 id="prism-settings-data" tabindex="-1">数据与迁移</h2>
-            <p>带记忆创建新对话、从 Horae 迁移，或将记忆提供给其他插件。</p>
+            <p>带记忆创建新对话、从 Horae 迁移、将记忆提供给其他插件，以及导出、导入设置。</p>
           </header>
           <div class="prism-group-cards">
             <CarryoverCard />
             <MigrateCard />
             <DataApiCard />
+            <SettingsBackupCard />
           </div>
         </section>
       </div>

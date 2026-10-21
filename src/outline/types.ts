@@ -34,6 +34,9 @@ export interface OutlineData {
 export interface OutlineSettings {
   apiMode: 'notes' | 'independent';
   channel: ApiChannel;
-  /** 推进条件检查:auto=每隔 interval 个 AI 楼自动检查一次(默认关);手动检查不受此开关影响。 */
-  progressCheck: { auto: boolean; interval: number };
+  /**
+   * 推进条件检查:auto=每隔 interval 个 AI 楼自动检查一次(默认关);手动检查不受此开关影响。
+   * autoAdvance=自动检查判定满足时切换到下一阶段(默认关;最后一个阶段不自动结束,手动检查只作提示)。
+   */
+  progressCheck: { auto: boolean; interval: number; autoAdvance: boolean };
 }

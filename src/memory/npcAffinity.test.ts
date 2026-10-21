@@ -319,6 +319,8 @@ describe('实际摘要入口与跨对话继承', () => {
   it('摘要用旧基线,解析 AI 的单侧更新,下一轮不变则保持', async () => {
     const second = message();
     delete second.extra!.bbs_leaf;
+    // 本楼正文提到艾琳:不在场的 NPC 只有被本楼提到时才在名册里保留完整档案与好感基线
+    second.mes = '危急时艾琳选择相救,但仍然嘴硬。';
     const chat = [base(), second];
     useChat(chat);
     vi.spyOn(client, 'requestViaMainApi').mockResolvedValue(JSON.stringify({

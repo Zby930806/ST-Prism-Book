@@ -16,7 +16,7 @@ import { discussionState, loadOutlineDiscussion, DISCUSSION_DATA_KEY, clearOutli
 import { buildDiscussionContext, recentDiscussion, discussionReply } from './discussionContext';
 import {
   OUTLINE_DATA_KEY, outlineState, loadOutline, outlineStorageCurrent, outlineSourceCurrent,
-  saveOutlineDraft, activateOutlineDraft, setOutlineChapter, setOutlineEnabled,
+  saveOutlineDraft, activateOutlineDraft, setOutlineChapter, setOutlineEnabled, setOutlineExitCriteria,
   reconfirmOutline, commitGeneratedOutline,
 } from './store';
 import {
@@ -379,6 +379,29 @@ describe('真实 core：草稿、确认、独立注入与阶段控制', () => {
   it.each([-1, 3, 0.5, NaN])('非法阶段 %s 不保存或改变已激活状态', async index => {
     await active(); const before = copy(saved()), calls = vi.mocked(ctx.saveMetadata).mock.calls.length;
     await expect(setOutlineChapter(index)).rejects.toThrow();
+    expect(saved()).toEqual(before); expect(ctx.saveMetadata).toHaveBeenCalledTimes(calls);
+  });
+
+  it('手动修改推进条件：只改这一项，当前阶段的注入随之更新，阶段进度和启用状态不变', async () => {
+    bindOutlineLifecycle(); await active();
+    await setOutlineExitCriteria(0, '  在档案室找到署名  ');
+    expect(saved().active?.content.chapters[0].exitCriteria).toBe('在档案室找到署名');
+    expect(latestInjection()).toContain('推进条件（由用户核对进度）：在档案室找到署名');
+    await setOutlineExitCriteria(1, '见到署名者本人');
+    const after = saved().active!;
+    expect(after.content.chapters[1].exitCriteria).toBe('见到署名者本人');
+    expect(after.content.chapters[1].goal).toBe('未来阶段秘密目标');
+    expect(after.currentChapter).toBe(0); expect(after.enabled).toBe(true);
+    expect(latestInjection()).not.toContain('见到署名者本人');
+  });
+
+  it.each([
+    ['空白', 0, '   ', '不能为空'],
+    ['超长', 0, '条'.repeat(2001), '最多 2000 字'],
+    ['越界', 2, '新条件', '序号无效'],
+  ])('推进条件%s时不保存', async (_label, index, text, message) => {
+    await active(); const before = copy(saved()), calls = vi.mocked(ctx.saveMetadata).mock.calls.length;
+    await expect(setOutlineExitCriteria(index, text)).rejects.toThrow(message);
     expect(saved()).toEqual(before); expect(ctx.saveMetadata).toHaveBeenCalledTimes(calls);
   });
 

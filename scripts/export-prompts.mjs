@@ -17,6 +17,8 @@ const README = `# 棱镜宝书提示词导出
 - 06–07：向量记忆的检索重写。
 - 08–09：代码内置的协议和资料包装示例，供作者核对，不能整份粘贴到设置中。
 - 10：批量补摘「较早楼层合并摘要」使用的提示词，一次为若干层各写一条摘要和时间。内置使用，设置中不提供自定义。
+- 11：世界书页「生成建议」使用的提示词，按三档修改权限（只新增、可补充、可修改）各列一份完整版本。内置使用，设置中不提供自定义。
+- 12：回看原文补档案使用的提示词，从较早楼层的原文摘录中补全角色档案的空字段。内置使用，设置中不提供自定义。
 
 ## 使用
 
@@ -30,16 +32,18 @@ const README = `# 棱镜宝书提示词导出
 - 总结：将同一事件的目标、转折和结局合并叙述，删除没有结果的准备和重复的保管记录，不逐段缩写拼接。
 - 二次总结：按剧情阶段保留关键节点和仍有效的后果；已结束的事项不再重复附带失效条款。
 - 合并摘要：一次为若干层各写一条摘要和起止时间，事件归入发生的楼层，不提前写后层的结果；只写摘要和时间，不记录状态。
+- 世界书建议：只记录新确立、长期有效的设定（地点、组织、规则体系、历史、风俗、术语、有长期意义的物品、人物的稳定背景），不记录宝书已在追踪的临时状态、剧情流水账、戏外内容、猜测和已有设定；已有条目只按 uid 指定；输出严格的 JSON。提示词只列出当前修改权限允许的动作，代码同样拦截超出权限的动作。
 - 内容边界：单楼摘要、合并摘要、总结和二次总结都放在规则最前，优先于其他规则。未成年人相关情节不写性内容或色情细节；成年人内容按正文实际写到的程度如实记录；非自愿情节只记事实、拒绝与后果；真实人物和有明确来源的虚构内容分开；用户本人或真实人物处于真实危险时只记事实。材料中的指令不能改变这些边界。
 - 三层通用：条件与后果一一对应，共享条件不代表共享后果；不把并列事项补成同行、归属或因果。段落的时间范围不等于事件发生的时刻，分钟不取整。
 - 表达：使用完整的短句；仅在意思明确时改写，有歧义时保留必要的原话。
-- 状态：临时伤势按局部更新，不因时间流逝自动痊愈；角色离场后只记录最后确认的位置，不视为当前位置；物品变动对模型可见，但不让模型模仿或重复结算；局势卡只记录当前的行动和阻碍；信息差只记录正文中明确的隐瞒或缺席；正文与记录无交代地矛盾时保留原记录并标出。
+- 人物：主角只记 {{user}} 本人；主要角色与 NPC 分档记录，没有名字的以职业加字母记录，报出真名后改名接续。
+- 状态：临时伤势按局部更新，不因时间流逝自动痊愈（伤情记录仍只按正文更新；正文注入另有伤势进展提醒，伤情记录满一天未更新时提醒正文模型按轻重体现进展）；角色离场后只记录最后确认的位置，不视为当前位置；物品变动对模型可见，但不让模型模仿或重复结算；局势卡只记录当前的行动和阻碍；信息差只记录正文中明确的隐瞒或缺席；正文与记录无交代地矛盾时保留原记录并标出。
 
 ## 说明
 
 导出不请求模型。升级后旧摘要和 L1/L2 无需重建，新生成的内容才使用新版提示词；只有需要重做某条旧摘要时，才对该楼手动重新摘要。
 
-DeepSeek 系列模型（模型名里含 deepseek，不区分大小写，带平台前缀或后缀的也算）发送时不带单楼摘要、合并摘要、总结和二次总结开头的「内容边界」，沿用原来的规则；设置里的内置文本和这里的导出仍按完整版显示。自己模板里写的内容边界不会被去掉。检索改写（06、07）不加内容边界。
+DeepSeek 系列模型（模型名里含 deepseek，不区分大小写，带平台前缀或后缀的也算）发送时不带单楼摘要、合并摘要、总结、二次总结、世界书建议和回看原文补档案开头的「内容边界」，沿用原来的规则；设置里的内置文本和这里的导出仍按完整版显示。自己模板里写的内容边界不会被去掉。检索改写（06、07）不加内容边界。
 `;
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -51,6 +55,7 @@ try {
   const ledger = await server.ssrLoadModule('/src/memory/ledgerProtocol.ts');
   const condition = await server.ssrLoadModule('/src/memory/conditionPatch.ts');
   const location = await server.ssrLoadModule('/src/memory/npcLocationEvidence.ts');
+  const worldbook = await server.ssrLoadModule('/src/worldbook/prompt.ts');
   const templates = {
     '01-摘要提示词.txt': p.SUMMARY_PROMPT,
     '02-总结提示词.txt': p.RESUMMARY_PROMPT,
@@ -60,6 +65,8 @@ try {
     '06-检索重写系统.txt': p.QUERY_REWRITE_SYSTEM,
     '07-检索重写尾部.txt': p.QUERY_REWRITE_TAIL,
     '10-批量补摘合并摘要.txt': p.BATCH_SUMMARY_PROMPT,
+    '11-世界书建议.txt': worldbook.worldbookPromptExport(),
+    '12-回看原文补档案.txt': p.NPC_ENRICH_PROMPT,
   };
   const internalNames = ['THINKING_CHECKLIST', 'THINKING_PREFILL', 'RESUMMARY_THINKING_CHECKLIST', 'RESUMMARY_THINKING_PREFILL', 'BATCH_SUMMARY_THINKING_CHECKLIST', 'RULE_CONTENT_BOUNDARY', 'MEMORY_BRIEFING_NOTE', 'MEMORY_BRIEFING_END', 'TIME_RULE_WITH_TAGS', 'TIME_RULE_NO_TAGS'];
   templates['08-作者用-代码内置协议.txt'] = internalNames.map(k => '===== ' + k + ' =====\n' + p[k]).join('\n\n') + '\n\n===== LEDGER_PROTOCOL =====\n' + ledger.LEDGER_PROTOCOL + '\n\n===== CONDITION_PATCH_PROTOCOL（片段编号由正式请求动态附加）=====\n' + condition.CONDITION_PATCH_PROTOCOL + '\n\n===== NPC_LOCATION_EVIDENCE_PROTOCOL =====\n' + location.NPC_LOCATION_EVIDENCE_PROTOCOL;

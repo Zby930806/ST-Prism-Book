@@ -6,6 +6,7 @@ import Scenes from './scenes/index.vue';
 import Settings from './settings/index.vue';
 import Summary from './summary/index.vue';
 import Vars from './vars/index.vue';
+import Worldbook from './worldbook/index.vue';
 
 export interface PageDef {
   /** 唯一 id,存进 ui.activePage / localStorage;同时作为 Icon 的 name */
@@ -28,6 +29,7 @@ export const PAGES: PageDef[] = [
   { id: 'npcs', label: '角色', component: Npcs },
   { id: 'vars', label: '变量', component: Vars },
   { id: 'notes', label: '札记', component: Notes },
+  { id: 'worldbook', label: '世界书', component: Worldbook },
   { id: 'settings', label: '设置', component: Settings },
 ];
 

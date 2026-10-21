@@ -10,12 +10,13 @@ import { setProtagonist } from '@/memory/apply';
 import { memory } from '@/memory/store';
 import { computed, ref } from 'vue';
 import NpcCardBase from './NpcCardBase.vue';
-import NpcSectionHead from './NpcSectionHead.vue';
-import { personChips, type CardField } from './npcView';
+import NpcTierHead from './NpcTierHead.vue';
+import { conditionTitle, personChips, type CardField } from './npcView';
 
 const props = defineProps<{ name: string; hasLeaf: boolean }>();
 
-const hasData = computed(() => Object.values(memory.protagonist).some(value => !!value?.trim()));
+// 只看文字字段;伤情锚点等派生数字不算「有记录」
+const hasData = computed(() => (['gender', 'age', 'identity', 'appearance', 'outfit', 'condition'] as const).some(key => !!memory.protagonist[key]?.trim()));
 const hasDetails = computed(() => [
   memory.protagonist.age,
   memory.protagonist.identity,
@@ -31,7 +32,7 @@ const fields = computed<CardField[] | null>(() => {
   if (p.identity) out.push({ key: 'identity', label: '身份', value: p.identity, cls: 'f-title' });
   if (p.appearance) out.push({ key: 'appearance', label: '外貌', value: p.appearance, cls: 'f-desc' });
   if (p.outfit) out.push({ key: 'outfit', label: '着装', value: p.outfit, cls: 'f-outfit' });
-  if (p.condition) out.push({ key: 'condition', label: '状态', value: p.condition, cls: 'f-cond' });
+  if (p.condition) out.push({ key: 'condition', label: '状态', value: p.condition, cls: 'f-cond', labelTitle: conditionTitle(p.conditionTime) });
   return out;
 });
 
@@ -69,12 +70,11 @@ function saveEdit() {
 </script>
 
 <template>
-  <div class="bbs-protagonist-section">
-    <NpcSectionHead
-      tag="主角"
-      tag-icon="characters"
-      tag-tone="protagonist"
-      :hint="apiSettings.summaryOnlyMode ? '仅供棱镜宝书记录，不发送给主对话 AI' : '始终完整发送，与 NPC 名册分开记录'"
+  <section class="bbs-protagonist-section" aria-labelledby="bbs-tier-protagonist">
+    <NpcTierHead
+      title="主角"
+      heading-id="bbs-tier-protagonist"
+      :hint="apiSettings.summaryOnlyMode ? '只记录用户操控的角色本人；仅供棱镜宝书记录，不发送给主对话 AI。' : '只记录用户操控的角色本人，档案始终完整发送。'"
       :local-only="apiSettings.summaryOnlyMode"
     />
     <NpcCardBase
@@ -94,7 +94,7 @@ function saveEdit() {
         />
       </template>
     </NpcCardBase>
-  </div>
+  </section>
 
   <ModalShell :open="!!editing" title="编辑主角档案" @close="cancelEdit">
     <template v-if="editing">

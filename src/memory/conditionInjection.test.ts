@@ -59,8 +59,10 @@ describe('离场伤势的正式重放与状态注入', () => {
   it('经过多日不自动康复，正式刷新槽位消费同一条件', () => {
     const chat = [...fixture('外海航线'), message({ time: '2042/6/6 10:00' })];
     const slots = useChat(chat); refreshInjection();
+    // 记录不因时间流逝清空;正文模型得到的是「离场本身不等于康复」与按轻重随时间好转的写作说明
     expect(slots.get('baibai_book_memory_state')).toContain('身体状态(最后记录):左腿骨折；不能负重');
-    expect(slots.get('baibai_book_memory_state')).toContain('离场和时间流逝不是康复或恶化的证据');
+    expect(slots.get('baibai_book_memory_state')).toContain('离场不等于康复或恶化');
+    expect(deriveMemory(chat).npcs[0].condition).toBe('左腿骨折；不能负重');
   });
   it('后续有据更新或清空的存储结果替代旧伤势，不重新拼回历史', () => {
     const chat = [...fixture('外海航线'), message({ npcs: { update: [{ name: '岑岚', condition: '左腿仍疼；已可短距离行走' }] } })];

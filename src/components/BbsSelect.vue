@@ -1,5 +1,6 @@
 <script setup lang="ts" generic="T extends string">
 import Icon from '@/components/Icon.vue';
+import { useBackLayer } from '@/composables/useBackLayer';
 import { modalHost } from '@/state/ui';
 import { computed, onBeforeUnmount, ref, useId } from 'vue';
 
@@ -143,6 +144,8 @@ function onTriggerKeydown(event: KeyboardEvent) {
 }
 
 onBeforeUnmount(() => closeMenu());
+// 返回键先收起下拉列表，不关所在的弹窗或窗口
+useBackLayer(() => open.value, () => closeMenu(true));
 </script>
 
 <template>

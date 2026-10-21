@@ -13,7 +13,7 @@ const defaults = (): OutlineSettings => ({
     temperature: 0.7, maxTokens: 6000, timeoutSec: 180, stream: true,
     prefill: false, excludeParams: [], reasoningEffort: '',
   },
-  progressCheck: { auto: false, interval: 3 },
+  progressCheck: { auto: false, interval: 3, autoAdvance: false },
 });
 export const outlineSettings = reactive<OutlineSettings>(defaults());
 let protectedSettings = false;
@@ -45,10 +45,11 @@ function normalize(value: OutlineSettings | Record<string, unknown>): OutlineSet
       excludeParams: Array.isArray(c.excludeParams) ? c.excludeParams.filter((p): p is string => typeof p === 'string') : [],
       reasoningEffort: typeof c.reasoningEffort === 'string' ? c.reasoningEffort.trim() : '',
     },
-    // 旧设置没有这一项:按默认(不自动检查,间隔 3 楼)
+    // 旧设置没有这一项:按默认(不自动检查,间隔 3 楼,不自动切换阶段)
     progressCheck: {
       auto: pc.auto === true,
       interval: Math.floor(bounded(pc.interval, d.progressCheck.interval, 1, 20)),
+      autoAdvance: pc.autoAdvance === true,
     },
   };
 }

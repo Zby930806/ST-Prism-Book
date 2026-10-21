@@ -2,6 +2,7 @@
 import Icon from '@/components/Icon.vue';
 import BrandMark from '@/components/BrandMark.vue';
 import { useDialogFocus } from '@/composables/useDialogFocus';
+import { useBackLayer } from '@/composables/useBackLayer';
 import { PLUGIN_VERSION } from '@/version';
 import NavBar from '@/components/NavBar.vue';
 import FloatingOrb from '@/components/FloatingOrb.vue';
@@ -34,6 +35,8 @@ const current = computed(() => getPage(ui.activePage));
 const bodyEl = ref<HTMLElement | null>(null);
 const windowEl = ref<HTMLElement | null>(null);
 const { onDialogKeydown } = useDialogFocus(windowEl, () => ui.open, closeBook);
+// 返回键（安卓返回键、浏览器后退）先关最上层的弹窗、菜单，最后关宝书窗口；全部关掉后恢复浏览器默认行为
+useBackLayer(() => ui.open, closeBook);
 watch(() => ui.activePage, async () => { await nextTick(); bodyEl.value?.scrollTo({ top: 0 }); });
 
 // —— 遮罩点击关闭:仅当按下与松开都在遮罩本身。

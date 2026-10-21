@@ -18,11 +18,11 @@ describe('棱镜宝书内部发行约束', () => {
     await expect(performUpdate()).rejects.toThrow(INTERNAL_UPDATE_NOTICE);
     expect(fetch).not.toHaveBeenCalled();
   });
-  it('发布标识一致且不自动跟随上游更新', () => {
+  it('发布标识一致；酒馆从本仓库提示和更新（auto_update），插件自身不访问上游', () => {
     const pkg = JSON.parse(read('package.json')); const manifest = JSON.parse(read('manifest.json'));
     expect(pkg.name).toBe('st-prism-book'); expect(pkg.private).toBe(true);
     expect(manifest.display_name).toBe('棱镜宝书'); expect(manifest.version).toBe(pkg.version);
-    expect(manifest.js).toBe('dist/index.js?ver=' + pkg.version); expect(manifest.auto_update).toBe(false);
+    expect(manifest.js).toBe('dist/index.js?ver=' + pkg.version); expect(manifest.auto_update).toBe(true);
     expect(manifest.homePage).toBeUndefined(); expect(manifest.generate_interceptor).toBe('bbs_generateInterceptor');
   });
   it('旧记忆、设置、页面和标签标识保持兼容', () => {

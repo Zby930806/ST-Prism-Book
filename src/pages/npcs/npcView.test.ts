@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MemNpc } from '@/memory/types';
-import { loadCollapsed, npcCardFields, npcPlaceText, persistCollapsed } from './npcView';
+import { loadCollapsed, npcCardFields, npcChips, npcPlaceText, persistCollapsed, profileGapText } from './npcView';
 
 const npc = (patch: Partial<MemNpc>): MemNpc => ({ id: 'n1', name: '洛伊', createdAt: 1, updatedAt: 1, ...patch });
 const keys = (fields: ReturnType<typeof npcCardFields>) => fields?.map(f => f.key) ?? null;
@@ -10,10 +10,15 @@ describe('角色卡各档字段', () => {
     expect(npcCardFields(npc({}), 'main')).toBeNull();
   });
 
-  it('主要角色只显示身份、关系、好感、位置、着装、状态，随行时位置为强调色', () => {
-    const fields = npcCardFields(npc({ title: '领航员', relation: '同伴', follow: true, outfit: '斗篷', condition: '轻伤', personality: '谨慎', desc: '短发', ties: '无' }), 'main');
-    expect(keys(fields)).toEqual(['title', 'relation', 'loc', 'outfit', 'condition']);
+  it('主要角色显示身份、关系、好感、外貌、性格、位置、着装、状态，随行时位置为强调色', () => {
+    const fields = npcCardFields(npc({ title: '领航员', relation: '同伴', follow: true, outfit: '斗篷', condition: '轻伤', conditionTime: '5月8日', personality: '谨慎', desc: '短发', ties: '无' }), 'main');
+    expect(keys(fields)).toEqual(['title', 'relation', 'desc', 'personality', 'loc', 'outfit', 'condition']);
     expect(fields?.find(f => f.key === 'loc')).toMatchObject({ value: '跟主角在一起', ddClass: 'is-follow', cls: 'f-loc' });
+    expect(fields?.find(f => f.key === 'condition')?.labelTitle).toBe('记录于 5月8日');
+  });
+
+  it('主要角色只有外貌或性格时也显示字段表', () => {
+    expect(keys(npcCardFields(npc({ desc: '银灰短发' }), 'main'))).toEqual(['desc']);
   });
 
   it('主要角色只有最后已知位置时显示空字段表（不显示提示），与原模板一致', () => {
@@ -34,6 +39,20 @@ describe('角色卡各档字段', () => {
     const fields = npcCardFields(npc({ title: 't', outfit: 'o', personality: 'p', lastKnownLocation: { place: '旧街', time: '5月8日', leafId: 'l' } }), 'nearby');
     expect(keys(fields)).toEqual(['title', 'loc', 'personality']);
     expect(fields?.find(f => f.key === 'loc')?.value).toBe('现在不确定；最后一次在旧街（5月8日）');
+  });
+
+  it('同区域与不在场的卡片也显示外貌，改过名的显示原名', () => {
+    expect(keys(npcCardFields(npc({ title: 't', personality: 'p', desc: '络腮胡', location: '码头' }), 'nearby'))).toEqual(['title', 'loc', 'personality', 'desc']);
+    expect(keys(npcCardFields(npc({ title: '船工', formerNames: ['船工A'], desc: '络腮胡' }), 'absent'))).toEqual(['title', 'former', 'loc', 'desc']);
+    expect(npcCardFields(npc({ formerNames: ['船工A', '老船工'] }), 'absent')?.find(f => f.key === 'former')?.value).toBe('船工A、老船工');
+  });
+
+  it('档案缺外貌、身份、性别时列出所缺项；未具名角色带标签', () => {
+    expect(profileGapText(npc({}))).toBe('外貌、身份、性别');
+    expect(profileGapText(npc({ desc: 'd', title: 't', gender: '男' }))).toBe('');
+    expect(profileGapText(npc({ title: '酒保' }))).toBe('外貌、性别');
+    expect(npcChips(npc({ name: '酒保A', gender: '男' })).map(c => c.text)).toEqual(['男', '未具名']);
+    expect(npcChips(npc({ name: '小A' })).map(c => c.text)).toEqual([]);
   });
 
   it('不在场角色总显示位置；没有位置或位置过期时用弱化样式', () => {

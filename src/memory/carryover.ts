@@ -106,7 +106,9 @@ function encodeStateAsDelta(state: ReturnType<typeof deriveMemory>, leafId: stri
   }
   if (state.state.locationPath !== undefined) delta.locationPath = [...state.state.locationPath];
   if (Object.values(state.protagonist).some(Boolean)) {
-    delta.protagonist = { ...state.protagonist };
+    // 伤情记录时间随档案带走(新对话里伤势进展提醒照旧计时);楼层锚点只对原聊天有意义,不带。
+    const { conditionFloor: _floor, ...protagonist } = state.protagonist;
+    delta.protagonist = protagonist;
   }
   // 局势卡:当前场面快照一并带走(新对话从同一局面接着演)
   if (state.state.sceneFocus) {
@@ -169,6 +171,8 @@ function encodeStateAsDelta(state: ReturnType<typeof deriveMemory>, leafId: stri
         personality: n.personality,
         outfit: n.outfit,
         condition: n.condition,
+        // 伤情记录时间一并带走,种子叶子重放不把它刷成建新对话的时间
+        conditionTime: n.conditionTime,
         important: n.important,
         follow: n.follow,
         location: n.location,

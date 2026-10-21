@@ -227,6 +227,8 @@ export interface InjectionSections {
   scenes: boolean;
   /** 信息差:提醒在场的不知情角色(依赖 NPC 名册的在场判定;仅控制注入,记录始终开启) */
   secrets: boolean;
+  /** 伤势进展提醒:伤情记录满一天(无故事时间时按回复楼层数)未更新时,提醒正文模型按轻重体现进展(不改记录) */
+  injuryReminder: boolean;
 }
 
 export interface ApiSettings {
@@ -297,6 +299,12 @@ export interface ApiSettings {
   recentResolvedPlansCount: number;
   /** 摘要/总结失败(请求报错或 JSON 解析失败)的最大重试次数。0=不重试;默认 1(最多再试一次)。 */
   summaryMaxRetries: number;
+  /**
+   * 回看原文补全角色档案(默认开):摘要时新登场或被提到的角色缺外貌、身份或性别,
+   * 到之前的楼层找原文补全,每次多发一个请求。关闭后自动补档不发请求,已补好的结果保持不变;
+   * 角色卡上的「从原文补全」不受影响。
+   */
+  npcEnrichAuto: boolean;
   /** 每楼摘要字数要求(含标点),写进内置摘要提示词。只是给模型的要求:写超了照常保存,不因此判失败。 */
   summaryMaxChars: number;
   /** 批量补摘「较早楼层合并摘要」时，一次请求的原文字数上限(清洗后);超出就分到下一次。 */
@@ -318,8 +326,9 @@ export interface ApiSettings {
 }
 
 // extension_settings 里的命名空间键;localStorage 是旧版残留,仅用于一次性迁移。
-const SETTINGS_KEY = 'baibai_book';
-const SHARED_CHANNELS_KEY = 'baibai_api_channels';
+// 三个键都导出给设置备份(settingsBackup.ts)按键名收集。
+export const SETTINGS_KEY = 'baibai_book';
+export const SHARED_CHANNELS_KEY = 'baibai_api_channels';
 const SHARED_CHANNELS_EVENT = 'st-baibai-api-channels:changed';
 const SHARED_CHANNELS_SCHEMA_VERSION = 1;
 
@@ -327,7 +336,7 @@ const SHARED_CHANNELS_SCHEMA_VERSION = 1;
    真身存在 extensionSettings[SHARED_EXCLUDES_KEY](带 revision),各插件的设置里只留镜像。
    任一端写入后广播事件,其他端收到后从 extensionSettings 重读并应用,实现跨插件实时同步。
    双端语义一致:排除角色=功能停用、整本/条目名排除=副API世界书过滤、清洗标签=正文整块删除。 */
-const SHARED_EXCLUDES_KEY = 'baibai_exclude_settings';
+export const SHARED_EXCLUDES_KEY = 'baibai_exclude_settings';
 const SHARED_EXCLUDES_EVENT = 'st-baibai-exclude-settings:changed';
 const SHARED_EXCLUDES_SCHEMA_VERSION = 1;
 
@@ -414,7 +423,7 @@ function defaults(): ApiSettings {
     assignments: { summary: '', resummary: '' },
     autoSummaryEnabled: true,
     summaryOnlyMode: false,
-    injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, npcAffinity: true, items: true, scenes: true, secrets: true },
+    injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, npcAffinity: true, items: true, scenes: true, secrets: true, injuryReminder: true },
     keepRecent: 3,
     excludedChars: [],
     excludedWorldNames: [],
@@ -429,6 +438,7 @@ function defaults(): ApiSettings {
     higherResummaryThreshold: 3,
     recentResolvedPlansCount: 5,
     summaryMaxRetries: 1,
+    npcEnrichAuto: true,
     summaryMaxChars: SUMMARY_MAX_CHARS_DEFAULT,
     batchMaxChars: 30000,
     batchMaxFloors: 10,
@@ -513,6 +523,7 @@ function normalize(raw: unknown): ApiSettings {
     items: typeof ri.items === 'boolean' ? ri.items : true,
     scenes: typeof ri.scenes === 'boolean' ? ri.scenes : true,
     secrets: typeof ri.secrets === 'boolean' ? ri.secrets : true,
+    injuryReminder: typeof ri.injuryReminder === 'boolean' ? ri.injuryReminder : true,
   };
   // vector 同为嵌套对象(且内含子对象),逐层兜底,老数据缺字段时回退默认。
   // 注:旧结构曾有 vector.channels + {channel,model};扁平化后弃用,逐角色按 url/key/model 兜底,
@@ -573,6 +584,8 @@ function normalize(raw: unknown): ApiSettings {
     Number.isFinite(merged.summaryMaxRetries) && merged.summaryMaxRetries >= 0
       ? Math.floor(merged.summaryMaxRetries)
       : 1;
+  // 回看原文补全角色档案:布尔,旧数据没有这个键(或值非法)时按开启处理
+  merged.npcEnrichAuto = typeof merged.npcEnrichAuto === 'boolean' ? merged.npcEnrichAuto : true;
   // 批量补摘参数:正整数,缺失/非法回退默认值(下限 1,避免 0 导致永不切块/死循环)
   merged.batchMaxChars =
     Number.isFinite(merged.batchMaxChars) && merged.batchMaxChars >= 500
@@ -714,6 +727,7 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.higherResummaryThreshold = src.higherResummaryThreshold;
   target.recentResolvedPlansCount = src.recentResolvedPlansCount;
   target.summaryMaxRetries = src.summaryMaxRetries;
+  target.npcEnrichAuto = src.npcEnrichAuto;
   target.summaryMaxChars = src.summaryMaxChars;
   target.batchMaxChars = src.batchMaxChars;
   target.batchMaxFloors = src.batchMaxFloors;
@@ -1028,6 +1042,21 @@ watch(
   },
   { deep: true },
 );
+
+/**
+ * 导入设置备份:按与载入时相同的规则整理(补默认值、校验类型)后整体替换当前设置。
+ * 落盘、共享渠道与共享排除名单的同步和广播由上面的 watch 完成(与手动修改设置相同)。
+ * 密钥合并、渠道按 id 合并等由调用方(settingsBackup.ts)先做好。
+ */
+export function replaceApiSettings(raw: unknown): void {
+  if (!ready) throw new Error('设置还没有载入完成，请稍后再试。');
+  applyInto(apiSettings, normalize(raw));
+}
+
+/** 按载入时的规则整理一份设置但不应用(导入前对比用)。 */
+export function normalizeApiSettings(raw: unknown): ApiSettings {
+  return normalize(raw);
+}
 
 let chanSeq = 0;
 export function newChannel(): ApiChannel {

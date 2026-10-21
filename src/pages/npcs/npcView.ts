@@ -1,13 +1,15 @@
 /**
  * 角色页的展示规则：名册里的位置文案、年龄显示、各档角色卡显示哪些字段、折叠偏好的读写。
- * 只决定界面怎么显示，不改记忆数据。各档显示的字段与发给模型的 NPC 名册分档一致（见 inject.ts）。
+ * 只决定界面怎么显示，不改记忆数据。角色卡展示完整档案（含外貌）；发给模型的分档见 inject.ts，
+ * 各区块标题旁的说明写明发送范围。
  */
 import { fmtNpcAffinity } from '@/memory/npcRelations';
+import { isNpcLabelName } from '@/memory/npcLabel';
 import { memory } from '@/memory/store';
 import { ageDisplay } from '@/memory/timeRel';
 import type { MemNpc } from '@/memory/types';
 
-/** 名册分档：主要角色 / 在场 / 同区域 / 不在场或位置未确认。 */
+/** 名册分档：主要角色 / NPC 在场 / 同区域 / 不在场或位置未确认。 */
 export type NpcTier = 'main' | 'present' | 'nearby' | 'absent';
 
 /** 名册里的位置。发给模型的写法见 npcLocationLabel，这里换成好读的说法，规则相同：旧位置不当成现在的位置。 */
@@ -50,6 +52,18 @@ export function personChips(gender?: string, age?: string, ageTime?: string): Ca
   return chips;
 }
 
+/** NPC 卡片名字旁的小标签：性别、年龄；无名角色（职业 + 字母）加「未具名」。 */
+export function npcChips(n: MemNpc): CardChip[] {
+  const chips = personChips(n.gender, n.age, n.ageTime);
+  if (isNpcLabelName(n.name)) chips.push({ text: '未具名', title: '正文没有给出名字，以职业或身份加字母记录；报出真名后由摘要改名接续' });
+  return chips;
+}
+
+/** 伤情记录时间的悬停提示（伤势进展提醒据此计时）。 */
+export function conditionTitle(conditionTime?: string): string | undefined {
+  return conditionTime?.trim() ? `记录于 ${conditionTime.trim()}` : undefined;
+}
+
 /** 角色卡的一行字段。cls 决定标签与值的配色，ddClass 用于位置的「随行」「不确定」状态。 */
 export interface CardField {
   key: string;
@@ -63,17 +77,19 @@ export interface CardField {
 const AFFINITY_TITLE = '对主角的内心好感与外在态度估计';
 
 /**
- * 各档角色卡显示的字段，与注入端分档一致：
- *  - 主要角色：身份、关系、好感、位置、着装、状态（重点是即时状态）；
- *  - 在场：全部字段；同区域：身份、关系、好感、位置、性格；不在场：身份、关系、好感、位置。
+ * 各档角色卡显示的字段（外貌在各档都显示，便于核对档案；发送范围见区块说明）：
+ *  - 主要角色：身份、关系、好感、外貌、性格、位置、着装、状态；
+ *  - 在场：全部字段；同区域：身份、关系、好感、位置、性格、外貌；不在场：身份、关系、好感、位置、外貌。
+ *  - 改过名的角色另加「原记为」。
  * 返回 null 表示不显示字段表（主要角色此时显示「暂无状态记录」提示）。
  */
 export function npcCardFields(n: MemNpc, tier: NpcTier): CardField[] | null {
   const affinity = fmtNpcAffinity(n);
+  const former = (n.formerNames ?? []).join('、');
   const shows: Record<NpcTier, boolean> = {
-    main: !!(n.title || n.relation || affinity || n.outfit || n.condition || n.follow || n.location || n.lastKnownLocation),
-    present: !!(n.title || n.relation || affinity || n.ties || n.personality || n.desc || n.outfit || n.condition || n.follow || n.location || n.lastKnownLocation),
-    nearby: !!(n.title || n.relation || affinity || n.personality || n.location || n.lastKnownLocation),
+    main: !!(n.title || n.relation || affinity || n.desc || n.personality || n.outfit || n.condition || n.follow || n.location || n.lastKnownLocation || former),
+    present: !!(n.title || n.relation || affinity || n.ties || n.personality || n.desc || n.outfit || n.condition || n.follow || n.location || n.lastKnownLocation || former),
+    nearby: !!(n.title || n.relation || affinity || n.personality || n.desc || n.location || n.lastKnownLocation || former),
     absent: true,
   };
   if (!shows[tier]) return null;
@@ -82,13 +98,18 @@ export function npcCardFields(n: MemNpc, tier: NpcTier): CardField[] | null {
     if (value) fields.push({ key, label, value, ...extra });
   };
   add('title', '身份', n.title, { cls: 'f-title' });
+  add('former', '原记为', former, { cls: 'f-former', labelTitle: '报出真名之前使用的名字' });
   add('relation', '关系', n.relation, { cls: 'f-rel' });
   add('affinity', '好感', affinity, { labelTitle: AFFINITY_TITLE });
   const place = npcPlaceText(n);
+  if (tier === 'main') {
+    add('desc', '外貌', n.desc, { cls: 'f-desc' });
+    add('personality', '性格', n.personality, { cls: 'f-trait' });
+  }
   if (tier === 'main' || tier === 'present') {
     if (n.follow || n.location) fields.push({ key: 'loc', label: '位置', value: place, cls: 'f-loc', ddClass: n.follow ? 'is-follow' : undefined });
     add('outfit', '着装', n.outfit, { cls: 'f-outfit' });
-    add('condition', '状态', n.condition, { cls: 'f-cond' });
+    add('condition', '状态', n.condition, { cls: 'f-cond', labelTitle: conditionTitle(n.conditionTime) });
     if (tier === 'present') {
       add('personality', '性格', n.personality, { cls: 'f-trait' });
       add('desc', '外貌', n.desc, { cls: 'f-desc' });
@@ -97,10 +118,21 @@ export function npcCardFields(n: MemNpc, tier: NpcTier): CardField[] | null {
   } else if (tier === 'nearby') {
     if (n.location || n.lastKnownLocation) fields.push({ key: 'loc', label: '位置', value: place, cls: 'f-loc' });
     add('personality', '性格', n.personality, { cls: 'f-trait' });
+    add('desc', '外貌', n.desc, { cls: 'f-desc' });
   } else {
     fields.push({ key: 'loc', label: '位置', value: place, cls: 'f-loc', ddClass: !n.location || n.locationStale ? 'is-nowhere' : undefined });
+    add('desc', '外貌', n.desc, { cls: 'f-desc' });
   }
   return fields;
+}
+
+/** 档案缺的关键项（外貌、身份、性别）；都有时返回空串，角色卡据此显示「从原文补全」。 */
+export function profileGapText(n: Pick<MemNpc, 'desc' | 'title' | 'gender'>): string {
+  const gaps: string[] = [];
+  if (!n.desc?.trim()) gaps.push('外貌');
+  if (!n.title?.trim()) gaps.push('身份');
+  if (!n.gender?.trim()) gaps.push('性别');
+  return gaps.join('、');
 }
 
 /** 添加/编辑角色表单的草稿。好感两档用字符串承载下拉值，保存时再转换。 */

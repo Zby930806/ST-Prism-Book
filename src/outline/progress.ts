@@ -1,8 +1,9 @@
 /**
  * 规划推进条件检查:判断当前阶段的推进条件是否已在正文中满足。
  *
- * 只读:不改大纲、不切阶段、不写记忆;结果存在内存里,只作提示,阶段仍由用户手动切换。
+ * 不改大纲内容、不写记忆;结果存在内存里。默认只作提示,阶段由用户手动切换。
  * 手动检查随时可用;自动检查默认关,开启后每隔 N 个 AI 楼检查一次。都用规划的 API。
+ * 另开「自动切换」时,自动检查判定满足即切到下一阶段;最后一个阶段不自动结束,手动检查仍只作提示。
  * 生成期间聊天、大纲或当前阶段变了,迟到的结果丢弃。
  */
 import { reactive } from 'vue';
@@ -16,12 +17,22 @@ import { extractJsonObject } from '@/memory/json';
 import { isAiFloor } from '@/memory/engine';
 import { OUTLINE_PROGRESS_PROMPT } from './prompt';
 import { outlineSettings, resolveOutlineChannel } from './settings';
-import { outlineSourceCurrent, outlineState, outlineStorageCurrent } from './store';
+import { outlineSourceCurrent, outlineState, outlineStorageCurrent, setOutlineChapter } from './store';
 import type { OutlineActive } from './types';
 
 export interface ProgressVerdict {
   met: boolean;
   reason: string;
+}
+
+/** 最近一次自动切换:界面据此说明切换依据,并提供退回。 */
+export interface ProgressAdvance {
+  outlineId: string;
+  from: number;
+  to: number;
+  title: string;
+  reason: string;
+  floor: number;
 }
 
 export const outlineProgress = reactive({
@@ -38,6 +49,7 @@ export const outlineProgress = reactive({
   dismissed: false,
   error: '',
   errorDetail: '',
+  advanced: null as ProgressAdvance | null,
 });
 
 let controller: AbortController | undefined;
@@ -49,7 +61,7 @@ function resetProgress(): void {
   ++runId;
   controller?.abort();
   controller = undefined;
-  Object.assign(outlineProgress, { busy: false, outlineId: '', chapter: -1, met: null, reason: '', floor: -1, auto: false, dismissed: false, error: '', errorDetail: '' });
+  Object.assign(outlineProgress, { busy: false, outlineId: '', chapter: -1, met: null, reason: '', floor: -1, auto: false, dismissed: false, error: '', errorDetail: '', advanced: null });
 }
 
 /** 解析核对回复:必须是 {met: boolean, reason: string}。 */
@@ -103,6 +115,27 @@ export function progressForCurrentStage(): boolean {
   return !!active && outlineProgress.outlineId === active.id && outlineProgress.chapter === active.currentChapter;
 }
 
+/** 最近一次自动切换是否还停在切换后的阶段(用户又换了阶段或换了大纲就不再显示)。 */
+export function autoAdvanceForCurrentStage(): ProgressAdvance | null {
+  const active = outlineState.active, advanced = outlineProgress.advanced;
+  return active && advanced && advanced.outlineId === active.id && advanced.to === active.currentChapter ? advanced : null;
+}
+
+/** 自动检查判定满足且开了自动切换:切到下一阶段。最后一个阶段不自动结束规划;切换失败退回提示。 */
+async function autoAdvance(active: OutlineActive, chapter: number, verdict: ProgressVerdict, floor: number): Promise<boolean> {
+  const next = active.content.chapters[chapter + 1];
+  if (!next) return false;
+  try {
+    await setOutlineChapter(chapter + 1);
+  } catch (error) {
+    console.warn('[棱镜宝书] 自动切换规划阶段失败(改为提示)', error);
+    return false;
+  }
+  outlineProgress.advanced = { outlineId: active.id, from: chapter, to: chapter + 1, title: next.title, reason: verdict.reason, floor };
+  toast(`推进条件已满足，规划已自动切换到第 ${chapter + 2} 阶段「${next.title}」。需要退回时，在「摘要 → 创作规划」中点「上一阶段」。`, 'success');
+  return true;
+}
+
 /**
  * 检查一次。auto=true 时静默跳过前置条件不满足的情况(比如规划 API 没配好),不显示错误;
  * 满足时弹一次提示。手动检查把原因写进 outlineProgress.error。
@@ -123,6 +156,7 @@ export async function checkOutlineProgress(opts: { auto?: boolean } = {}): Promi
   try { channel = resolveOutlineChannel(); } catch (error) { return fail(error instanceof Error ? error.message : '规划 API 不可用。'); }
 
   const chat = ctx.chat, chatId = ctx.getCurrentChatId(), outlineId = active.id, chapter = active.currentChapter;
+  const criteria = active.content.chapters[chapter]?.exitCriteria;
   const floor = chat.length - 1;
   const own = ++runId;
   const ctrl = new AbortController();
@@ -130,17 +164,24 @@ export async function checkOutlineProgress(opts: { auto?: boolean } = {}): Promi
   outlineProgress.busy = true;
   outlineProgress.error = '';
   outlineProgress.errorDetail = '';
+  // 推进条件在请求期间被手动改过,结果按旧条件判断,同样丢弃
   const current = () => {
     const now = getContext();
     return own === runId && !ctrl.signal.aborted && !!now && now.chat === chat && now.getCurrentChatId?.() === chatId
-      && outlineState.active?.id === outlineId && outlineState.active.currentChapter === chapter;
+      && outlineState.active?.id === outlineId && outlineState.active.currentChapter === chapter
+      && outlineState.active.content.chapters[chapter]?.exitCriteria === criteria;
   };
   try {
     const raw = await requestCompletion(channel, buildProgressContext(ctx, active), { signal: ctrl.signal });
     if (!current()) return false;
     const verdict = parseProgressReply(raw);
     Object.assign(outlineProgress, { outlineId, chapter, met: verdict.met, reason: verdict.reason, floor, auto, dismissed: false });
-    if (auto && verdict.met) toast('规划当前阶段的推进条件可能已满足，可在「摘要 → 当前局势与计划」中切换阶段。', 'info');
+    if (auto && verdict.met) {
+      if (outlineSettings.progressCheck.autoAdvance && await autoAdvance(active, chapter, verdict, floor)) return true;
+      toast(chapter + 1 >= active.content.chapters.length
+        ? '规划最后一个阶段的推进条件可能已满足。规划不会自动结束，需要时在「摘要 → 创作规划」中点「结束规划」。'
+        : '规划当前阶段的推进条件可能已满足，可在「摘要 → 创作规划」中切换阶段。', 'info');
+    }
     return true;
   } catch (error) {
     if (!current()) return false;
@@ -160,6 +201,11 @@ export async function checkOutlineProgress(opts: { auto?: boolean } = {}): Promi
 /** 用户点「忽略」:这次结果不再提示,下一次检查照常。 */
 export function dismissOutlineProgress(): void {
   outlineProgress.dismissed = true;
+}
+
+/** 推进条件被手动修改后:已有的检查结果按旧条件判断,清掉;正在进行的检查到达后也会因条件不同被丢弃。 */
+export function clearOutlineProgressResult(): void {
+  Object.assign(outlineProgress, { outlineId: '', chapter: -1, met: null, reason: '', floor: -1, auto: false, dismissed: false });
 }
 
 function aiCount(ctx: STContext): number {

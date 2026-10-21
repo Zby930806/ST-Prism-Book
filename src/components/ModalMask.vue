@@ -18,6 +18,7 @@
 import { modalHost } from '@/state/ui';
 import { ref } from 'vue';
 import { useDialogFocus } from '@/composables/useDialogFocus';
+import { useBackLayer } from '@/composables/useBackLayer';
 
 const props = defineProps<{
   /** 弹窗是否显示 */
@@ -30,6 +31,8 @@ const emit = defineEmits<{ (e: 'close'): void }>();
 const maskEl = ref<HTMLElement | null>(null);
 // 打开时聚焦弹窗本身（插槽里 role=dialog 的元素），读屏能报出弹窗名称；没有则聚焦遮罩。
 const { onDialogKeydown } = useDialogFocus(maskEl, () => !!props.open, () => emit('close'), () => maskEl.value?.querySelector<HTMLElement>('[role="dialog"]') ?? null);
+// 返回键关闭弹窗，与关闭键、Esc、点遮罩相同（ModalShell 和各页弹窗都经过这里）
+useBackLayer(() => !!props.open, () => emit('close'));
 </script>
 
 <template>
