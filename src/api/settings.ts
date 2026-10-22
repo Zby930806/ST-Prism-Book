@@ -257,6 +257,11 @@ export interface ApiSettings {
   /** 自动摘要开关。开启即一并启用:自动隐藏、正文时间标签、积压拦截(不再各自独立开关)。 */
   autoSummaryEnabled: boolean;
   /**
+   * 回复结束后立即摘要(默认关):AI 回复生成结束就摘这条回复,不等发送下一条消息。
+   * 之后重抽/翻页生成新回复时,旧回复的摘要作废、新回复结束后重摘;续写或编辑后按新内容重写。需开启自动摘要。
+   */
+  summarizeOnReplyEnd: boolean;
+  /**
    * 仅摘要模式。继续分析、保存结构化状态,但不向主模型注入当前状态,
    * 也不再把物品/变量变动旁注写回正文。已有正文旁注不主动清理。
    */
@@ -422,6 +427,7 @@ function defaults(): ApiSettings {
     channels: [],
     assignments: { summary: '', resummary: '' },
     autoSummaryEnabled: true,
+    summarizeOnReplyEnd: false,
     summaryOnlyMode: false,
     injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, npcAffinity: true, items: true, scenes: true, secrets: true, injuryReminder: true },
     keepRecent: 3,
@@ -586,6 +592,8 @@ function normalize(raw: unknown): ApiSettings {
       : 1;
   // 回看原文补全角色档案:布尔,旧数据没有这个键(或值非法)时按开启处理
   merged.npcEnrichAuto = typeof merged.npcEnrichAuto === 'boolean' ? merged.npcEnrichAuto : true;
+  // 回复结束后立即摘要:布尔,缺失(老数据无此键)或类型不符时回退 false(默认在发送下一条时摘要)
+  merged.summarizeOnReplyEnd = typeof merged.summarizeOnReplyEnd === 'boolean' ? merged.summarizeOnReplyEnd : false;
   // 批量补摘参数:正整数,缺失/非法回退默认值(下限 1,避免 0 导致永不切块/死循环)
   merged.batchMaxChars =
     Number.isFinite(merged.batchMaxChars) && merged.batchMaxChars >= 500
@@ -713,6 +721,7 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.channels = src.channels;
   target.assignments = src.assignments;
   target.autoSummaryEnabled = src.autoSummaryEnabled;
+  target.summarizeOnReplyEnd = src.summarizeOnReplyEnd;
   target.summaryOnlyMode = src.summaryOnlyMode;
   target.injection = src.injection;
   target.keepRecent = src.keepRecent;

@@ -173,7 +173,7 @@ const API_GROUPS: Array<{ label: string; keys: string[] }> = [
   { label: '总开关', keys: ['enabled'] },
   { label: '基本设置（主题、导航、快捷按钮、楼层面板、悬浮球）', keys: ['ui'] },
   { label: '副 API 的任务指派', keys: ['assignments'] },
-  { label: '摘要设置', keys: ['autoSummaryEnabled', 'summaryMaxChars', 'verbosity', 'keepRecent', 'leafBatchThreshold', 'leafKeepRecent', 'resummaryThreshold', 'higherResummaryThreshold', 'recentResolvedPlansCount', 'summaryMaxRetries', 'npcEnrichAuto'] },
+  { label: '摘要设置', keys: ['autoSummaryEnabled', 'summarizeOnReplyEnd', 'summaryMaxChars', 'verbosity', 'keepRecent', 'leafBatchThreshold', 'leafKeepRecent', 'resummaryThreshold', 'higherResummaryThreshold', 'recentResolvedPlansCount', 'summaryMaxRetries', 'npcEnrichAuto'] },
   { label: '批量补摘的合并参数', keys: ['batchMaxChars', 'batchMaxFloors', 'batchFullRecent'] },
   { label: '注入设置', keys: ['summaryOnlyMode', 'memoryBudgetTokens', 'injection'] },
   { label: '向量记忆（开关、端点地址与模型、召回参数）', keys: ['vector'] },

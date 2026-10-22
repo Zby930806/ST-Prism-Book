@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/* 摘要设置：摘要篇幅、全文保留范围、总结合并频率、失败重试次数和回看原文补全角色档案。 */
+/* 摘要设置：摘要时机、摘要篇幅、全文保留范围、总结合并频率、失败重试次数和回看原文补全角色档案。 */
 import BbsSelect from '@/components/BbsSelect.vue';
 import Collapsible from '@/components/Collapsible.vue';
 import {
@@ -24,9 +24,16 @@ function onSummaryMaxCharsChange() {
 
 <template>
   <Collapsible class="prism-settings-card" title="摘要设置" :open="false">
-    <p class="prism-card-intro">摘要篇幅、全文保留范围、总结合并频率、失败重试次数和角色档案补全。</p>
+    <p class="prism-card-intro">摘要时机、摘要篇幅、全文保留范围、总结合并频率、失败重试次数和角色档案补全。</p>
     <SettingRow label="启用自动摘要" hint="启用后自动摘要并隐藏旧楼层，同时启用正文时间标签（剧情时间的锚点）和积压拦截（有楼层漏摘时拦截发送并提示补摘）。">
       <input v-model="apiSettings.autoSummaryEnabled" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" />
+    </SettingRow>
+    <SettingRow
+      label="回复结束后立即摘要"
+      hint="默认在发送下一条消息时才为上一条回复写摘要。打开后，AI 回复生成结束就开始写摘要。需开启「启用自动摘要」。"
+      details="之后重抽或翻页生成新回复时，已写的摘要作废，新回复结束后重写，每次多用一个请求。续写这条回复时，续写结束后按新内容重写；编辑这条回复时，发送下一条消息时按新内容重写。摘要在后台进行，不影响继续聊天。"
+    >
+      <input v-model="apiSettings.summarizeOnReplyEnd" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" :disabled="!apiSettings.autoSummaryEnabled" />
     </SettingRow>
     <SettingRow
       kind="num"

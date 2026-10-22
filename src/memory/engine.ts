@@ -911,6 +911,7 @@ export async function maybeSummarizePrevAi(
   skipLastAi: boolean,
   waitUntilRequestStarts = false,
   initializeOpening = false,
+  quietIfSourceChanged = false,
 ): Promise<void> {
   const ctx = getContext();
   const chat = ctx?.chat ?? [];
@@ -943,7 +944,7 @@ export async function maybeSummarizePrevAi(
     const started = new Promise<'request-started'>(resolve => {
       markStarted = () => resolve('request-started');
     });
-    const run = runSummary(target, { onRequestStart: markStarted, initializeOpening });
+    const run = runSummary(target, { onRequestStart: markStarted, initializeOpening, quietIfSourceChanged });
     void run
       .then(async () => {
         await afterSummaryHideAndInject(chat);
@@ -959,7 +960,7 @@ export async function maybeSummarizePrevAi(
     return;
   }
 
-  await runSummary(target, { initializeOpening });
+  await runSummary(target, { initializeOpening, quietIfSourceChanged });
   await afterSummaryHideAndInject(chat);
 }
 
@@ -1218,7 +1219,12 @@ interface RunSummaryOptions {
   onRequestStart?: () => void;
   /** 预览模式(重新摘要先对比):结果解析校验通过后交给它,不落叶;由 applyFloorPreview 提交。 */
   onPrepared?: (pending: PendingFloorSummary) => void;
+  /** 回复结束后立即摘要:这层随后被重抽、续写或编辑时只放弃写入、不报错,新内容会另行摘要。 */
+  quietIfSourceChanged?: boolean;
 }
+
+/** 摘要期间聊天或这层正文变了(切聊天、重抽、续写、编辑),结果按旧内容写成,不能写入。 */
+class SourceChangedError extends Error {}
 
 /** 一次单楼摘要解析好、还没落叶的结果,以及提交前用来核对上下文的信息。 */
 interface PendingFloorSummary {
@@ -1412,7 +1418,7 @@ async function summarizeFloorWork(
     if (issue) throw new Error(issue);
     if (getContext()?.chat !== chat || getContext()?.chatMetadata !== requestMetadata || getContext()?.getCurrentChatId?.() !== requestChatId || initialStoryTime() !== requestInitialTime ||
         sources.some(s => chat[s.i] !== s.message || s.message.mes !== s.text || s.message.swipe_id !== s.swipe)) {
-      throw new Error('摘要期间聊天或这层正文发生变化，结果没有写入，请重新摘要。');
+      throw new SourceChangedError('摘要期间聊天或这层正文发生变化，结果没有写入，请重新摘要。');
     }
   };
 
@@ -1599,7 +1605,8 @@ async function runSummaryInner(aiFloor: number, options: RunSummaryOptions = {})
     // 摘要积累到阈值则触发总结
     if (options.checkResummary !== false) await checkResummary();
   } catch (e) {
-    recordFailure(e);
+    if (options.quietIfSourceChanged && e instanceof SourceChangedError) console.log('[棱镜宝书] 摘要期间这层正文已变化,放弃写入,新内容另行摘要:', aiFloor);
+    else recordFailure(e);
   } finally {
     busy = false;
     engineState.running = false;
@@ -2512,11 +2519,69 @@ function reactToChatMutation(syncHidden = false): void {
   }, 200);
 }
 
+/* ============ 回复结束后立即摘要(可选,默认关) ============ */
+
+/** 回复结束到开始摘要之间稍等片刻:让酒馆存完这条回复、其他插件处理完结束事件。 */
+const REPLY_END_SUMMARY_DELAY_MS = 500;
+
+/**
+ * 立即摘要时这层的正文(清洗后)。之后续写或编辑改了正文,就按新内容重写这层摘要,
+ * 结果与默认时机(发送下一条时才摘要)一致。只存在内存里:切聊天或刷新页面后失效。
+ */
+let replyLeafSnapshot: { chat: STMessage[]; floor: number; leafId: string; text: string } | null = null;
+
+function rememberReplyLeaf(chat: STMessage[], floor: number): void {
+  const m = chat[floor];
+  const leaf = getLeaf(m);
+  replyLeafSnapshot = m && leaf && leafValid(m) ? { chat, floor, leafId: leaf.id, text: cleanBody(m.mes) } : null;
+}
+
+/** 立即摘要过的那层,正文之后被续写或编辑过、需要按新内容重写摘要(同步判断,不发请求)。 */
+function replyLeafNeedsRefresh(): boolean {
+  const snap = replyLeafSnapshot;
+  if (!snap || !apiSettings.summarizeOnReplyEnd || getContext()?.chat !== snap.chat) return false;
+  const m = snap.chat[snap.floor];
+  const leaf = getLeaf(m);
+  return !!m && !!leaf && leaf.id === snap.leafId && leafValid(m) && cleanBody(m.mes) !== snap.text;
+}
+
+/**
+ * 按新内容重写立即摘要过的那层。保留叶子 id,不触发上层总结;
+ * 已并入总结的不重写(重写会拆掉包含它的上层总结),保留原摘要,需要时在楼层面板手动重新摘要。
+ */
+async function refreshEditedReplyLeaf(): Promise<void> {
+  if (!replyLeafNeedsRefresh() || busy || !engineActiveHere() || !apiSettings.autoSummaryEnabled) return;
+  const snap = replyLeafSnapshot!;
+  const leaf = getLeaf(snap.chat[snap.floor])!;
+  if (memory.summaries.some(s => s.childIds?.includes(leaf.id))) { replyLeafSnapshot = null; return; }
+  await runSummary(snap.floor, { replaceLeaf: leaf, checkResummary: false, quietIfSourceChanged: true });
+  await afterSummaryHideAndInject(snap.chat);
+  if (getContext()?.chat === snap.chat && getLeaf(snap.chat[snap.floor]) !== leaf) rememberReplyLeaf(snap.chat, snap.floor);
+}
+
+/** 回复生成结束:为刚写完的这条回复写摘要;续写结束时按续写后的正文重写。 */
+async function summarizeFinishedReply(chat: STMessage[]): Promise<void> {
+  if (!engineActiveHere() || !apiSettings.autoSummaryEnabled || !apiSettings.summarizeOnReplyEnd) return;
+  // 上一次摘要还没结束(例如刚重抽,旧回复的摘要仍在请求)时先等它;旧回复已变,那次会放弃写入。
+  for (let i = 0; busy && i < 5; i++) await (currentSummaryPromise() ?? Promise.resolve());
+  if (busy || getContext()?.chat !== chat) return;
+  const floor = prevAiFloor(chat, false);
+  if (floor < 0) return;
+  if (leafValid(chat[floor])) { await refreshEditedReplyLeaf(); return; }
+  await maybeSummarizePrevAi(false, false, true, true);
+  // 先补的是唯一的旧缺口时,接着摘这条新回复
+  if (getContext()?.chat === chat && !leafValid(chat[floor]) && !busy && holesExceptLast(chat).length === 0) {
+    await maybeSummarizePrevAi(false, false, true, true);
+  }
+  if (getContext()?.chat === chat && leafValid(chat[floor])) rememberReplyLeaf(chat, floor);
+}
+
 /**
  * 绑定事件。摘要触发规则:**只确保「上一条已定稿 AI 消息」有摘要**(单楼增量,非全量)。
  * 进入聊天 / 翻到没摘要的页,都不再自动立刻补摘。
  *  - USER_MESSAGE_RENDERED:发新消息 → 摘「上一条 AI」(skipLastAi=false)。
  *  - GENERATION_STARTED(regenerate/swipe):末尾 AI 正在被改写,跳过它 → 摘「之前那条 AI」(skipLastAi=true)。
+ *  - GENERATION_ENDED(可选「回复结束后立即摘要」,默认关):回复一结束就摘这条回复;之后续写或编辑,按新内容重写。
  *  - MESSAGE_SWIPED / MESSAGE_EDITED:数据随消息跟随 → reactToChatMutation(清坏链+重算+刷新),不在此处生成。
  *  - MESSAGE_DELETED:同上,并同步一次滑动隐藏/取消隐藏。
  *  - CHAT_CHANGED:store 负责重载,这里刷新注入。
@@ -2531,9 +2596,11 @@ export function bindEngine(): void {
   console.log('[棱镜宝书] bindEngine 执行,监听', et.USER_MESSAGE_RENDERED, et.GENERATION_STARTED);
 
   // 发新消息:此刻末尾 AI 是「上一条已定稿」的回复,从最早缺口开始顺序追赶到它。
+  // 立即摘要过的上一条回复之后被编辑过时,先按新内容重写它。
   es.on(et.USER_MESSAGE_RENDERED, () => {
     console.log('[棱镜宝书] USER_MESSAGE_RENDERED → 摘上一条 AI');
-    void maybeSummarizePrevAi(false, false, true);
+    if (replyLeafNeedsRefresh()) void refreshEditedReplyLeaf().then(() => maybeSummarizePrevAi(false, false, true));
+    else void maybeSummarizePrevAi(false, false, true);
   });
 
   // 重新生成 / 翻页:聊天末尾实际是 AI 时才视为正在改写并跳过;
@@ -2547,7 +2614,46 @@ export function bindEngine(): void {
       const chat = getContext()?.chat ?? [];
       const skipLastAi = shouldSkipLastAiForGeneration(chat, type);
       console.log('[棱镜宝书] GENERATION_STARTED → 自动摘要, type =', type, '| skipLastAi =', skipLastAi);
-      void maybeSummarizePrevAi(skipLastAi, false, !skipLastAi);
+      if (!skipLastAi && replyLeafNeedsRefresh()) void refreshEditedReplyLeaf().then(() => maybeSummarizePrevAi(false, false, true));
+      else void maybeSummarizePrevAi(skipLastAi, false, !skipLastAi);
+    });
+  }
+
+  // 回复结束后立即摘要(可选,默认关)。口径与札记、世界书的自动生成相同:产出新正文的生成
+  // (normal/regenerate/swipe/continue)真正渲染出 AI 回复、且没有被停止,结束后才摘要这条回复。
+  let replyAllowed = false;
+  let replyRendered = false;
+  let replyTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearReplyTimer = () => { if (replyTimer) clearTimeout(replyTimer); replyTimer = null; };
+  if (et.GENERATION_STARTED) {
+    es.on(et.GENERATION_STARTED, (type?: string, _opts?: unknown, dryRun?: boolean) => {
+      if (dryRun || type === 'quiet' || type === 'impersonate') return;
+      clearReplyTimer();
+      replyRendered = false;
+      replyAllowed = type == null || ['normal', 'regenerate', 'swipe', 'continue'].includes(String(type));
+    });
+  }
+  if (et.CHARACTER_MESSAGE_RENDERED) {
+    es.on(et.CHARACTER_MESSAGE_RENDERED, (_floor?: unknown, type?: unknown) => {
+      if (replyAllowed && type !== 'quiet' && type !== 'impersonate' && type !== 'first_message') replyRendered = true;
+    });
+  }
+  if (et.GENERATION_STOPPED) es.on(et.GENERATION_STOPPED, () => { clearReplyTimer(); replyAllowed = false; replyRendered = false; });
+  if (et.GENERATION_ENDED) {
+    es.on(et.GENERATION_ENDED, () => {
+      const eligible = replyAllowed && replyRendered;
+      replyAllowed = false;
+      replyRendered = false;
+      if (!eligible || !apiSettings.summarizeOnReplyEnd) return;
+      const ctx = getContext();
+      if (!ctx) return;
+      const chat = ctx.chat ?? [], count = chat.length, chatId = ctx.getCurrentChatId?.();
+      clearReplyTimer();
+      replyTimer = setTimeout(() => {
+        replyTimer = null;
+        const now = getContext();
+        if (now?.chat === chat && now.getCurrentChatId?.() === chatId && chat.length === count) void summarizeFinishedReply(chat);
+      }, REPLY_END_SUMMARY_DELAY_MS);
     });
   }
 
