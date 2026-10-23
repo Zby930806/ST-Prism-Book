@@ -16,7 +16,7 @@ import { npcLocationLabel } from './npcLocation';
 import { apiSettings, engineActiveHere } from '@/api/settings';
 import type { STMessage } from '@/st/context';
 import { getContext } from '@/st/context';
-import { buildSceneLocationIndex, classifyNpcPresence, findCurrentSceneId, getLeaf, itemReachableAtScene, leafValid } from './apply';
+import { buildSceneLocationIndex, classifyNpcPresence, findCurrentSceneId, getLeaf, itemReachableAtScene, leafValid, staleLastSeenRelation } from './apply';
 import { fmtItems, fmtPlans, fmtResolvedPlans, renderVarsState, selectRecentResolvedPlans, MEMORY_BRIEFING_NOTE, MEMORY_BRIEFING_END } from './prompts';
 import { fmtLifeDetail } from './lifeDetails';
 import { fmtInjuryReminder, type InjuryReminderSubject } from './injuryReminder';
@@ -382,7 +382,7 @@ function buildInjuryReminder(protagonistOn: boolean, npcsOn: boolean): string {
     const rank = (n: MemNpc): number => {
       if (n.important) return 0;
       const p = classifyNpcPresence(n, memory.scenes, here, locPath);
-      return p === 'present' ? 1 : p === 'nearby' ? 2 : -1;
+      return p === 'present' ? 1 : p === 'nearby' || staleLastSeenRelation(n, memory.scenes, here, locPath) ? 2 : -1;
     };
     injured
       .map(n => ({ n, r: rank(n) }))
@@ -413,16 +413,25 @@ function fmtProtagonistContext(protagonist: MemProtagonist, name: string, now: s
 }
 
 /** 把 NPC 的「即时状态」(着装/状态/所在)拼成一段尾注;无则空串。供在场与主要角色组复用。 */
-function npcStateTail(n: MemNpc, withPlace: boolean): string {
+function npcStateTail(n: MemNpc, withPlace: boolean, placeLabel?: string): string {
   const tail: string[] = [];
   if (oneLine(n.outfit)) tail.push(`最后记录着装:${oneLine(n.outfit)}`);
   if (oneLine(n.condition)) tail.push(`最后记录身体状态:${oneLine(n.condition)}`);
   if (withPlace) {
     if (n.follow) tail.push('随行');
-    else tail.push(npcLocationLabel(n));
+    else tail.push(placeLabel || npcLocationLabel(n));
   }
   return tail.length ? ` 〔${tail.join(';')}〕` : '';
 }
+
+/** 位置已过期、最后确认的地点就在主角所在处或附近时的写法(时间取最后确认时的故事时间)。 */
+function lastSeenLabel(n: MemNpc, rel: 'same' | 'near'): string {
+  const time = n.lastKnownLocation?.place === n.location && n.lastKnownLocation?.time ? `（${oneLine(n.lastKnownLocation.time)}）` : '';
+  return `最后确认在${rel === 'same' ? '此处' : '附近'}:${oneLine(n.location)}${time},之后未再确认`;
+}
+
+/** 「最后确认在此处/附近」的角色怎么写:既不默认消失,也不默认原地不动。 */
+const LAST_SEEN_GUIDE = '按身份、作息和经过的时间判断是否还在:住处、店铺、岗位,或才过不久时多半仍在;不在时要交代去向或留下痕迹,不要无缘无故写成不见了';
 
 /**
  * 关系的「称谓头」:取 relation 第一个逗号/分号/破折号前的部分(引导 AI 把称谓写在开头)。
@@ -462,6 +471,9 @@ export interface NpcContextBlocks {
  *  - NPC 在场(随行 / 所在地=主角当前节点)→ 全量:名 + 性别 + 年龄 + 身份 + 关系 + 性格 + 外貌 + 即时状态。
  *  - NPC **同区域**(抬头最多一级就与主角共处)→ 轻量:名 + 性别 + 年龄 + 身份 + 关系 + 性格 + 所在地。留个性格,免得 AI
  *    临时拉其出场时凭空 OOC;省略外貌与着装,保留身体状态以免漏掉行动限制。
+ *  - NPC **最后确认在此处/附近**(位置因主角换场景或跨日而过期,但最后确认的地点就是主角所在处或附近,
+ *    如过了一夜、主角回到原处)→ 单列,附最后确认时间和「按身份作息与经过时间判断是否还在」的说明;
+ *    无名角色也发,免得回到原处时被写成不见了或换了个人。主要角色同样标出。
  *  - NPC 不在场(更上级祖先/更远旁支/位置未确认)→ 有名字的发一行:名 + 性别 + 关系称谓 + 身份 + 位置 + 已有好感档位(省略说明)
  *    + 最后记录身体状态;「职业 + 字母」的无名角色不发(回到对应地点会重新在场)。最多 ABSENT_NPC_LIMIT 人,按最近出场排序。
  * **性别在所有档都发**(包括不在场),防 AI 搞错性别;关系的**称谓头**同理(把亲哥写成陌生人同级严重)。
@@ -473,12 +485,18 @@ export function fmtNpcContextBlocks(npcs: MemNpc[], scenes: MemScene[], here: st
   const main: MemNpc[] = [];
   const present: MemNpc[] = [];
   const nearby: MemNpc[] = [];
+  // 位置已过期、最后确认的地点就在主角所在处或附近(过了一夜、主角回到原处):单列提醒,不当成不在场
+  const lastSeen: Array<{ n: MemNpc; rel: 'same' | 'near' }> = [];
   const absent: MemNpc[] = [];
+  const seenRel = new Map<MemNpc, 'same' | 'near'>();
   for (const n of npcs) {
+    const rel = staleLastSeenRelation(n, scenes, here, locationPath);
+    if (rel) seenRel.set(n, rel);
     if (n.important) { main.push(n); continue; } // 主要角色单列,不再进在场判定
     const p = classifyNpcPresence(n, scenes, here, locationPath); // 与 NPC 页共用同一权威判定
     if (p === 'present') present.push(n);
     else if (p === 'nearby') nearby.push(n);
+    else if (rel) lastSeen.push({ n, rel });
     else if (!isNpcLabelName(n.name)) absent.push(n); // 无名角色不在场时不发
   }
   const age = (n: MemNpc): string => oneLine(ageDisplay(n.age, n.ageTime, now));
@@ -501,7 +519,7 @@ export function fmtNpcContextBlocks(npcs: MemNpc[], scenes: MemScene[], here: st
 
   // 好感说明与长期关系各输出一次,放在第一段有内容的名册前面
   const preface: string[] = [];
-  if ([...main, ...present, ...nearby, ...absentShown].some(n => aff(n))) preface.push(NPC_AFFINITY_BRIEFING);
+  if ([...main, ...present, ...nearby, ...lastSeen.map(x => x.n), ...absentShown].some(n => aff(n))) preface.push(NPC_AFFINITY_BRIEFING);
   const ties = fmtNpcTiesContext(npcs);
   if (ties) preface.push(ties);
   const withPreface = (header: string, body: string): string => {
@@ -521,10 +539,12 @@ export function fmtNpcContextBlocks(npcs: MemNpc[], scenes: MemScene[], here: st
         if (oneLine(n.desc)) profile.push(`外貌:${oneLine(n.desc)}`);
         if (oneLine(n.personality)) profile.push(`性格:${oneLine(n.personality)}`);
         const affinity = aff(n);
-        return `  - ${head}${profile.length ? ` —— ${profile.join(';')}` : ''}${affinity ? ` 〔好感估计:${affinity}〕` : ''}${npcStateTail(n, true)}`;
+        const rel = seenRel.get(n);
+        return `  - ${head}${profile.length ? ` —— ${profile.join(';')}` : ''}${affinity ? ` 〔好感估计:${affinity}〕` : ''}${npcStateTail(n, true, rel ? lastSeenLabel(n, rel) : undefined)}`;
       })
       .join('\n');
-    out.main = withPreface('[主要角色](快照为最后记录,离场后不凭空推测延续或演变)', detailed);
+    const lastSeenNote = main.some(n => seenRel.has(n)) ? `;标「最后确认在此处/附近」的,${LAST_SEEN_GUIDE}` : '';
+    out.main = withPreface(`[主要角色](快照为最后记录,离场后不凭空推测延续或演变${lastSeenNote})`, detailed);
   }
   const npcParts: string[] = [];
   if (present.length) {
@@ -563,6 +583,24 @@ export function fmtNpcContextBlocks(npcs: MemNpc[], scenes: MemScene[], here: st
       })
       .join('\n');
     npcParts.push(`同区域(在附近但未必照面;需要时可让其自然登场,勿凭空改设定):\n${brief}`);
+  }
+  if (lastSeen.length) {
+    // 最后确认在此处的带外貌,方便照面时按原样描写;都附最后身体状态。
+    const lines = lastSeen
+      .map(({ n, rel }) => {
+        const inBracket = [oneLine(n.gender), age(n), oneLine(n.title)].filter(Boolean);
+        const bracket = inBracket.length ? `(${inBracket.join('·')})` : '';
+        const profile: string[] = [];
+        if (oneLine(n.relation)) profile.push(`与主角:${oneLine(n.relation)}`);
+        const affinity = aff(n);
+        if (affinity) profile.push(`好感估计:${affinity}`);
+        if (oneLine(n.personality)) profile.push(`性格:${oneLine(n.personality)}`);
+        if (rel === 'same' && oneLine(n.desc)) profile.push(oneLine(n.desc));
+        const pers = profile.length ? ` —— ${profile.join(';')}` : '';
+        return `  - ${n.name}${bracket}${pers} [${lastSeenLabel(n, rel)}]${lastCondition(n)}`;
+      })
+      .join('\n');
+    npcParts.push(`最后确认在此处或附近(之后没有新的位置记录;${LAST_SEEN_GUIDE}):\n${lines}`);
   }
   if (npcParts.length) out.npc = withPreface('[NPC名册]', npcParts.join('\n'));
   if (absentShown.length) {

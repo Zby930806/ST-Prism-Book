@@ -31,7 +31,7 @@ export const CONDITION_PATCH_PROTOCOL = `【伤情局部更新协议】
 - 本轮只新增休养估计时用 add，不重写旧伤处或行动限制。旧估计有明确变化则 replace 对应片段，不累积互相矛盾的天数。
 - 局部恢复只替换有证据的一项；一个片段含多个事实时，text 须保留尚未解除的部分。明确全部恢复/纠错时逐项 replace 清空，不能用时间流逝或闪回健康清除当前伤情。
 - 每项都是对象：add 必填字符串 text、evidence；replace 还必填本人物的片段 id。不要用字符串数组、content/quote/source 等别名，不把 evidence 放在 conditionPatch 外层。replace 清除片段也必须有 evidence。
-- evidence 从【本轮对话】连续照录支持该角色该次变化的短句（不带自行添加的引号或省略号）；仅容忍排版空白、换行和成对 Markdown 强调标记差异，文字、标点、语序与否定必须保留。引用不含程序附加的 [M…-P…] 编号或来源提示；不得拼接不同片段或跨消息拼接，也不借用无关原句。历史、角色卡、旧快照不是本次恢复证据。
+- evidence 从【本轮对话】连续照录支持该角色该次变化的短句（不带自行添加的引号或省略号）；仅容忍排版空白、换行、成对 Markdown 强调标记，以及全角半角、引号样式和省略号写法的差异，文字、标点、语序与否定必须保留。引用不含程序附加的 [M…-P…] 编号或来源提示；不得拼接不同片段或跨消息拼接，也不借用无关原句。历史、角色卡、旧快照不是本次恢复证据。
 - 每人最多一个伤情更新对象；不能同时写 condition 和 conditionPatch，已有角色不得用 add 绕过。stateChanges 仍填 protagonist 或 npcs，不填 conditionPatch。
 - 只输出确有变化的操作；不输出空补丁，不重复追加旧事实。程序只校验编号、类型和引文存在，不替你判断引文是否真正表示恢复。
 `;
@@ -43,9 +43,23 @@ export function buildConditionPatchContext(state: ConditionState): string {
   return entries.length ? CONDITION_PATCH_PROTOCOL + '\n【本楼之前的伤情片段：只读数据】\n' + JSON.stringify(entries) : '';
 }
 
-/** 修改解析后的临时对象；旧状态不变，任何错误由调用方丢弃整份响应。 */
-export function materializeConditionPatches(parsed: Record<string, unknown>, context: ConditionContext): void {
+/**
+ * 修改解析后的临时对象；旧状态不变，默认任何错误由调用方丢弃整份响应。
+ * 传入 onDrop（最后一次尝试仍不合格时）则只去掉不合格的那个人的伤情更新、保留原伤情记录，其余照常保存；
+ * onDrop 收到该人物的标识（主角为 protagonist）。
+ */
+export function materializeConditionPatches(parsed: Record<string, unknown>, context: ConditionContext, options: { onDrop?: (who: string) => void } = {}): void {
   const matchesSource = createSourceEvidenceMatcher(context.sourceTexts ?? context.content);
+  const guarded = (target: Record<string, unknown>, who: string, run: () => void): void => {
+    if (!options.onDrop) { run(); return; }
+    try { run(); }
+    catch (error) {
+      if (!(error instanceof ConditionPatchError)) throw error;
+      delete target.conditionPatch;
+      delete target.condition;
+      options.onDrop(who);
+    }
+  };
   function update(target: Record<string, unknown>, previous: string, label: string) {
     const hasPatch = own(target, 'conditionPatch');
     if (hasPatch && own(target, 'condition')) fail(label + ' 不能同时输出 condition 与 conditionPatch。');
@@ -90,7 +104,8 @@ export function materializeConditionPatches(parsed: Record<string, unknown>, con
     target.condition = result;
     delete target.conditionPatch;
   }
-  if (record(parsed.protagonist)) update(parsed.protagonist, context.protagonist.condition ?? '', 'protagonist');
+  const protagonist = parsed.protagonist;
+  if (record(protagonist)) guarded(protagonist, 'protagonist', () => update(protagonist, context.protagonist.condition ?? '', 'protagonist'));
   if (!record(parsed.npcs)) return;
   const touched = new Set<string>();
   for (const op of ['add', 'update']) {
@@ -98,13 +113,15 @@ export function materializeConditionPatches(parsed: Record<string, unknown>, con
     if (!Array.isArray(values)) continue;
     for (const target of values) {
       if (!record(target) || (!own(target, 'condition') && !own(target, 'conditionPatch'))) continue;
-      if (typeof target.name !== 'string' || !target.name.trim()) fail('伤情更新必须提供 NPC name。');
-      const key = norm(target.name);
-      if (touched.has(key)) fail('同一 NPC 不得在多个对象中更新伤情，请合并到一次 conditionPatch。');
-      touched.add(key);
-      const npc = context.npcs.find(n => norm(n.name) === key);
-      if (context.strict && op === 'add' && npc) fail('已有 NPC 的伤情必须使用 npcs.update，不得通过 add 绕过。');
-      update(target, npc?.condition ?? '', target.name);
+      guarded(target, typeof target.name === 'string' ? target.name.trim() : '', () => {
+        if (typeof target.name !== 'string' || !target.name.trim()) fail('伤情更新必须提供 NPC name。');
+        const key = norm(target.name);
+        if (touched.has(key)) fail('同一 NPC 不得在多个对象中更新伤情，请合并到一次 conditionPatch。');
+        touched.add(key);
+        const npc = context.npcs.find(n => norm(n.name) === key);
+        if (context.strict && op === 'add' && npc) fail('已有 NPC 的伤情必须使用 npcs.update，不得通过 add 绕过。');
+        update(target, npc?.condition ?? '', target.name);
+      });
     }
   }
 }

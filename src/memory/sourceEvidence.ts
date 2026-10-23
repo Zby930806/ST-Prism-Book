@@ -47,9 +47,21 @@ function withoutEmphasis(text: string): string {
 
 function normalizeEvidence(text: string): string {
   return withoutEmphasis(text)
+    // 只统一写法不同、意思相同的符号:全角半角(NFKC)、各式引号、省略号和破折号。
+    // 不同的标点(如逗号与顿号)仍按原样比对。
+    .normalize('NFKC')
+    .replace(/[“”„‟「」『』〝〞＂]/gu, '"')
+    .replace(/[‘’‚‛]/gu, "'")
+    .replace(/(?:\.{3,}|…+|。{3,})/gu, '…')
+    .replace(/(?:—+|–+|-{2,}|─+)/gu, '—')
     .replace(/\s+/gu, ' ').trim()
     // 汉字/标点旁的空白可来自缩进与折行；保留拉丁单词间的边界，不能 now here -> nowhere。
     .replace(/(?<=[\p{Script=Han}\p{P}]) | (?=[\p{Script=Han}\p{P}])/gu, '');
+}
+
+/** 模型常给整段引文自行加一对引号;只去掉包住整段的引号,中间的引号照常比对。 */
+function withoutWrappingQuotes(text: string): string {
+  return text.replace(/^["']+/u, '').replace(/["']+$/u, '');
 }
 
 /** 同一原消息内的连续引文匹配；不得把多条消息或程序提示拼成证据。 */
@@ -62,9 +74,11 @@ export function createSourceEvidenceMatcher(content: string | readonly string[])
     if (sources.some(source => source.includes(exact))) return true;
     const normalizedQuote = normalizeEvidence(quote);
     if (!normalizedQuote) return false;
+    const unwrapped = withoutWrappingQuotes(normalizedQuote);
     return sources.some((source, index) => {
       if (!normalizedSources.has(index)) normalizedSources.set(index, normalizeEvidence(source));
-      return normalizedSources.get(index)!.includes(normalizedQuote);
+      const normalized = normalizedSources.get(index)!;
+      return normalized.includes(normalizedQuote) || (!!unwrapped && normalized.includes(unwrapped));
     });
   };
 }

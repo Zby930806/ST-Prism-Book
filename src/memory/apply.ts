@@ -770,6 +770,19 @@ function sameFreeLocation(a: string | undefined, b: string): boolean {
   return !!x && x === b.trim();
 }
 
+/**
+ * 位置已过期的角色(主角换了场景或过了一天,之后没有新的定位证据),其最后确认的地点与主角当前所在的关系:
+ * 'same' 就是这里,'near' 在附近,否则 null。用于提醒正文模型「最后记录在此处」,
+ * 不改变在场分档本身(仍按位置未确认处理)。去向已明确不明(location 被清空)的不算。
+ */
+export function staleLastSeenRelation(npc: MemNpc, scenes: MemScene[], here: string, locationPath?: string[]): 'same' | 'near' | null {
+  if (npc.follow === true || !npc.locationStale) return null;
+  const place = npc.location?.trim();
+  if (!place) return null;
+  const p = classifyNpcPresence({ ...npc, location: place, locationStale: false }, scenes, here, locationPath);
+  return p === 'present' ? 'same' : p === 'nearby' ? 'near' : null;
+}
+
 /** 包含式双向匹配(地名命名粗细不一时的兜底);空串不匹配。供 findCurrentSceneId 内部用。 */
 function sceneNameReachable(a: string | undefined, b: string): boolean {
   const x = (a ?? '').trim();

@@ -39,6 +39,31 @@ function cleanConflicts(value: unknown, sources: readonly string[]): NonNullable
   return out;
 }
 
+/** 宽松解析时被去掉的更新:引文与正文对不上的角色位置或伤情,原记录保持不变。 */
+export interface DroppedEvidence { kind: 'location' | 'condition'; name: string }
+
+/**
+ * 宽松解析去掉定位或伤情后,清掉只剩名字的角色条目和空分组,并同步 stateChanges,
+ * 让其余内容照常通过后面的字段校验。
+ */
+function pruneEmptyAfterDrop(parsed: Record<string, unknown>): void {
+  const emptied: string[] = [];
+  if (record(parsed.protagonist) && !Object.keys(parsed.protagonist).length) { delete parsed.protagonist; emptied.push('protagonist'); }
+  if (record(parsed.npcs)) {
+    for (const op of ['add', 'update']) {
+      const values = parsed.npcs[op];
+      if (!Array.isArray(values)) continue;
+      const kept = values.filter(entry => !record(entry) || Object.keys(entry).some(k => k !== 'name'));
+      if (kept.length) parsed.npcs[op] = kept;
+      else delete parsed.npcs[op];
+    }
+    if (!Object.keys(parsed.npcs).length) { delete parsed.npcs; emptied.push('npcs'); }
+  }
+  if (emptied.length && Array.isArray(parsed.stateChanges)) {
+    parsed.stateChanges = parsed.stateChanges.filter(k => !emptied.includes(k as string));
+  }
+}
+
 export function parseSummaryResponse(raw: string, options: {
   sourceContent?: string;
   /** 未附来源编号/提示的原消息，每条独立匹配，不允许跨消息拼接。 */
@@ -50,6 +75,11 @@ export function parseSummaryResponse(raw: string, options: {
   userName?: string;
   requireStateChanges: boolean;
   finalize: (delta: SummaryDelta) => StoredDelta;
+  /**
+   * 最后一次尝试:角色位置或伤情的引文仍与正文对不上时,只去掉这几项更新(保留原记录),其余照常保存,
+   * 不再让整楼摘要失败;去掉了哪些交给它。不传时任何引文问题都整份拒绝,由调用方带着原因重试。
+   */
+  onDroppedEvidence?: (dropped: DroppedEvidence[]) => void;
 }): SummaryDelta & { summary: string } {
   const parsed = extractJsonObject<unknown>(raw);
   if (!record(parsed) || typeof parsed.summary !== 'string' || !parsed.summary.trim()) {
@@ -90,22 +120,31 @@ export function parseSummaryResponse(raw: string, options: {
       throw error;
     }
   }
+  const dropped: DroppedEvidence[] = [];
+  const lenient = !!options.onDroppedEvidence;
   if (options.conditionContext) {
     const ctx = options.conditionContext;
     const npcsAfterRename = renames.size
       ? ctx.npcs.map(n => ({ ...n, name: renames.get(n.name.trim().toLowerCase()) ?? n.name }))
       : ctx.npcs;
-    try { materializeConditionPatches(parsed, { ...ctx, npcs: npcsAfterRename, sourceTexts: options.sourceTexts ?? ctx.sourceTexts }); }
+    try {
+      materializeConditionPatches(parsed, { ...ctx, npcs: npcsAfterRename, sourceTexts: options.sourceTexts ?? ctx.sourceTexts },
+        lenient ? { onDrop: who => dropped.push({ kind: 'condition', name: who }) } : {});
+    }
     catch (error) {
       if (error instanceof ConditionPatchError) throw new SummaryResponseError(error.message);
       throw error;
     }
   }
-  try { validateNpcLocationEvidence(parsed, { strict: options.requireStateChanges, content: options.sourceContent, sourceTexts: options.sourceTexts }); }
+  try {
+    validateNpcLocationEvidence(parsed, { strict: options.requireStateChanges, content: options.sourceContent, sourceTexts: options.sourceTexts,
+      ...(lenient ? { onDrop: (name: string) => dropped.push({ kind: 'location', name }) } : {}) });
+  }
   catch (error) {
     if (error instanceof NpcLocationEvidenceError) throw new SummaryResponseError(error.message);
     throw error;
   }
+  if (dropped.length) pruneEmptyAfterDrop(parsed);
   // 内置 add 是明确转入量；未知数量不能被派生层的历史兼容默认值变成“获得1”。
   // 不从名称或描述关键词猜交易方向；自定义旧模板和已存历史仍沿用原合同。
   if (options.requireStateChanges && record(parsed.items) && Array.isArray(parsed.items.add)) {
@@ -155,5 +194,7 @@ export function parseSummaryResponse(raw: string, options: {
       throw new SummaryResponseError('stateChanges 与有效状态字段不一致，请补齐对应更新或更正清单；写入 summary 不等于更新档案。');
     }
   }
+  // 整份通过校验后才报告:去掉的几项不会写入,原记录保持不变
+  if (dropped.length) options.onDroppedEvidence!(dropped);
   return delta;
 }

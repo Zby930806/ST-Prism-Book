@@ -11,7 +11,7 @@ import { addSummary, classifyNpcPresence, deriveAfterDelta, deriveMemory, finali
 import { extractJsonObject } from './json';
 import { npcMentioned } from './npcLabel';
 import { planAutoEnrichment, readEnrichRecord, runAutoEnrichment, writeEnrichRecords, type EnrichRecordUpdate } from './npcEnrich';
-import { parseSummaryResponse, SummaryResponseError } from './summaryResponse';
+import { parseSummaryResponse, SummaryResponseError, type DroppedEvidence } from './summaryResponse';
 import { buildConditionPatchContext } from './conditionPatch';
 import { clearInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
 import { BATCH_SUMMARY_THINKING_CHECKLIST, buildBatchSummaryPrompt, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, isDeepSeekModel, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
@@ -1172,23 +1172,24 @@ function unfinishedReply(raw: string): ApiError | null {
 async function sendAndParse<T>(
   send: (messages: ChatMsg[]) => Promise<string>,
   messages: ChatMsg[],
-  parse: (raw: string) => T,
+  parse: (raw: string, finalAttempt: boolean) => T,
 ): Promise<T> {
   const maxRetries = Math.max(0, apiSettings.summaryMaxRetries | 0);
   let lastErr: unknown;
   let request = messages;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const finalAttempt = attempt === maxRetries;
     try {
-      return parse(await send(request));
+      return parse(await send(request), finalAttempt);
     } catch (e) {
       let error = e;
       // 截断发生在完整 JSON 之后时(例如模型在结果后继续写说明),结果本身仍可使用。
       const partial = partialReply(error);
       if (partial && containsCompleteJson(partial)) {
-        try { return parse(partial); } catch (inner) { error = inner; }
+        try { return parse(partial, finalAttempt); } catch (inner) { error = inner; }
       }
       lastErr = error;
-      if (error instanceof SummarySourceChangedError) throw error;
+      if (error instanceof SummarySourceChangedError || error instanceof SourceChangedError) throw error;
       if (error instanceof SummaryResponseError) {
         const correction: ChatMsg = { role: 'system', content: '上一次摘要结果未通过校验：' + error.message + '\n请重新输出完整结果；只依据原材料，不添加事实。' };
         // 保持 assistant 预填位于末尾；仅携带稳定校验错误，不回灌原始响应或累积纠错消息。
@@ -1241,6 +1242,8 @@ interface PendingFloorSummary {
   enriched: NpcEnrichment[];
   /** 提交时要写的补档记录(请求过的角色才有) */
   enrichRecords: EnrichRecordUpdate[];
+  /** 最后一次尝试中引文对不上、没有更新的角色位置或伤情(提交后提示) */
+  droppedEvidence: DroppedEvidence[];
   /** 聊天、来源正文、页码等没变才放行,否则抛错 */
   assertUnchanged: () => void;
 }
@@ -1496,7 +1499,9 @@ async function summarizeFloorWork(
   );
   assertUnchanged();
   options.onRequestStart?.();
-  const delta = await sendAndParse(request => { assertUnchanged(); return sender.send(request); }, messages, raw => {
+  // 最后一次尝试时,对不上正文的角色位置或伤情只去掉这几项、照常保存其余内容(见 parseSummaryResponse)
+  let droppedEvidence: DroppedEvidence[] = [];
+  const delta = await sendAndParse(request => { assertUnchanged(); return sender.send(request); }, messages, (raw, finalAttempt) => {
     if (extractJsonObject(raw) === null) {
       const unfinished = unfinishedReply(raw);
       if (unfinished) throw unfinished;
@@ -1509,6 +1514,7 @@ async function summarizeFloorWork(
       npcRoster: stateBefore.npcs.map(n => n.name),
       userName: ctx.name1,
       finalize: value => finalizeDelta(value, openPlansOrdered, stateBefore.lifeDetails, stateBefore.secrets.filter(s => s.status === 'open')),
+      ...(finalAttempt ? { onDroppedEvidence: (dropped: DroppedEvidence[]) => { droppedEvidence = dropped; } } : {}),
     });
     if (initialStoryTime()) {
       // 只补缺失端点，不能把后续楼层的完整日期降为正文中的“夜晚”等时段。
@@ -1527,6 +1533,7 @@ async function summarizeFloorWork(
     console.log('[棱镜宝书] 摘要校验通过:', { floor: aiFloor, chars: Array.from(d.summary).length, ...(builtin ? { target: summaryMaxChars() } : {}), fields: Object.keys(d) });
     return d;
   }).catch((error: unknown) => {
+    if (error instanceof SourceChangedError) throw error;
     if (error instanceof SummaryResponseError) {
       // 只标记解析失败：尚未进入 applyLeafForFloor，不把提交后的其他故障说成未保存。
       throw new SummaryResponseError('楼层 #' + aiFloor + ' 摘要未保存（该楼已有记录保持不变）。' + error.message);
@@ -1556,11 +1563,22 @@ async function summarizeFloorWork(
     replaceLeaf: options.replaceLeaf,
     enriched: enrichment.entries,
     enrichRecords: enrichment.records,
+    droppedEvidence,
     assertUnchanged,
   };
   // 预览模式:交出结果就停,不落叶;用户选「用新的」后由 applyFloorPreview 提交。
   if (options.onPrepared) { options.onPrepared(pending); return; }
   commitFloorSummary(pending);
+}
+
+/** 摘要已保存、但有几项引文对不上正文而没有更新时的提示:说清楚哪些没更新、原因和改法。 */
+function droppedEvidenceNotice(floor: number, dropped: DroppedEvidence[]): string {
+  const userName = getContext()?.name1?.trim() || '主角';
+  const who = (d: DroppedEvidence) => d.name === 'protagonist' ? userName : d.name || '某个角色';
+  const located = [...new Set(dropped.filter(d => d.kind === 'location').map(who))];
+  const injured = [...new Set(dropped.filter(d => d.kind === 'condition').map(who))];
+  const parts = [located.length ? `${located.join('、')}的位置` : '', injured.length ? `${injured.join('、')}的伤情` : ''].filter(Boolean);
+  return `楼层 #${floor} 的摘要已保存，但${parts.join('和')}没有更新：模型给出的引文与本楼正文对不上，已保留原记录。需要时可在「角色」页手动修改。`;
 }
 
 /** 落叶并刷新派生/注入/落盘/向量;提交前再核对一次聊天和这层正文没变。 */
@@ -1570,6 +1588,11 @@ function commitFloorSummary(p: PendingFloorSummary): void {
   engineState.lastRunAt = Date.now();
   // 补档记录随叶子一起提交:预览后选「保留现在的」时不写,之后仍可再补
   writeEnrichRecords(p.enrichRecords);
+  if (p.droppedEvidence.length) {
+    const notice = droppedEvidenceNotice(p.aiFloor, p.droppedEvidence);
+    console.log('[棱镜宝书]', notice, p.droppedEvidence);
+    toast(notice, 'warning');
+  }
 
   // 立刻反映到派生与注入;落盘走防抖(隐藏由收尾的 syncWindowHiddenState 统一负责)
   recomputeDerived();
