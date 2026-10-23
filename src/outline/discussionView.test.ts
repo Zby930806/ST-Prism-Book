@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { discussionFullTime, discussionTimeLabel, discussionTranscript, parseDiscussionText, parseInline, plainPreview } from './discussionView';
+import { discussionFullTime, discussionTimeLabel, discussionTranscript, parseDiscussionText, parseInline, plainPreview, splitReplyBubbles } from './discussionView';
 
 describe('parseInline', () => {
   it('识别粗体、行内代码与斜体，其余原样保留', () => {
@@ -57,12 +57,28 @@ describe('discussionTranscript', () => {
     expect(discussionTranscript([
       { role: 'user', content: '钟塔这场戏怎么安排？' },
       { role: 'assistant', content: '先慢后紧。\n' },
-    ])).toBe('你：\n钟塔这场戏怎么安排？\n\n规划模型：\n先慢后紧。');
+    ])).toBe('你：\n钟塔这场戏怎么安排？\n\nQiheng：\n先慢后紧。');
   });
   it('有时间的消息附上完整时间', () => {
     const at = new Date(2026, 9, 20, 8, 5).getTime();
     expect(discussionTranscript([{ role: 'user', content: '问', at }, { role: 'assistant', content: '答' }]))
-      .toBe('你（2026年10月20日 08:05）：\n问\n\n规划模型：\n答');
+      .toBe('你（2026年10月20日 08:05）：\n问\n\nQiheng：\n答');
+  });
+});
+
+describe('splitReplyBubbles', () => {
+  it('按空行拆成一条条气泡，没有空行时只有一条', () => {
+    expect(splitReplyBubbles('行\n\n这个我倾向 A\n主要是节奏\n\n\nB 稳，但是慢')).toEqual(['行', '这个我倾向 A\n主要是节奏', 'B 稳，但是慢']);
+    expect(splitReplyBubbles('一句话说完')).toEqual(['一句话说完']);
+    expect(splitReplyBubbles('  \n第一条\r\n\r\n第二条\n  ')).toEqual(['第一条', '第二条']);
+  });
+  it('代码块里的空行不拆', () => {
+    expect(splitReplyBubbles('看这个\n\n```\n第一行\n\n第三行\n```\n\n就这')).toEqual(['看这个', '```\n第一行\n\n第三行\n```', '就这']);
+  });
+  it('列表和标题各自成一条，拆出来的片段都能单独渲染', () => {
+    const parts = splitReplyBubbles('我倾向两步走\n\n- 先让她核实消息\n- 再摊牌\n\n**风险**：太快会崩');
+    expect(parts).toHaveLength(3);
+    expect(parseDiscussionText(parts[1])[0].kind).toBe('list');
   });
 });
 

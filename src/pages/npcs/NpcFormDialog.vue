@@ -3,12 +3,12 @@
  * 添加 / 编辑角色的表单弹窗。draft 由页面持有，表单直接编辑其字段；保存与关闭由页面处理。
  * 添加模式：名字、性别、年龄输入框按 Enter 即添加；页面可调用 focusName() 让名字框获得焦点。
  */
-import { apiSettings } from '@/api/settings';
 import BbsSelect from '@/components/BbsSelect.vue';
 import ModalShell from '@/components/ModalShell.vue';
 import { NPC_AFFINITY_FIELDS } from '@/memory/npcRelations';
 import { ref } from 'vue';
 import type { NpcDraft } from './npcView';
+import { blockSent } from './sendScope';
 
 const props = defineProps<{
   open: boolean;
@@ -82,7 +82,7 @@ defineExpose({ focusName: () => nameInput.value?.focus() });
       <label class="bbs-modal-field bbs-modal-check">
         <input v-model="draft.important" type="checkbox" class="bbs-checkbox" />
         <span class="bbs-modal-label">
-          {{ apiSettings.summaryOnlyMode ? '主要角色（除主角外的主要登场角色，仅在棱镜宝书内单独列出）' : '主要角色（除主角外的主要登场角色，档案与当前状态始终随正文发送）' }}
+          {{ blockSent('npcs') ? '主要角色（除主角外的主要登场角色，档案与当前状态随正文发送）' : '主要角色（除主角外的主要登场角色，仅在棱镜宝书内单独列出）' }}
         </span>
       </label>
       <label class="bbs-modal-field bbs-modal-check">

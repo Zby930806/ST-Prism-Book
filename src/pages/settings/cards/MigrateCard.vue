@@ -11,11 +11,13 @@ const migrateMsg = ref('');
 const migrateConfirmOpen = ref(false);
 // 迁移计划:展开面板时实时算(纯读当前 chat 的 horae_meta,不缓存)
 const migratePlan = computed<MigrationPlan>(() => computeMigrationPlan());
-// 确认文案随「是否覆盖」变化
+// 确认文案随「是否覆盖」和「迁移后是否有待补摘楼层」变化
 const migrateConfirmText = computed(() =>
-  migratePlan.value.willOverwrite
-    ? '当前聊天已有棱镜宝书数据，迁移会覆盖现有摘要，并在各楼写入数据。是否继续？'
-    : '将当前聊天中 Horae 的旧数据转换为棱镜宝书记忆。是否继续？',
+  (migratePlan.value.willOverwrite
+    ? '当前聊天已有棱镜宝书数据，迁移会覆盖现有摘要，并在各楼写入数据。'
+    : '将当前聊天中 Horae 的旧数据转换为棱镜宝书记忆。')
+  + (migratePlan.value.pendingFloors ? `迁移后有 ${migratePlan.value.pendingFloors} 层需要补摘，补齐之前会拦截生成。` : '')
+  + '是否继续？',
 );
 async function runMigrate() {
   migrateConfirmOpen.value = false;
@@ -35,11 +37,13 @@ async function runMigrate() {
 <template>
   <Collapsible class="prism-settings-card" title="从旧版 Horae 迁移" :open="false">
     <p class="bbs-field-hint">
-      将当前聊天中旧版 Horae 的摘要、物品和计划迁移过来。每个聊天需分别执行一次，Horae 的原数据不会改动。
+      将当前聊天中旧版 Horae 的摘要、物品和计划迁移过来。每个聊天需分别执行一次，Horae 的原数据不会改动。角色、好感、着装等暂不迁移。
     </p>
-    <div v-if="migratePlan" class="bbs-field-hint">
+    <p v-if="migratePlan.blockedReason" class="bbs-field-hint bbs-migrate-warning">当前聊天暂时不能迁移：{{ migratePlan.blockedReason }}</p>
+    <div v-else class="bbs-field-hint">
       <template v-if="migratePlan.hasData">
         找到：可建摘要 {{ migratePlan.leafFloors }} 层，旧总结 {{ migratePlan.summaryCount }} 条，物品 {{ migratePlan.itemCount }} 个，计划悬念 {{ migratePlan.planCount }} 条。<strong v-if="migratePlan.willOverwrite">当前聊天已有棱镜宝书数据，迁移会将其覆盖。</strong>
+        <span v-if="migratePlan.pendingFloors" class="bbs-migrate-warning">另有 {{ migratePlan.pendingFloors }} 层没有 Horae 记录，迁移后需要补摘，补齐之前会拦截生成。</span>
       </template>
       <template v-else>当前聊天中没有 Horae 旧数据（请先打开含旧数据的聊天）。</template>
     </div>
@@ -63,3 +67,7 @@ async function runMigrate() {
     </ConfirmDialog>
   </Collapsible>
 </template>
+
+<style scoped>
+.bbs-migrate-warning { color: var(--bbs-warning); }
+</style>

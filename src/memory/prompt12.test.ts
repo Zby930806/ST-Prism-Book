@@ -72,8 +72,11 @@ describe('v0.12 计划调整的正式解析与重放',()=>{
     expect(deriveMemory(chat).plans[0].content).toContain('新增断电要求');
     expect(deriveMemory(chat).plans).toHaveLength(2);
   });
-  it.each([{id:'p9',content:'未知编号'},{id:'p1',content:''},{id:'p1',content:{text:'非法对象'}},{id:'p1',content:'改期',targetTime:null}])('无效调整触发重试而非静默丢字段: %j', entry=>{
+  it.each([{id:'p9',content:'未知编号'},{id:'p1',content:''},{id:'p1',content:{text:'非法对象'}},{id:'p1',content:'改期',targetTime:3}])('无效调整触发重试而非静默丢字段: %j', entry=>{
     expect(()=>parse({update:[entry]},deriveMemory(seed()).plans)).toThrow();
+  });
+  it('targetTime 写成 null 按撤销期限处理，与空字符串相同',()=>{
+    expect(()=>parse({update:[{id:'p1',content:'改期',targetTime:null}]},deriveMemory(seed()).plans)).not.toThrow();
   });
   it('同一ID重复调整或同时结案拒绝歧义操作',()=>{
     const before=deriveMemory(seed()).plans;

@@ -137,6 +137,24 @@ describe('信息差：提示词与注入', () => {
     settings.apiSettings.injection.secrets = false;
     expect(inject.buildStateInjectionText()).not.toContain('信息差');
   });
+
+  it('不知情者有在场角色的排在前面,其余新的在前;超过上限时注明另有几条未列出', () => {
+    const old = message({
+      npcs: { add: [{ name: '洛伊', follow: true }] },
+      location: '旧街',
+      secrets: { add: Array.from({ length: inject.SECRET_INJECT_LIMIT }, (_, i) => ({ content: `瞒着主角的旧事${i}`, knownBy: ['洛伊'], unaware: ['沈遥'] })) },
+    });
+    const recent = message({ secrets: { add: [
+      { content: '瞒着主角的新事', knownBy: ['洛伊'], unaware: ['沈遥'] },
+      { content: '洛伊不知道的事', knownBy: ['沈遥'], unaware: ['洛伊'] },
+    ] } });
+    useChat([old, recent]);
+    const lines = inject.buildStateInjectionText().split('\n').filter(l => l.startsWith('- ') && l.includes('不知道:'));
+    expect(lines).toHaveLength(inject.SECRET_INJECT_LIMIT);
+    expect(lines[0]).toBe('- 洛伊不知道:洛伊不知道的事(知情:沈遥)');
+    expect(lines[1]).toBe('- 沈遥不知道:瞒着主角的新事(知情:洛伊)');
+    expect(inject.buildStateInjectionText()).toContain('- 另有 2 条信息差未列出,不代表已被知晓');
+  });
 });
 
 describe('信息差与记录冲突：实际摘要（本地 mock 模型回复）', () => {

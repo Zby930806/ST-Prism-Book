@@ -143,6 +143,7 @@ const readFields = [
   { key: 'maxChars' as const, label: '正文字数上限', bounds: READ_BOUNDS.maxChars },
   { key: 'entryChars' as const, label: '相关条目全文字数上限', bounds: READ_BOUNDS.entryChars },
   { key: 'refChars' as const, label: '参考世界书字数上限', bounds: READ_BOUNDS.refChars },
+  { key: 'indexChars' as const, label: '目标书条目索引字数上限', bounds: READ_BOUNDS.indexChars },
 ];
 const startFloor = ref<number | ''>('');
 async function applyStart() {
@@ -169,7 +170,7 @@ function goNotesApi() { openPageSection('notes', 'notes-api'); }
 
     <details ref="apiPanel" class="bbs-disclosure" :open="apiOpen" @toggle="apiOpen = ($event.target as HTMLDetailsElement).open">
       <summary>API 设置 <span class="bbs-disclosure-meta">{{ apiMeta }}</span></summary>
-      <p class="bbs-field-hint">默认使用札记中填写的 API（不需要启用札记），也可为世界书单独设置。不会使用正文或摘要的 API。密钥保存在酒馆的扩展设置中，分享设置备份前需删除。</p>
+      <p class="bbs-field-hint">默认使用札记中填写的 API（不需要启用札记），也可为世界书单独设置。不会使用正文或摘要的 API。密钥保存在酒馆的扩展设置（settings.json）中，分享 settings.json 或截图前需删除或遮盖；用「设置备份」导出的文件已去掉密钥。</p>
       <form class="wb-form" @submit.prevent="saveApi">
         <fieldset :disabled="locked || protectedSettings">
           <div class="wb-field">
@@ -267,7 +268,7 @@ function goNotesApi() { openPageSection('notes', 'notes-api'); }
 
     <details class="bbs-disclosure">
       <summary>读取范围 <span class="bbs-disclosure-meta">{{ readMeta }}</span></summary>
-      <p class="bbs-field-hint">每次读取上次处理之后的新楼层，超过上限时先读较早的，下次接着读。发送的还有目标世界书的条目索引、关键词出现在本次正文里的条目全文，以及当前聊天启用的其他世界书中的相关条目（只读）；不发送整本世界书。</p>
+      <p class="bbs-field-hint">每次读取上次处理之后的新楼层，超过上限时先读较早的，下次接着读；单层正文最多读到「正文字数上限」，超长的楼后半段不读，并在生成结果里注明。发送的还有目标世界书的条目索引（放不下的条目只列 uid 和标题）、关键词出现在本次正文里的条目全文，以及当前聊天启用的其他世界书中的相关条目（只读）；不发送整本世界书。</p>
       <div class="wb-grid">
         <label v-for="field in readFields" :key="field.key" class="wb-field">{{ field.label }}（{{ field.bounds[0] }}–{{ field.bounds[1] }}）
           <input :value="worldbookSettings.read[field.key]" class="bbs-input" type="number" :min="field.bounds[0]" :max="field.bounds[1]" step="1" inputmode="numeric" :disabled="locked || protectedSettings"

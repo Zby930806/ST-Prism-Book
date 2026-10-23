@@ -3,11 +3,11 @@ import { computed, nextTick, reactive, ref, watch } from 'vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import Icon from '@/components/Icon.vue';
 import PageHeader from '@/components/PageHeader.vue';
-import { notesSettings, saveNotesSettings, settingsIssue } from '@/notes/settings';
-import { notesRun, generateNotes, cancelNotes } from '@/notes/service';
+import { notesSettings, saveNotesSettings, settingsIssue, NOTES_MEMORY_CHARS_BOUNDS } from '@/notes/settings';
+import { notesRun, generateNotes, cancelNotes, confirmedInjectionPlan, NOTES_INJECTION_LIMIT } from '@/notes/service';
 import {
-  notesState, recordIsCurrent, recordSourceIsCurrent, confirmQuestion, rejectQuestion,
-  setDecisionStatus, importLegacyNotes, deleteNote,
+  notesState, recordIsCurrent, confirmQuestion, rejectQuestion,
+  setDecisionStatus, importLegacyNotes, deleteNote, decisionSourceChanged,
 } from '@/notes/store';
 import type { NoteRecord, NoteDecision } from '@/notes/types';
 import { ORIGINAL_NOTES_PROMPT, TIDY_NOTES_PROMPT } from '@/notes/prompt';
@@ -135,11 +135,16 @@ const decisionActions = [
   { status: 'cancelled', label: '已取消' },
 ] as const;
 const injecting = computed(() => notesSettings.enabled && notesSettings.injectConfirmed);
+/** 实际注入正文的安排：条数按 buildConfirmedInjection 的结果，填写了记忆注入预算时可能有未注入的。 */
+const injectionPlan = computed(() => { void notesState.revision; return confirmedInjectionPlan(); });
+const injectBadge = computed(() => injecting.value && injectionPlan.value.injected ? `注入中 · ${injectionPlan.value.injected} 条` : '未注入');
 const injectionNote = computed(() => !notesSettings.enabled
   ? '双子札记未启用，安排暂不注入正文。'
   : !notesSettings.injectConfirmed
     ? '「注入已确认安排」没有打开（在页面底部的「自动生成与注入」里），这些安排暂时只是记录。'
     : '待兑现和进行中的安排注入正文；标记为已完成或已取消后停止注入。');
+/** 依据的札记所在楼已被改写、重抽或删除，但仍是待兑现、进行中（仍在注入）的安排条数。 */
+const staleActiveCount = computed(() => { void notesState.revision; return notesState.decisions.filter(d => (d.status === 'pending' || d.status === 'in_progress') && decisionSourceChanged(d)).length; });
 
 function questionKey(noteId: string, questionId: string): string {
   return JSON.stringify([noteId, questionId]);
@@ -152,11 +157,10 @@ function isCurrent(record: NoteRecord): boolean {
   void notesState.revision;
   return recordIsCurrent(record);
 }
-function decisionIsCurrent(decision: NoteDecision): boolean {
-  const record = notesState.records.find(item => item.id === decision.noteId);
-  // 重新生成只淘汰旧札记的提案；已确认安排仍按相同正文来源判断有效性。
+function sourceChanged(decision: NoteDecision): boolean {
+  // 已确认的安排与札记来源解绑：依据的正文改动后仍照常注入，这里只用于标出来，由用户决定是否取消。
   void notesState.revision;
-  return !!record && recordSourceIsCurrent(record);
+  return decisionSourceChanged(decision);
 }
 function formatDate(timestamp: number): string {
   const date = new Date(timestamp);
@@ -246,9 +250,11 @@ function changeLimit(key: 'recentFloors' | 'memoryChars', event: Event) {
   const value = Number(input.value);
   const previous = notesSettings[key];
   report('prefs');
-  const [min, max] = key === 'recentFloors' ? [1, 40] : [1000, 40000];
-  if (!input.value.trim() || !Number.isSafeInteger(value) || value < min || value > max) {
-    actionError.value = key === 'recentFloors' ? '参考楼层数要是 1–40 之间的整数。' : '字数上限要是 1000–40000 之间的整数。';
+  const [min, max] = key === 'recentFloors' ? [1, 40] : NOTES_MEMORY_CHARS_BOUNDS;
+  // 摘要和状态的字数上限可以填 0，表示不限制
+  const unlimited = key === 'memoryChars' && input.value.trim() !== '' && value === 0;
+  if (!unlimited && (!input.value.trim() || !Number.isSafeInteger(value) || value < min || value > max)) {
+    actionError.value = key === 'recentFloors' ? '参考楼层数要是 1–40 之间的整数。' : `字数上限要填 0（不限制）或 ${min}–${max} 之间的整数。`;
     input.value = String(previous);
     return;
   }
@@ -303,9 +309,6 @@ function reject(noteId: string, questionId: string) {
 }
 function updateDecision(decision: NoteDecision, status: typeof decisionActions[number]['status']) {
   return runAction('d:' + decision.id, async () => {
-    if ((status === 'pending' || status === 'in_progress') && !decisionIsCurrent(decision)) {
-      throw new Error('该安排对应的正文已变化，不能再设为待兑现或进行中；可标记为已完成或已取消。');
-    }
     await setDecisionStatus(decision.id, status);
     notice.value = `已标成「${statusLabels[status]}」。`;
   });
@@ -384,7 +387,7 @@ function importNotes() {
             <span class="notes-record-meta">{{ formatDate(record.createdAt) }}<template v-if="record.swipe"> · 分支 {{ record.swipe }}</template><template v-if="record.questions.length"> · {{ record.questions.length }} 个问题</template></span>
           </span>
         </summary>
-        <p v-if="!isCurrent(record)" class="bbs-callout is-warning notes-stale-note">这份札记已失效：对应的正文改过了，或者后来又生成了新的一份。只能查看，里面的方案不能再确认。</p>
+        <p v-if="!isCurrent(record)" class="bbs-callout is-warning notes-stale-note">这份札记已失效：所在楼层的正文改过了（改写、重抽或删除），或者后来又生成了新的一份。只能查看，里面的方案不能再确认；已经确认的安排不受影响。</p>
         <pre class="notes-text">{{ record.text }}</pre>
         <div v-for="question in record.questions" :key="questionKey(record.id, question.id)" class="notes-question">
           <div class="notes-question-head">
@@ -419,19 +422,25 @@ function importNotes() {
     <section class="notes-section" aria-label="已确认安排清单">
       <div class="notes-section-head">
         <h2 class="notes-heading">已确认的安排</h2>
-        <span class="notes-inject" :class="{ 'is-on': injecting }">{{ injecting ? '注入中' : '未注入' }}</span>
+        <span class="notes-inject" :class="{ 'is-on': injecting && injectionPlan.injected > 0 }">{{ injectBadge }}</span>
       </div>
       <p class="bbs-field-hint">{{ injectionNote }}在聊天里回复「Q1：……」只会让下一份札记读到，确认还是要在这里点。</p>
+      <p v-if="injecting && injectionPlan.omitted" class="bbs-callout is-warning notes-inject-note">有 {{ injectionPlan.omitted }} 条安排超出注入上限（清单最多 {{ NOTES_INJECTION_LIMIT }} 字），本轮没有注入；进行中和较新的待兑现安排优先。可以把写完的安排标为「已完成」，或在「设置 → 注入设置」把「记忆注入预算」改为 0（不限制）。</p>
+      <p v-if="staleActiveCount" class="bbs-callout is-warning notes-inject-note">有 {{ staleActiveCount }} 条安排依据的札记所在楼已被改写、重抽或删除，{{ injecting ? '仍在注入正文' : '仍是待兑现或进行中' }}。请在下方核对，不再适用的点「取消这条安排」。</p>
       <p v-if="!decisions.length" class="notes-empty">暂无已确认的安排。札记中的方案不会自动成为剧情。</p>
       <article v-for="decision in visibleDecisions" :key="decision.id" class="notes-decision" :class="`is-${decision.status}`">
         <header class="notes-decision-head">
           <span class="notes-chip">{{ statusLabels[decision.status] }}</span>
-          <span v-if="!decisionIsCurrent(decision)" class="notes-tag is-stale">对应正文已变</span>
+          <span v-if="sourceChanged(decision)" class="notes-tag is-stale">依据的正文已改动</span>
           <span class="notes-decision-date">{{ formatDate(decision.createdAt) }}</span>
         </header>
         <p class="notes-decision-text">{{ decision.text }}</p>
+        <div v-if="sourceChanged(decision) && (decision.status === 'pending' || decision.status === 'in_progress')" class="bbs-callout is-warning notes-decision-warn">
+          <span>这条安排依据的札记所在楼已被改写、重抽或删除，{{ injecting ? '仍在注入正文' : '仍是待兑现或进行中，打开「注入已确认安排」后会注入正文' }}。重抽后放弃的分支上确认的安排同样保留，不再适用时请取消。</span>
+          <button type="button" class="bbs-btn bbs-btn-sm" :disabled="locked" @click="updateDecision(decision, 'cancelled')">取消这条安排</button>
+        </div>
         <div class="notes-segment" role="group" aria-label="安排状态">
-          <button v-for="action in decisionActions" :key="action.status" type="button" class="bbs-btn" :class="{ 'is-selected': decision.status === action.status }" :aria-pressed="decision.status === action.status" :disabled="locked || decision.status === action.status || ((!decisionIsCurrent(decision)) && (action.status === 'pending' || action.status === 'in_progress'))" @click="updateDecision(decision, action.status)">{{ action.label }}</button>
+          <button v-for="action in decisionActions" :key="action.status" type="button" class="bbs-btn" :class="{ 'is-selected': decision.status === action.status }" :aria-pressed="decision.status === action.status" :disabled="locked || decision.status === action.status" @click="updateDecision(decision, action.status)">{{ action.label }}</button>
         </div>
         <div v-if="feedbackAt === 'd:' + decision.id && (notice || actionError)" class="notes-inline">
           <p v-if="notice" class="notes-status" role="status">{{ notice }}</p>
@@ -448,7 +457,7 @@ function importNotes() {
     <footer class="notes-footer" aria-label="札记设置">
       <details ref="apiPanel" class="bbs-disclosure" :open="apiOpen" @toggle="apiOpen = ($event.target as HTMLDetailsElement).open">
         <summary>独立 API 设置 <span class="bbs-disclosure-meta">{{ configurationIssue ? '未填写完整' : notesSettings.channel.model }}</span></summary>
-        <p class="bbs-field-hint">札记只用这里填的 API（OpenAI 兼容接口），不会借用正文或摘要的；创作规划默认也用它。密钥存在酒馆的扩展设置里，分享设置备份前记得删掉。</p>
+        <p class="bbs-field-hint">札记只用这里填的 API（OpenAI 兼容接口），不会借用正文或摘要的；创作规划默认也用它。密钥保存在酒馆的扩展设置（settings.json）中，分享 settings.json 或截图前需删除或遮盖；用「设置备份」导出的文件已去掉密钥。</p>
         <form class="notes-form" @submit.prevent="saveApi" @input="apiDirty = true">
           <fieldset :disabled="locked">
             <label class="notes-field">API 地址<input v-model="apiDraft.url" class="bbs-input" type="url" required autocomplete="off" spellcheck="false" aria-label="札记独立 API 地址" placeholder="https://your-api.example/v1" /></label>
@@ -507,8 +516,9 @@ function importNotes() {
         <p class="bbs-field-hint">使用过原版札记时，需关闭悬浮球中的札记自动生成，以及预设中要求正文输出 aftertalk 的条目，以免重复。</p>
         <div class="notes-grid">
           <label class="notes-field">参考最近几层（1–40）<input :value="notesSettings.recentFloors" class="bbs-input" type="number" min="1" max="40" step="1" inputmode="numeric" :disabled="locked" aria-label="札记参考最近正文楼层数" @change="changeLimit('recentFloors', $event)" /></label>
-          <label class="notes-field">摘要和状态最多读多少字（1000–40000）<input :value="notesSettings.memoryChars" class="bbs-input" type="number" min="1000" max="40000" step="1" inputmode="numeric" :disabled="locked" aria-label="札记参考记忆字数上限" @change="changeLimit('memoryChars', $event)" /></label>
+          <label class="notes-field">摘要和状态最多读多少字（0 或 1000–40000）<input :value="notesSettings.memoryChars" class="bbs-input" type="number" min="0" max="40000" step="1" inputmode="numeric" :disabled="locked" aria-label="札记参考记忆字数上限" @change="changeLimit('memoryChars', $event)" /></label>
         </div>
+        <p class="bbs-field-hint">正文最多读 24000 字，参考层数多于 8 层时每层加 3000 字，每层最多 6000 字；放不下的较早楼层不发，由摘要覆盖。「摘要和状态」填 0 不限制；限字数时状态最多占 35%，按计划与悬念、时间地点与局势、主角、主要与在场角色、物品、近期已了结、其余角色的顺序放入，放不下的整条省略并注明，其余字数给摘要，摘要从新到旧保留。</p>
         <div v-if="feedbackAt === 'prefs' && (notice || actionError)" class="notes-inline">
           <p v-if="notice" class="notes-status" role="status">{{ notice }}</p>
           <p v-if="actionError" class="bbs-callout is-danger" role="alert">{{ actionError }}</p>
@@ -604,6 +614,9 @@ function importNotes() {
 .is-pending .notes-chip, .is-in_progress .notes-chip { background:var(--bbs-accent-soft); color:var(--bbs-accent); }
 .notes-decision-date { margin-left:auto; font-size:12px; color:var(--bbs-ink-muted); }
 .notes-decision-text { margin:8px 0 12px; font-size:14px; line-height:1.85; white-space:pre-wrap; overflow-wrap:anywhere; }
+.notes-decision-warn { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px 12px; margin:0 0 12px; font-size:12.5px; }
+.notes-decision-warn > span { flex:1 1 240px; min-width:0; }
+.notes-section > .notes-inject-note { margin:0 0 12px; font-size:12.5px; }
 .is-completed .notes-decision-text, .is-cancelled .notes-decision-text { color:var(--bbs-ink-muted); }
 .notes-segment { display:inline-flex; flex-wrap:wrap; gap:2px; max-width:100%; padding:2px; border:1px solid var(--bbs-line); border-radius:10px; background:var(--bbs-surface-2); }
 .notes-segment .bbs-btn { min-height:32px; padding:4px 12px; border:0; border-radius:8px; background:transparent; color:var(--bbs-ink-soft); font-weight:500; }

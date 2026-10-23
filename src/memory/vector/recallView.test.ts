@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { RecallDebug, RecallDebugRerankHit } from './debug';
+import { RECALL_STOPPED, type RecallDebug, type RecallDebugRerankHit } from './debug';
 import type { FloorRecallRecord } from './floorRecall';
 import { floorRecallView, recallButtonLabel, recalledItems, recallPhase, recallStatusText } from './recallView';
 
@@ -43,7 +43,7 @@ describe('召回结果的显示', () => {
   it('达标的段落都放不进召回预算：说明原因和设置位置', () => {
     const d = debug({ status: '召回完成:超出注入预算,本回合未注入', rerank: [hit('a', 'cut'), hit('b', 'cut'), hit('c', 'drop')] });
     expect(recallButtonLabel(d).text).toBe('召回 0');
-    expect(recallStatusText(d)).toBe('召回完成，达到阈值的 2 段超出召回预算，本次未注入。可在「设置 → 注入设置」中调高「记忆注入预算」。');
+    expect(recallStatusText(d)).toBe('召回完成，达到阈值的 2 段超出召回预算，本次未注入。可在「设置 → 注入设置」中调高「记忆注入预算」，或填 0 不限制。');
   });
 
   it('没召回时不列旧的段落，说明原因', () => {
@@ -74,5 +74,37 @@ describe('召回结果的显示', () => {
     expect(floorRecallView(record({ status: '失败:超时' }))?.phase).toBe('failed');
     const partial = floorRecallView(record({ items: [{ source: '#5', storyTime: '', tier: 'brief', preview: '旧事' }], cut: 2 }));
     expect(partial?.statusText).toBe('召回 1 段，已注入本次生成。另有 2 段超出召回预算，未注入。');
+  });
+
+  it('补建索引期间说明剩余条数，并提示可以停止', () => {
+    const d = debug({ status: '进行中…', indexPending: 7 });
+    expect(recallPhase(d)).toBe('running');
+    expect(recallButtonLabel(d).text).toBe('补索引中…');
+    expect(recallStatusText(d)).toBe('正在补建向量索引（剩余 7 条），完成后召回并开始生成回复；点酒馆的停止键可以取消。');
+    expect(recallStatusText(debug({ status: '进行中…' }))).toContain('点酒馆的停止键可以取消');
+  });
+
+  it('停止生成时写明召回随之取消', () => {
+    const d = debug({ status: RECALL_STOPPED });
+    expect(recallPhase(d)).toBe('skipped');
+    expect(recallButtonLabel(d).text).toBe('未召回');
+    expect(recallStatusText(d)).toBe('未召回：已停止生成，本次召回随之取消。');
+  });
+
+  it('没有重排、索引提示接在完成说明后面；失败原因句末不重复句号', () => {
+    const d = debug({
+      status: '召回完成', rerank: [hit('a', 'brief')],
+      rerankIssue: '未填写 Rerank 模型，已按 embedding 相似度分档，只发送摘要。',
+      indexNote: '向量索引还在补建（剩余 3 条），本次先用已建好的部分召回，补建在后台继续。',
+    });
+    expect(recallStatusText(d)).toBe('召回 1 段，已注入本次生成。未填写 Rerank 模型，已按 embedding 相似度分档，只发送摘要。向量索引还在补建（剩余 3 条），本次先用已建好的部分召回，补建在后台继续。');
+    const failed = debug({ status: '失败:Query 重写：请求超时（超过 90 秒）。可以调大超时。', rerankIssue: '不该出现', indexNote: '补建向量索引失败：密钥无效。本次只用已有索引召回。' });
+    expect(recallStatusText(failed)).toBe('召回失败：Query 重写：请求超时（超过 90 秒）。可以调大超时。本次生成未注入召回内容。补建向量索引失败：密钥无效。本次只用已有索引召回。');
+    expect(recallStatusText(failed)).not.toContain('。。');
+  });
+
+  it('楼层面板也显示没有重排的说明', () => {
+    const view = floorRecallView(record({ items: [{ source: '#5', storyTime: '', tier: 'brief', preview: '旧事' }], rerankIssue: '重排失败，已按 embedding 相似度分档，只发送摘要。原因：超时。' }));
+    expect(view?.statusText).toBe('召回 1 段，已注入本次生成。重排失败，已按 embedding 相似度分档，只发送摘要。原因：超时。');
   });
 });

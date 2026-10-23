@@ -4,7 +4,7 @@ import * as context from '@/st/context';
 import * as client from '@/api/client';
 import * as notices from '@/st/toast';
 import type { STContext, STMessage } from '@/st/context';
-import { classifyNpcPresence, deriveMemory, editNpc, finalizeDelta } from './apply';
+import { classifyNpcPresence, crossedStoryDay, deriveMemory, editNpc, finalizeDelta } from './apply';
 import { createNewChatWithCarryover } from './carryover';
 import { summarizeFloor, currentSummaryPromise } from './engine';
 import { refreshInjection, buildStateInjectionText } from './inject';
@@ -13,8 +13,8 @@ import { createEmptyMemory, type StoredDelta } from './types';
 import { npcLocationLabel } from './npcLocation';
 import { fmtNpcSummaryList } from './npcRelations';
 import { taskContextPrompt } from './taskContext';
-import { JAILBREAK_PROMPT } from './prompts';
-import { fitMemoryUnits, fitTimeTagPrompt, estimateTokens, slotBudget, BUDGET_NOTICE } from './budget';
+import { JAILBREAK_PROMPT, MEMORY_BRIEFING_END, MEMORY_BRIEFING_HISTORY_END } from './prompts';
+import { budgetLayout, fitHistoryUnits, fitMemoryUnits, fitTimeTagPrompt, estimateTokens, slotBudget, BUDGET_NOTICE, type HistoryUnit } from './budget';
 import { parseTimeRange, latestStoryTime, TIME_TAG_PROMPT } from './timeTag';
 import { parseResponse } from './vector/rewrite';
 import * as rewrite from './vector/rewrite';
@@ -22,7 +22,7 @@ import * as scope from './vector/scope';
 import * as vectorIndex from './vector/index';
 import * as vectorStore from './vector/store';
 import * as embed from './vector/embed';
-import { buildRecallText, runVectorRecall } from './vector/recall';
+import { runVectorRecall } from './vector/recall';
 
 const { apiSettings } = settings;
 const saved = JSON.stringify(apiSettings);
@@ -88,6 +88,28 @@ describe('位置证据完整链路', () => {
     expect(presence(deriveMemory(chat))).toBe('present');
     chat.push(message({ time: '2026/9/2 10:00' }));
     expect(presence(deriveMemory(chat))).toBe('unknown');
+  });
+  it.each([
+    ['故事第1天 08:00', '故事第2天 09:00'],
+    ['2026年9月29日 晚上', '2026年9月30日 早上'],
+    ['2026/9/29晚上', '2026/9/30早上'],
+    ['9月29日 深夜', '9月30日 清晨'],
+  ])('常见日期写法跨日同样降级: %s → %s', (from, to) => {
+    const chat = [message({ time: from, location: '厨房', npcs: { add: [{ name: '小A', location: '厨房' }] } })];
+    expect(presence(deriveMemory(chat))).toBe('present');
+    chat.push(message({ time: to }));
+    expect(presence(deriveMemory(chat))).toBe('unknown');
+  });
+  it.each([
+    ['2026/9/29 22:00', '2026/9/29 23:30'],
+    ['傍晚6点', '晚上9点'],
+    ['2026/9/29', '9月30日'],
+    ['12月30日', '1月2日'],
+    ['霜月3日', '雪月5日'],
+  ])('同一天、只有时段、年份写法不一致或无法比较时不按跨日处理: %s → %s', (from, to) => {
+    const chat = [message({ time: from, location: '厨房', npcs: { add: [{ name: '小A', location: '厨房' }] } }), message({ time: to })];
+    expect(presence(deriveMemory(chat))).toBe('present');
+    expect(crossedStoryDay(from, to)).toBe(false);
   });
   it('清空保留最后位置,撤销/翻页按有效叶子重放', () => {
     const first = kitchen();
@@ -178,7 +200,7 @@ describe('检索语义与未知时间', () => {
 });
 
 describe('总注入预算', () => {
-  it('按完整条目省略,保留最近节点顺序,0不限', () => {
+  it('按完整条目省略,从新到旧连续保留,0不限', () => {
     apiSettings.memoryBudgetTokens = 2000;
     const units = Array.from({ length: 12 }, (_, i) => '[' + i + ']' + '回忆。'.repeat(130));
     const out = fitMemoryUnits(units, 'history', '开始', '结束', true);
@@ -187,30 +209,96 @@ describe('总注入预算', () => {
     expect(out.indices).toContain(11);
     for (const i of out.indices) expect(out.text).toContain(units[i]);
     expect(out.indices).toEqual([...out.indices].sort((a,b) => a-b));
+    // 连续:保留的是最新的一段,中间不留空洞
+    expect(out.indices).toEqual(Array.from({ length: out.indices.length }, (_, k) => 12 - out.indices.length + k));
     apiSettings.memoryBudgetTokens = 0;
     expect(fitMemoryUnits(units, 'history').indices).toHaveLength(12);
+  });
+  it('历史放不下时:故事开头的高层总结先保留(不超过约 1/3),其余从新到旧连续保留,缺口处写明省略的时间段', () => {
+    apiSettings.memoryBudgetTokens = 2000;
+    const units: HistoryUnit[] = [
+      { text: '[开头总结]' + '开端。'.repeat(60), opening: true, start: '2031/1/1', end: '2031/1/20' },
+      ...Array.from({ length: 12 }, (_, i) => ({ text: `[第${i + 1}段]` + '经过。'.repeat(90), start: `2031/2/${i + 1}`, end: `2031/2/${i + 1}` })),
+      { text: '[小段]短。', start: '2031/1/25', end: '2031/1/25' },
+    ];
+    // 打乱「小段」的位置:它在时间上较早但排在最后之前,验证不会跳过大的、收下更早的小的
+    const ordered = [units[0], units[13], ...units.slice(1, 13)];
+    const out = fitHistoryUnits(ordered, '开始', '结束');
+    expect(estimateTokens(out.text)).toBeLessThanOrEqual(slotBudget('history'));
+    expect(out.indices[0]).toBe(0);
+    const recent = out.indices.slice(1);
+    expect(recent.at(-1)).toBe(ordered.length - 1);
+    expect(recent).toEqual(Array.from({ length: recent.length }, (_, k) => ordered.length - recent.length + k));
+    expect(out.text).not.toContain('[小段]');
+    const omitted = ordered.length - out.indices.length;
+    expect(out.text).toMatch(new RegExp(`\\[因注入预算未展示 ${omitted} 段记忆\\(2031/1/25 - `));
+    // 缺口提示在开头总结与近期摘要之间
+    expect(out.text.indexOf('[开头总结]')).toBeLessThan(out.text.indexOf('因注入预算未展示'));
+    expect(out.text.indexOf('因注入预算未展示')).toBeLessThan(out.text.indexOf(ordered[recent[0]].text));
+    // 开头总结超过历史份额约 1/3 时不先保留
+    const big = [{ ...ordered[0], text: '[开头总结]' + '开端。'.repeat(400) }, ...ordered.slice(1)];
+    expect(fitHistoryUnits(big, '开始', '结束').indices).not.toContain(0);
+    // 没有时间信息时用通用提示
+    expect(fitHistoryUnits(ordered.map(u => ({ text: u.text })), '开始', '结束').text).toContain(BUDGET_NOTICE);
+  });
+  it('向量记忆关闭或本聊天不召回时召回份额并入历史;会召回时才保留', () => {
+    apiSettings.memoryBudgetTokens = 6000;
+    useChat([message()]);
+    const off = budgetLayout();
+    expect(off.recallActive).toBe(false);
+    apiSettings.vector.enabled = true;
+    vi.spyOn(scope, 'currentVectorDb').mockReturnValue('test');
+    vi.spyOn(scope, 'currentBundleHashes').mockReturnValue([]);
+    // 只有一层、没有楼层被推出保留窗口:本聊天不召回
+    expect(budgetLayout().recallActive).toBe(false);
+    vi.mocked(scope.currentBundleHashes).mockReturnValue(['bundle']);
+    const on = budgetLayout();
+    expect(on.recallActive).toBe(true);
+    // 取整误差不超过 1
+    expect(Math.abs(off.history - on.history - on.recall)).toBeLessThanOrEqual(1);
+    expect(on.state).toBe(off.state);
   });
   it('时间协议整块处理,默认6000可容纳内置协议', () => {
     expect(fitTimeTagPrompt(TIME_TAG_PROMPT)).toBe(TIME_TAG_PROMPT);
     expect(fitTimeTagPrompt('超长'.repeat(3000))).toBe('');
+    // 最低预算 2000 时内置指令同样放得下
+    apiSettings.memoryBudgetTokens = 2000;
+    expect(fitTimeTagPrompt(TIME_TAG_PROMPT)).toBe(TIME_TAG_PROMPT);
   });
   it('最终注入槽合计不超预算,保留完整变量对象或整块省略', () => {
     const { slots } = useChat([message()]);
     apiSettings.autoSummaryEnabled = true;
     apiSettings.prompts.timeTag = '';
+    apiSettings.vector.enabled = true;
+    vi.spyOn(scope, 'currentVectorDb').mockReturnValue('test');
+    vi.spyOn(scope, 'currentBundleHashes').mockReturnValue(['bundle']);
     memory.state.location = '厨房';
     memory.vars = { secrets: '秘密'.repeat(8000) };
     memory.summaries = Array.from({ length: 35 }, (_, i) => ({ id: 'import' + i, text: '事件' + i + '往事。'.repeat(120), level: 1, auto: false, imported: true, importedFloorStart: i, importedFloorEnd: i, childIds: [], createdAt: i }));
     refreshInjection();
-    const hits = Array.from({ length: 10 }, (_, i) => ({ leafId: 'hit' + i, scope: 'test', similarity: 0.9, rerankScore: 0.9, queryIndex: 0, document: '约定。'.repeat(140), mesFull: null, storyTime: null, msgIndex: i }));
-    const recall = buildRecallText(hits, { ...apiSettings.vector.recall, finalRecallCount: 10, fullTextCount: 3 }, 'test', '');
+    expect(budgetLayout().recallActive).toBe(true);
+    // 召回槽按召回份额填满(召回块的具体写法由召回模块决定)
+    const recall = fitMemoryUnits(Array.from({ length: 10 }, (_, i) => '约定。'.repeat(140) + i), 'recall', '[相关回忆]');
+    expect(recall.indices.length).toBeLessThan(10);
     slots.set('baibai_book_vector_recall', recall.text);
     expect([...slots.values()].reduce((sum, s) => sum + estimateTokens(s), 0)).toBeLessThanOrEqual(6000);
     expect(slots.get('baibai_book_memory_state')).not.toContain('秘密');
     expect(slots.get('baibai_book_memory_state')).toContain(BUDGET_NOTICE);
-    expect(recall.tiers.size).toBeLessThan(hits.length);
+    // 完整结束说明在离回复最近的状态块,历史块用短收尾
+    expect(slots.get('baibai_book_memory_state')).toContain(MEMORY_BRIEFING_END);
+    expect(slots.get('baibai_book_memory_history')).toContain(MEMORY_BRIEFING_HISTORY_END);
+    expect(slots.get('baibai_book_memory_history')).not.toContain(MEMORY_BRIEFING_END);
     expect(memory.vars.secrets).toBe('秘密'.repeat(8000));
     expect(memory.summaries).toHaveLength(35);
+  });
+  it('仅摘要模式没有状态块时,完整结束说明放在历史块', () => {
+    const { slots } = useChat([message()]);
+    apiSettings.summaryOnlyMode = true;
+    memory.summaries = [{ id: 'import-only', text: '往事。', level: 1, auto: false, imported: true, importedFloorStart: 0, importedFloorEnd: 0, childIds: [], createdAt: 1 }];
+    refreshInjection();
+    expect(slots.get('baibai_book_memory_state')).toBe('');
+    expect(slots.get('baibai_book_memory_history')).toContain(MEMORY_BRIEFING_END);
+    expect(slots.get('baibai_book_memory_history')).not.toContain(MEMORY_BRIEFING_HISTORY_END);
   });
   it('召回缓存命中不绕过预算,改变限额后重新生成', async () => {
     const { slots } = useChat([{ ...message(), is_user: true }]);

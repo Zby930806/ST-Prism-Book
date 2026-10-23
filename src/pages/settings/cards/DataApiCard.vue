@@ -10,7 +10,7 @@ const DATA_MACROS = [
   {
     token: '{{bbsInjectedHistory}}',
     title: '正常注入历史',
-    desc: '与正文注入的历史相同，不含仍以全文发送的楼层的摘要。',
+    desc: '与正文注入选用相同的摘要和总结，不含仍以全文发送的楼层的摘要；不受记忆注入预算影响，填写了预算时可能多于实际注入的内容。',
   },
   {
     token: '{{bbsHistory}}',

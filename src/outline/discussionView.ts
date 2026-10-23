@@ -1,4 +1,5 @@
 import type { DiscussionMessage } from './discussionStore';
+import { QIHENG_NAME } from './qiheng';
 
 /**
  * 规划讨论的显示辅助。模型回复常带 Markdown（标题、列表、粗体等），这里解析成结构化数据，
@@ -144,8 +145,32 @@ export function discussionFullTime(at: number): string {
 /** 「复制全部讨论」的文本：按轮次排列，标明说话人；有时间的附上时间。 */
 export function discussionTranscript(messages: DiscussionMessage[]): string {
   return messages.map(message => {
-    const who = message.role === 'user' ? '你' : '规划模型';
+    const who = message.role === 'user' ? '你' : QIHENG_NAME;
     const when = message.at ? `（${discussionFullTime(message.at)}）` : '';
     return `${who}${when}：\n${message.content.trim()}`;
   }).join('\n\n');
+}
+
+/**
+ * 回复按空行拆成一条条气泡，像连发的消息；代码块里的空行不拆。
+ * 一整条回复里没有空行时只有一条。拆出来的每条都是完整的 Markdown 片段，各自交给 parseDiscussionText 渲染。
+ */
+export function splitReplyBubbles(text: string): string[] {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const bubbles: string[] = [];
+  let current: string[] = [];
+  let fence = '';
+  const flush = () => {
+    const chunk = current.join('\n').trim();
+    if (chunk) bubbles.push(chunk);
+    current = [];
+  };
+  for (const line of lines) {
+    const mark = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
+    if (mark && (!fence || mark[0] === fence[0] && mark.length >= fence.length)) fence = fence ? '' : mark;
+    if (!fence && !mark && !line.trim()) { flush(); continue; }
+    current.push(line);
+  }
+  flush();
+  return bubbles.length ? bubbles : [text.trim()];
 }

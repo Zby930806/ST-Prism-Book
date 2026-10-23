@@ -18,7 +18,7 @@ const dialog = ref<InstanceType<typeof ChannelDialog> | null>(null);
 
 <template>
   <Collapsible class="prism-settings-card" title="副 API" :open="false">
-    <p class="prism-card-intro">摘要和总结可分别指定渠道；选择「跟随主 API」时使用酒馆当前连接的 API。点击渠道可修改或测试。</p>
+    <p class="prism-card-intro">摘要和总结可分别指定渠道；选择「跟随主 API」时使用酒馆当前连接的 API，请求期间的最大回复和预填充在「摘要设置」中调整。点击渠道可修改或测试。</p>
     <!-- 任务指派 -->
     <div class="bbs-field bbs-assign">
       <div class="bbs-assign-row">

@@ -8,7 +8,7 @@ import ModalShell from '@/components/ModalShell.vue';
 import { apiSettings } from '@/api/settings';
 import { computed, nextTick, ref } from 'vue';
 import { diffHunks, diffLines, diffStats, type DiffRow } from '../promptDiff';
-import { isCustom, promptSync, type PromptMeta, type PromptSync } from '../promptMeta';
+import { isCustom, promptSync, taskContextModeAfterSave, type PromptMeta, type PromptSync } from '../promptMeta';
 
 // 正在编辑的提示词;draft 是草稿,点「完成」才写回 apiSettings(取消则丢弃)。
 const editingPrompt = ref<PromptMeta | null>(null);
@@ -64,7 +64,8 @@ function savePrompt() {
   const v = promptDraft.value.trim();
   const sameAsBuiltin = v === meta.builtin.trim();
   apiSettings.prompts[meta.key] = sameAsBuiltin ? '' : promptDraft.value;
-  if (meta.key === 'jailbreak') apiSettings.taskContextMode = sameAsBuiltin ? 'default' : 'custom';
+  // 任务说明:原来禁用的保持禁用,只保存内容;其余按内容切换内置/自定义
+  if (meta.key === 'jailbreak') apiSettings.taskContextMode = taskContextModeAfterSave(apiSettings.taskContextMode, sameAsBuiltin);
   // 记下这份自定义照着哪一版内置改的;回到内置就不用记了。旧版本里改的、没有基准的保持不记。
   if (sameAsBuiltin) delete apiSettings.promptBases[meta.key];
   else if (promptDraftBase.value) apiSettings.promptBases[meta.key] = promptDraftBase.value;
@@ -111,6 +112,9 @@ defineExpose({ open });
 
       <p class="bbs-modal-label">{{ editingPrompt.hint }}</p>
       <p class="prism-editor-note">修改后点击「完成」保存；「恢复默认」后同样需点击「完成」生效，点击「取消」放弃修改。</p>
+      <p v-if="editingPrompt.key === 'jailbreak' && apiSettings.taskContextMode === 'disabled'" class="bbs-callout is-warning" role="status">
+        任务说明当前已禁用：点击「完成」只保存内容，不会启用。需要发送时，在「自定义提示词 → 任务说明模式」中切换。
+      </p>
 
       <!-- 自定义不会跟着内置更新:内置改过就提醒,并能列出差异 -->
       <div v-if="editorSync === 'outdated' || editorSync === 'unknown'" class="bbs-callout is-warning prism-prompt-sync" role="status">

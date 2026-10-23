@@ -22,7 +22,7 @@ const dialog = ref<InstanceType<typeof PromptDialog> | null>(null);
   <Collapsible class="prism-settings-card" title="自定义提示词" :open="false">
     <p class="prism-card-intro">点击一项打开编辑，可插入宏或恢复默认。修改过的提示词不随内置版本更新；内置版本更新后，此处标有「内置已更新」，打开可查看内置的改动。</p>
     <p class="bbs-field-hint">摘要和总结使用的模型名里含 deepseek（不区分大小写，带平台前缀或后缀的也算，如 deepseek-ai/DeepSeek-V3、deepseek-r1:14b）时，发送时省略内置规则开头的「内容边界」，沿用原来的提示词；其他模型照常发送。跟随主 API 时看酒馆当前选中的模型。中转站把 DeepSeek 改成不含 deepseek 的别名时识别不了。自己模板里写的内容边界不会被去掉。检索改写不加内容边界。</p>
-    <SettingRow kind="num" as="div" label="任务说明模式" hint="已有的自定义内容会保留。保存自定义任务说明时自动切换为「自定义」；恢复默认后保存即使用内置说明。「禁用」只是不发送这段说明，输出格式要求照常发送。">
+    <SettingRow kind="num" as="div" label="任务说明模式" hint="已有的自定义内容会保留。模式为内置或自定义时，保存与内置不同的任务说明自动切换为「自定义」，恢复默认后保存即使用内置说明；模式为「禁用」时，保存只修改内容，不会启用。「禁用」只是不发送这段说明，输出格式要求照常发送。">
       <BbsSelect v-model="apiSettings.taskContextMode" :options="TASK_MODE_OPTIONS" class="prism-task-mode" aria-label="任务说明模式" />
     </SettingRow>
     <ul class="bbs-prompt-list">

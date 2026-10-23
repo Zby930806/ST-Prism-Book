@@ -111,13 +111,23 @@ export function selectViewNodes(
 
 /* ============ 生活小档案:三投放层选择(纯函数,注入与测试共用) ============ */
 
+/** 置顶条目每轮最多发送的条数;其余(时效、长期、沉降)每轮至少能再发的条数;两者合计通常不超过的条数。 */
+export const LIFE_DETAIL_PIN_CAP = 5;
+export const LIFE_DETAIL_EXTRA_CAP = 3;
+export const LIFE_DETAIL_TOTAL_CAP = 6;
+
+/** 其余条目每轮最多发几条:补到合计 6 条,置顶多时也至少 3 条(没有置顶的聊天仍是 6 条,与旧版相同)。 */
+export function lifeDetailExtraCap(pinnedCount: number): number {
+  return Math.max(LIFE_DETAIL_EXTRA_CAP, LIFE_DETAIL_TOTAL_CAP - pinnedCount);
+}
+
 /**
  * 选出本回合要注入的生活细节 —— 「记住 ≠ 每回合必提」的核心闸门:
- *  - pinned:手动置顶,常驻(≤5 条);
- *  - active:时效层,未过期且与近期上下文相关才注入;无关键词的长期 active 兜底注入;
- *  - archive:沉降层,仅 anchors/topics 命中近期上下文才浮出。
- * 总量封顶(置顶 5 + 触发补齐到 6),防一次性堆太多导致主模型逐条提及。
- * 只在注入选择层做裁剪,绝不删改真源叶子。
+ *  - pinned:手动置顶,常驻(最多 LIFE_DETAIL_PIN_CAP 条);
+ *  - 其余每轮最多再发 lifeDetailExtraCap(置顶数) 条:先取关键词(anchors/topics)出现在近期正文的条目,
+ *    按最近更新从新到旧;再用没有关键词的长期条目补空位(同样从新到旧);
+ *  - archive:沉降层,仅关键词命中才浮出;过期的时效条目不发。
+ * 总量封顶,防一次性堆太多导致主模型逐条提及。只在注入选择层做裁剪,绝不删改真源叶子。
  */
 export function selectLifeDetailsForInjection(
   details: import('./types').MemLifeDetail[],
@@ -125,22 +135,28 @@ export function selectLifeDetailsForInjection(
   nowTime: string,
   compareDays?: (fromDate: string, toDate: string) => number | null,
 ): import('./types').MemLifeDetail[] {
-  const PIN_CAP = 5;
-  const TOTAL_CAP = 6;
-  const pinned = details.filter(d => d.tier === 'pinned').slice(0, PIN_CAP);
-  const picked: MemLifeDetailImport[] = [];
+  const pinned = details.filter(d => d.tier === 'pinned').slice(0, LIFE_DETAIL_PIN_CAP);
+  const hits: MemLifeDetailImport[] = [];
+  const fallback: MemLifeDetailImport[] = [];
   for (const d of details) {
     if (d.tier === 'pinned') continue;
-    if (pinned.length + picked.length >= TOTAL_CAP) break;
     // 时效过期(两端日期都可解析且 now 已超过 until)→ 不注入;数据保留,可手动沉降/删除
     if (d.tier === 'active' && d.until && nowTime && compareDays) {
       const gap = compareDays(d.until, nowTime);
       if (gap !== null && gap > 0) continue;
     }
     const keys = [...d.anchors, ...d.topics].map(s => s.trim()).filter(Boolean);
-    const hit = keys.length ? keys.some(k => contextText.includes(k)) : d.tier === 'active';
-    if (hit) picked.push(d);
+    if (keys.length) {
+      if (keys.some(k => contextText.includes(k))) hits.push(d);
+    } else if (d.tier === 'active') {
+      fallback.push(d);
+    }
   }
+  const recency = (d: MemLifeDetailImport): number => d.updatedAt ?? d.createdAt ?? 0;
+  // 更新时间相同(同一条叶子记下的)时保持原顺序
+  const newestFirst = (list: MemLifeDetailImport[]): MemLifeDetailImport[] =>
+    list.map((d, i) => ({ d, i })).sort((a, b) => recency(b.d) - recency(a.d) || a.i - b.i).map(x => x.d);
+  const picked = [...newestFirst(hits), ...newestFirst(fallback)].slice(0, lifeDetailExtraCap(pinned.length));
   return [...pinned, ...picked];
 }
 

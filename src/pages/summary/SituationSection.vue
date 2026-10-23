@@ -2,8 +2,9 @@
 /**
  * 「当前局势与计划」折叠行：眼下局势卡、当前时间地点、计划与悬念（各自可折叠、分页），
  * 以及局势卡编辑、添加计划/悬念、编辑计划/悬念三个弹窗。
- * 手动改动都追加到最新一条有效摘要（叶子）的 delta，重放后生效；没有摘要时禁止手动添加。
+ * 手动改动单独保存在最新一条有效摘要（叶子）上，与模型结果分开，重新摘要或重抽后仍然保留；没有摘要时禁止手动添加。
  */
+import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import FoldSection from '@/components/FoldSection.vue';
 import IconButton from '@/components/IconButton.vue';
 import ModalShell from '@/components/ModalShell.vue';
@@ -49,7 +50,7 @@ function openComposer(kind: 'plan' | 'suspense') {
 function closeComposer() {
   composerOpen.value = false;
 }
-// 计划/悬念只展示「进行中」。点删除即移除。
+// 计划/悬念只展示「进行中」。删除前先确认。
 const openPlans = computed(() => memory.plans.filter(p => p.status === 'open'));
 // 按类型拆两栏：非 suspense 归计划（含旧数据 kind 缺省的情况），suspense 归悬念。
 const plansOnly = computed(() => openPlans.value.filter(p => p.kind !== 'suspense'));
@@ -127,9 +128,20 @@ function addPlan() {
   newTargetTime.value = '';
   composerOpen.value = false;
 }
-function removePlan(id: string) {
+/* —— 删除计划/悬念:先弹确认框(触屏上删除键常显,避免误触即删) —— */
+const pendingRemove = ref<{ id: string; kind: 'plan' | 'suspense'; content: string } | null>(null);
+function askRemovePlan(p: { id: string; kind: 'plan' | 'suspense'; content: string }) {
   if (!allowMemoryEdit()) return;
-  appendOpToLatestLeaf({ plans: { remove: [id] } });
+  pendingRemove.value = { id: p.id, kind: p.kind, content: p.content };
+}
+function confirmRemovePlan() {
+  const target = pendingRemove.value;
+  pendingRemove.value = null;
+  if (!target || !allowMemoryEdit()) return;
+  // 确认期间条目可能已被了结或删除:按 id 找回现在的条目,找不到就不删
+  if (!memory.plans.some(p => p.id === target.id && p.status === 'open')) return;
+  appendOpToLatestLeaf({ plans: { remove: [target.id] } });
+  refreshInjection();
 }
 
 /* —— 编辑计划/悬念（弹窗） —— */
@@ -211,6 +223,7 @@ page.onCloseEditors(() => {
   closeComposer();
   cancelPlanEdit();
   cancelFocusEdit();
+  pendingRemove.value = null;
 });
 page.onReset(() => {
   planPages.value = { plan: 1, suspense: 1 };
@@ -322,7 +335,7 @@ page.onReset(() => {
                 <span v-if="planFloor(p.id) !== undefined" class="bbs-plan-floor">#{{ planFloor(p.id) }}</span>
                 <span class="bbs-plan-acts">
                   <IconButton icon="edit" :label="`编辑${g.title}`" @click="openPlanEdit(p)" />
-                  <IconButton icon="trash" tone="danger" :label="`删除${g.title}`" @click="removePlan(p.id)" />
+                  <IconButton icon="trash" tone="danger" :label="`删除${g.title}`" @click="askRemovePlan(p)" />
                 </span>
               </div>
               <p class="bbs-plan-content">{{ p.content }}</p>
@@ -394,6 +407,20 @@ page.onReset(() => {
       <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!editingPlan?.content.trim()" @click="savePlanEdit">保存</button>
     </template>
   </ModalShell>
+
+  <!-- ===== 删除计划 / 悬念的确认 ===== -->
+  <ConfirmDialog
+    v-if="!editingBlocked"
+    :open="!!pendingRemove"
+    :title="pendingRemove?.kind === 'suspense' ? '删除悬念' : '删除计划'"
+    confirm-text="删除"
+    confirm-icon="trash"
+    tone="danger"
+    @update:open="v => { if (!v) pendingRemove = null; }"
+    @confirm="confirmRemovePlan"
+  >
+    删除这条{{ pendingRemove?.kind === 'suspense' ? '悬念' : '计划' }}「{{ pendingRemove?.content }}」？删除后不再注入正文。这项修改单独保存，重新摘要或重抽后仍然保留。
+  </ConfirmDialog>
 </template>
 
 <style scoped>

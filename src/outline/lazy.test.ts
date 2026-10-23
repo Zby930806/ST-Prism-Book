@@ -5,6 +5,7 @@ import type { NoteDecision } from '@/notes/types';
 import type { OutlineContent } from './types';
 import * as host from '@/st/context';
 import * as api from '@/api/settings';
+import { apiSettings } from '@/api/settings';
 import { requestCompletion } from '@/api/client';
 import { fetchWorldInfo } from '@/memory/engine';
 import { activeDecisions } from '@/notes/store';
@@ -127,11 +128,25 @@ describe('一键生成：请求内容', () => {
     expect(result).toHaveLength(7);
     expect(result[1].content).toContain('[角色卡');
     expect(result[2].content).toBe(`${WORLD_HEADING}【旧港】走私者聚集的码头`);
-    expect(result[3].content).toContain('[已有历史压缩层');
+    expect(result[3].content).toContain('[已有的摘要和总结');
     expect(result[4].content).toBe(`${ARRANGEMENT_HEADING}- 下次见面时交还钥匙`);
     expect(result[5].content).toContain('[最近正文');
-    const long = buildOutlineContext(ctx, '需求', 2, { worldInfo: '设'.repeat(9000) })[2].content;
-    expect(long.length).toBe(WORLD_HEADING.length + 6000); expect(long).toContain('[资料按预算截断，未展示部分不可臆造]');
+    const long = buildOutlineContext(ctx, '需求', 2, { worldInfo: '设'.repeat(25000) })[2].content;
+    expect(long.length).toBe(WORLD_HEADING.length + 20000); expect(long).toContain('[资料按预算截断，未展示部分不可臆造]');
+    expect(buildOutlineContext(ctx, '需求', 2, { worldInfo: '设'.repeat(19000) })[2].content).toBe(WORLD_HEADING + '设'.repeat(19000));
+  });
+
+  it('札记安排：预算为 0 时全部带上；填写了预算时最多约 1500 字，保留最新的并注明较早的省略了几条', () => {
+    const lines = Array.from({ length: 30 }, (_, i) => `- 第${i}条安排${'内容'.repeat(40)}`).join('\n');
+    const full = buildOutlineContext(ctx, '需求', 2, { arrangements: lines })[3].content;
+    expect(full).toBe(`${ARRANGEMENT_HEADING}${lines}`);
+    apiSettings.memoryBudgetTokens = 6000;
+    try {
+      const part = buildOutlineContext(ctx, '需求', 2, { arrangements: lines })[3].content.slice(ARRANGEMENT_HEADING.length);
+      expect(part.length).toBeLessThanOrEqual(1500);
+      expect(part).toContain('第29条安排'); expect(part).not.toContain('第0条安排');
+      expect(part).toMatch(/^（另有 \d+ 条较早的安排因字数上限没有列出。）/);
+    } finally { apiSettings.memoryBudgetTokens = 0; }
   });
 
   it('资料为空白时不加消息，消息与不带资料时完全一致', () => {
@@ -188,13 +203,16 @@ describe('一键生成：生成流程', () => {
     expect(outlineRun.status).toContain('草稿已保存'); expect(outlineRun.busy).toBe(false);
   });
 
-  it('一键生成接受模型给出的任意合法阶段数；指定阶段数时仍须一致', async () => {
+  it('一键生成接受模型给出的任意合法阶段数；指定阶段数不一致时照常存为草稿并提示', async () => {
     completion.mockResolvedValueOnce(reply(2));
     await generateOutlineAuto();
     expect(outlineRun.error).toBe(''); expect(outlineState.draft?.content.chapters).toHaveLength(2);
+    expect(outlineRun.draftWarnings).toBeNull();
     completion.mockResolvedValueOnce(reply(2));
     await generateOutline('指定三个阶段', 3);
-    expect(outlineRun.error).toContain('阶段数不对'); expect(outlineState.draft?.brief).toBe(AUTO_OUTLINE_BRIEF);
+    expect(outlineRun.error).toBe(''); expect(outlineState.draft?.brief).toBe('指定三个阶段');
+    expect(outlineRun.draftWarnings?.items).toEqual(['要求 3 个阶段，实际 2 个。']);
+    expect(outlineRun.status).toContain('已自动调整');
   });
 
   it('读取世界书期间取消：不等读取结束，不发请求，草稿和规划都不变', async () => {

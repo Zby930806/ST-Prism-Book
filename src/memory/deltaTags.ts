@@ -1,14 +1,15 @@
 /**
  * 一楼摘要带来的状态变动 → 可读的标签行。楼层面板(就地编辑)和重新摘要的对比弹窗共用,
- * 两处显示同一份变动时说法一致。纯函数:不改聊天,计划只通过 planContentById 查内容。
+ * 两处显示同一份变动时说法一致。纯函数:不改聊天,计划、生活档案只通过已有叶子查内容。
  */
-import { describeVarOp, planContentById, secretContentById } from './apply';
+import { getContext } from '@/st/context';
+import { describeVarOp, getLeaf, MANUAL_ADD_BASE, MIGRATED_ADD_BASE, planContentById, secretContentById } from './apply';
 import { fmtNpcAffinity } from './npcRelations';
-import type { ItemDelta, NpcDelta, StoredDelta, VarOp } from './types';
+import type { ItemDelta, LifeDetailAdd, NpcDelta, StoredDelta, VarOp } from './types';
 
-export type DeltaOp = 'add' | 'update' | 'remove' | 'resolve' | 'reopen' | 'reparent' | 'rename';
+export type DeltaOp = 'add' | 'update' | 'remove' | 'resolve' | 'reopen' | 'reparent' | 'rename' | 'archive';
 // 单字符曾让人费解(「改」是什么?),改用明确词条 + 语义色徽标(见 .bbs-fp-op 的 op-* 着色)
-export const DELTA_OP_LABEL: Record<DeltaOp, string> = { add: '新增', update: '更新', remove: '移除', resolve: '了结', reopen: '重启', reparent: '迁移', rename: '改名' };
+export const DELTA_OP_LABEL: Record<DeltaOp, string> = { add: '新增', update: '更新', remove: '移除', resolve: '了结', reopen: '重启', reparent: '迁移', rename: '改名', archive: '沉降' };
 
 // key 用于定位到 delta 里的具体桶+序号,如 'item:add:0'
 // text=主文本(名字/标题,一行),sub=副文本(描述/字段细节,淡色小字另起一行)。
@@ -188,12 +189,67 @@ function varTags(d: Delta): DeltaTag[] {
   });
 }
 
+/**
+ * 生活档案只存稳定 id(detail:叶子id#序号,手动条目为显式 id)时反查新增时的内容;按「该楼之前及本楼」查,不泄漏后面楼层。
+ * 序号口径与重放相同:delta 从 0 起,migratedDelta 从 MIGRATED_ADD_BASE 起,manualOps 从 MANUAL_ADD_BASE 起。找不到时只显示「一项」。
+ */
+function lifeDetailLabel(verb: string, id: string, floor: number): string {
+  const m = id.match(/^detail:(.+)#(\d+)$/);
+  const chat = getContext()?.chat ?? [];
+  type LifeAdd = LifeDetailAdd & { id?: string };
+  type Parts = { delta?: StoredDelta; migratedDelta?: StoredDelta; manualOps?: StoredDelta };
+  const adds = (d?: StoredDelta): LifeAdd[] => (d?.lifeDetails?.add ?? []) as LifeAdd[];
+  for (let i = 0; i <= Math.min(floor, chat.length - 1); i++) {
+    const leaf = getLeaf(chat[i]) as (ReturnType<typeof getLeaf> & Parts) | undefined;
+    if (!leaf) continue;
+    const manual = adds(leaf.manualOps).find(a => a.id === id);
+    if (manual?.text) return `${verb}:${manual.text}`;
+    if (!m || leaf.id !== m[1]) continue;
+    const n = Number(m[2]);
+    const entry = n >= MANUAL_ADD_BASE ? adds(leaf.manualOps)[n - MANUAL_ADD_BASE]
+      : n >= MIGRATED_ADD_BASE ? adds(leaf.migratedDelta)[n - MIGRATED_ADD_BASE] : adds(leaf.delta)[n];
+    if (entry?.text) return `${verb}:${entry.text}`;
+  }
+  return `${verb}一项`;
+}
+
+function lifeSubject(subject?: string): string | undefined {
+  const s = subject?.trim();
+  if (!s) return undefined;
+  return s === 'user' ? '主角' : s;
+}
+
+// 生活档案变动:新增显示正文与所属人物;修改、沉降、删除存的是稳定 id,反查新增时的内容。
+// 只读展示,可删除(删除时按各自的桶剔除,见 useLeafEdit.deleteTag)。
+function lifeTags(d: Delta, floor: number): DeltaTag[] {
+  const ld = d?.lifeDetails;
+  if (!ld) return [];
+  const out: DeltaTag[] = [];
+  (ld.add ?? []).forEach((x, i) => out.push({ key: `life:add:${i}`, op: 'add', bucket: 'add', idx: i, text: x.text, sub: lifeSubject(x.subject), editable: false }));
+  (ld.update ?? []).forEach((x, i) => out.push({ key: `life:update:${i}`, op: 'update', bucket: 'update', idx: i,
+    text: x.text || lifeDetailLabel('修改', x.id, floor), sub: [lifeSubject(x.subject), x.tier === 'pinned' ? '置顶' : x.tier === 'archive' ? '沉降' : ''].filter(Boolean).join(' · ') || undefined, editable: false }));
+  (ld.archive ?? []).forEach((id, i) => out.push({ key: `life:archive:${i}`, op: 'archive', bucket: 'archive', idx: i, text: lifeDetailLabel('沉降', id, floor), sub: '只在出现关键词时发送', editable: false }));
+  (ld.remove ?? []).forEach((id, i) => out.push({ key: `life:remove:${i}`, op: 'remove', bucket: 'remove', idx: i, text: lifeDetailLabel('删除', id, floor), editable: false }));
+  return out;
+}
+
+// 局势卡:省略=不动,null=清空,对象=整卡覆盖;一楼最多一条。
+function focusTags(d: Delta): DeltaTag[] {
+  if (!d || d.sceneFocus === undefined) return [];
+  const f = d.sceneFocus;
+  if (f === null) return [{ key: 'focus:update:0', op: 'remove', bucket: 'update', idx: 0, text: '清空局势卡', sub: '场面结束', editable: false }];
+  const parts = [f.participants?.length ? `在场:${f.participants.join('、')}` : '', f.tension ? `张力:${f.tension}` : '', f.pendingBeat ? `将至:${f.pendingBeat}` : ''].filter(Boolean);
+  return [{ key: 'focus:update:0', op: 'update', bucket: 'update', idx: 0, text: f.situation, sub: parts.join(' · ') || undefined, editable: false }];
+}
+
 /** 按类目分组(顺序即显示顺序);没有变动的组 tags 为空,由调用方决定是否隐藏。 */
 export function deltaTagGroups(d: Delta, floor: number): DeltaTagGroup[] {
   return [
     { title: '主角', icon: 'characters', tags: protagonistTags(d) },
+    { title: '局势', icon: 'plans', tags: focusTags(d) },
     { title: '物品', icon: 'items', tags: itemTags(d) },
     { title: '角色', icon: 'npcs', tags: npcTags(d) },
+    { title: '生活档案', icon: 'characters', tags: lifeTags(d, floor) },
     { title: '场景', icon: 'scenes', tags: sceneTags(d) },
     { title: '悬念簿', icon: 'plans', tags: planTags(d, floor) },
     { title: '信息差', icon: 'eye-off', tags: secretTags(d, floor) },

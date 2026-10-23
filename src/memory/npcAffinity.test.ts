@@ -73,10 +73,16 @@ describe('定性档位与未知', () => {
     const delta = finalizeDelta({ npcs: { add: [{ name, affinityInner: value }] } }, []);
     expect(deriveMemory([message(delta)]).npcs[0].affinityInner).toBe(value);
   });
-  it.each([undefined, -3, 3, 50, 0.5, NaN, Infinity, '1', '', true, false, {}, []])('拒绝非法值 [%#] %j,不能转成中性或极值', value => {
+  it.each([undefined, -3, 3, 50, 0.5, NaN, Infinity, '', '50', '1.5', '3', '-3', '一', '1档', '0x1', '1e0', true, false, {}, []])('拒绝非法值 [%#] %j,不能转成中性或极值', value => {
     expect(cleanNpcAffinityLevel(value)).toBeUndefined();
     const delta = finalizeDelta({ npcs: { update: [{ name, affinityInner: value }] } } as unknown as SummaryDelta, []);
     expect(deriveMemory([base(), message(delta)]).npcs[0]).toMatchObject(initial);
+  });
+  it.each([['1', 1], [' -2 ', -2], ['+2', 2], ['0', 0], ['-0', 0]] as const)('完整写成整数档位的字符串 %j 按数字 %s 接受', (value, level) => {
+    expect(cleanNpcAffinityLevel(value)).toBe(level);
+    expect(Object.is(cleanNpcAffinityLevel(value), -0)).toBe(false);
+    const delta = finalizeDelta({ npcs: { update: [{ name, affinityInner: value }] } } as unknown as SummaryDelta, []);
+    expect(deriveMemory([base(), message(delta)]).npcs[0].affinityInner).toBe(level);
   });
   it('下拉框空值是未知,零是中性;旧角色不凭空产生记录', () => {
     expect(affinityLevelFromInput('')).toBeNull();
@@ -141,7 +147,9 @@ describe('独立、绝对覆盖、可回滚的角色补丁', () => {
     useChat(chat);
     expect(upsertNpc(initial)).toBe(true);
     expect(editNpc(name, { title: '新身份' })).toBe(true);
-    const unrelated = chat[1].extra!.bbs_leaf!.delta.npcs!.update!.at(-1)!;
+    // 手动修改单独存在叶子的 manualOps 上,不并入模型结果
+    expect(chat[1].extra!.bbs_leaf!.delta.npcs).toBeUndefined();
+    const unrelated = chat[1].extra!.bbs_leaf!.manualOps!.npcs!.update!.at(-1)!;
     expect(unrelated.affinityInner).toBeUndefined();
     expect(unrelated.affinityOuter).toBeUndefined();
     expect(editNpc(name, { name: '新名字' })).toBe(true);

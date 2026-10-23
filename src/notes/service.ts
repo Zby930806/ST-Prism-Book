@@ -4,11 +4,12 @@ import { describeFailure, partialReply, type ApiError } from '@/api/errors';
 import { getContext } from '@/st/context';
 import { engineActiveHere } from '@/api/settings';
 import { notesSettings, validateNotesChannel, settingsIssue } from './settings';
-import { loadNotes, notesState, addNote, activeDecisions, notesWriteIssue } from './store';
-import { sourceHash, sameChat, latestStoryFloor } from './source';
-import { noteText, parseQuestions } from './protocol';
+import { loadNotes, notesState, addNote, activeDecisions, notesWriteIssue, sameNoteSource } from './store';
+import { sourceHash, sameChat, latestStoryFloor, floorHash } from './source';
+import { noteText, parseQuestions, isNoNoteReply } from './protocol';
 import { stripThinkBlocks } from '@/memory/timeTag';
 import { buildNotesContext } from './context';
+import { memoryBudgetLimited } from './memoryDigest';
 /**
  * floor:最近一次生成针对的楼层(进行中或刚结束),聊天里的札记卡片据此在对应楼层显示进度和结果;
  * 生成前的检查没通过时为 null。storyBusy:正文正在生成,这期间不能生成札记。
@@ -35,13 +36,40 @@ export function cancelNotes(): void {
   runId++; stillCurrent=undefined; controller?.abort(); controller=undefined; notesRun.busy=false; notesRun.draft='';
   if (wasBusy) notesRun.status='已取消，原有札记没有变动。';
 }
+/** 填写了记忆注入预算时，注入正文的安排清单最多这么多字（只算清单本身）。预算为 0（默认）时不限制。 */
+export const NOTES_INJECTION_LIMIT = 16000;
+export interface ConfirmedInjectionPlan {
+  text: string;
+  /** 实际注入的安排条数 */
+  injected: number;
+  /** 因超出上限没有注入的条数 */
+  omitted: number;
+  /** 仍要落实的安排总数（待兑现、进行中） */
+  total: number;
+}
+/**
+ * 注入正文的已确认安排。顺序：进行中的在前，待兑现的按确认时间从新到旧。
+ * 记忆注入预算为 0（默认）时全部注入；填写了预算时清单最多 16000 字，按上面的顺序放入放得下的，其余这一轮不注入（页面显示条数）。
+ */
+export function confirmedInjectionPlan(): ConfirmedInjectionPlan {
+  const none: ConfirmedInjectionPlan = { text: '', injected: 0, omitted: 0, total: 0 };
+  if (!notesSettings.enabled || !notesSettings.injectConfirmed || settingsIssue.value || !engineActiveHere()) return none;
+  const list=activeDecisions(); if (!list.length) return none;
+  const ordered=[...list.filter(d=>d.status==='in_progress'), ...list.filter(d=>d.status==='pending').sort((a,b)=>b.createdAt-a.createdAt)];
+  const limit=memoryBudgetLimited() ? NOTES_INJECTION_LIMIT : Infinity;
+  const lines: string[]=[]; let used=0, omitted=0;
+  for (const d of ordered) {
+    const line='['+(d.status==='in_progress'?'进行中':'未动笔')+'] '+d.text;
+    const cost=line.length+(lines.length?1:0);
+    if (used+cost>limit) { omitted++; continue; }
+    lines.push(line); used+=cost;
+  }
+  if (!lines.length) return { ...none, omitted, total: ordered.length };
+  const text='[戏外已确认的后续创作安排，不是已发生的剧情事实]\n仅下列用户已确认安排可逐步落实；按当前节奏每轮推进一小步，不一次写完。角色不知道这份清单。未确认札记提案不可提前兑现；不要模仿输出札记、清单或aftertalk标签。摘要只记录正文真正发生的事件，不把这些安排登记为已完成。\n'+lines.join('\n')+'\n[戏外安排结束]';
+  return { text, injected: lines.length, omitted, total: ordered.length };
+}
 export function buildConfirmedInjection(): string {
-  if (!notesSettings.enabled || !notesSettings.injectConfirmed || settingsIssue.value || !engineActiveHere()) return '';
-  const list=activeDecisions(); if (!list.length) return '';
-  const lines=list.map(d=>'['+(d.status==='in_progress'?'进行中':'未动笔')+'] '+d.text);
-  // 不静默丢掉一半决策，不生成畸形协议；超限时要求用户清理后再注入。
-  if (lines.join('\n').length>16000) { notesRun.status='未完成安排超过注入预算，请先完成或取消一部分；本轮未注入清单。'; return ''; }
-  return '[戏外已确认的后续创作安排，不是已发生的剧情事实]\n仅下列用户已确认安排可逐步落实；按当前节奏每轮推进一小步，不一次写完。角色不知道这份清单。未确认札记提案不可提前兑现；不要模仿输出札记、清单或aftertalk标签。摘要只记录正文真正发生的事件，不把这些安排登记为已完成。\n'+lines.join('\n')+'\n[戏外安排结束]';
+  return confirmedInjectionPlan().text;
 }
 export function refreshNotesInjection(): void {
   getContext()?.setExtensionPrompt?.(NOTES_INJECT_KEY,buildConfirmedInjection(),1,0,false,0);
@@ -59,8 +87,8 @@ export async function generateNotes(force=false): Promise<void> {
     const storageIssue=notesWriteIssue(); if (storageIssue) throw new Error(storageIssue);
     const floor=latestStoryFloor(ctx); if (floor<0) throw new Error('当前聊天还没有可以写札记的正文。');
     notesRun.floor=floor;
-    const hash=sourceHash(ctx,floor), allHash=sourceHash(ctx,ctx.chat.length-1), count=ctx.chat.length, chatId=ctx.getCurrentChatId();
-    if (!force && notesState.records.some(r=>r.floor===floor && r.sourceHash===hash)) { notesRun.status='这段正文已经有札记了；想要另一版请点「重新生成」。'; return; }
+    const hash=sourceHash(ctx,floor), fh=floorHash(ctx.chat[floor]), swipe=ctx.chat[floor].swipe_id??0, allHash=sourceHash(ctx,ctx.chat.length-1), count=ctx.chat.length, chatId=ctx.getCurrentChatId();
+    if (!force && notesState.records.some(r=>sameNoteSource(r,{floor,swipe,sourceHash:hash,floorHash:fh}))) { notesRun.status='这段正文已经有札记了；想要另一版请点「重新生成」。'; return; }
     const revision=notesState.revision;
     controller=new AbortController(); const ctrl=controller; own=++runId; notesRun.busy=true; notesRun.status='正在生成札记…';
     const current=()=> own===runId && !ctrl.signal.aborted && sameChat(ctx) && getContext()?.getCurrentChatId()===chatId && ctx.chat.length===count && sourceHash(ctx,count-1)===allHash && notesState.revision===revision && notesSettings.enabled;
@@ -76,8 +104,13 @@ export async function generateNotes(force=false): Promise<void> {
     }
     if (!current()) { if (own===runId) {notesRun.draft=''; notesRun.status='聊天或正文已经变化，这次的结果没有采用。';} return; }
     const body=noteText(reply); if (!body) throw new Error('札记 API 没有返回可用内容。');
+    // 模型认为本轮不需要札记时不保存：保存下来会成为下一次请求里的「上一份札记」，挤掉真正的进度清单和待确认提案。
+    if (!cut && isNoNoteReply(body)) {
+      if (own===runId && sameChat(ctx)) { notesRun.draft=''; notesRun.status='模型认为本轮无需新增札记，没有保存新的札记；需要时可再次生成。'; }
+      return;
+    }
     const text=cut ? body+cutNotice(cut) : body;
-    await addNote({id:crypto.randomUUID(),createdAt:Date.now(),floor,swipe:ctx.chat[floor].swipe_id??0,sourceHash:hash,text,questions:parseQuestions(text)});
+    await addNote({id:crypto.randomUUID(),createdAt:Date.now(),floor,swipe,sourceHash:hash,floorHash:fh,text,questions:parseQuestions(text)});
     if (own===runId && sameChat(ctx)) {
       notesRun.draft='';
       if (cut) {

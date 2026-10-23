@@ -27,6 +27,7 @@ import CarryoverCard from './cards/CarryoverCard.vue';
 import MigrateCard from './cards/MigrateCard.vue';
 import DataApiCard from './cards/DataApiCard.vue';
 import SettingsBackupCard from './cards/SettingsBackupCard.vue';
+import RestoreHiddenFloors from './RestoreHiddenFloors.vue';
 
 /* 总开关：读屏名称固定为功能名，开关状态由 aria-checked 表达，说明文字作为描述。 */
 const masterDescId = useId();
@@ -92,7 +93,7 @@ function goToSettingsGroup(id: string) {
       <div class="bbs-master" :class="{ 'is-off': !apiSettings.enabled }">
         <div class="bbs-master-text">
           <h3 class="bbs-master-title">{{ apiSettings.enabled ? '棱镜宝书已启用' : '棱镜宝书已停用' }}</h3>
-          <p :id="masterDescId" class="prism-master-description">{{ apiSettings.enabled ? '摘要、总结、隐藏旧楼层和记忆注入均按以下设置进行。' : '不摘要、不注入，也不隐藏旧楼层。已有记忆保留，设置仍可修改。' }}</p>
+          <p :id="masterDescId" class="prism-master-description">{{ apiSettings.enabled ? '摘要、总结、隐藏旧楼层和记忆注入均按以下设置进行。' : '不摘要、不注入，不再隐藏新的楼层。已由棱镜宝书隐藏的旧楼层仍保持隐藏，正文模型看不到它们的原文和摘要（当前聊天有这类楼层时，可在下方恢复显示）。已有记忆保留，设置仍可修改。' }}</p>
         </div>
         <!-- 总开关：与其他设置项同一种开关；外层 label 提供 44px 点按区域 -->
         <label class="prism-master-control" :title="apiSettings.enabled ? '停用棱镜宝书记忆引擎' : '启用棱镜宝书记忆引擎'">
@@ -106,6 +107,8 @@ function goToSettingsGroup(id: string) {
           />
         </label>
       </div>
+      <!-- 停用（总开关关闭或当前角色被排除）且当前聊天有本插件隐藏的楼层时，提供恢复显示 -->
+      <RestoreHiddenFloors />
     </div>
 
     <div class="prism-settings-layout">
@@ -155,7 +158,7 @@ function goToSettingsGroup(id: string) {
         <section class="prism-settings-group prism-group-advanced" aria-labelledby="prism-settings-advanced">
           <header class="prism-group-head">
             <h2 id="prism-settings-advanced" tabindex="-1">高级过滤</h2>
-            <p>摘要时跳过的角色、世界书条目和格式标签。</p>
+            <p>停用棱镜宝书的角色，以及摘要时跳过的世界书条目和格式标签。</p>
           </header>
           <div class="prism-group-cards">
             <ExcludeCharsCard />

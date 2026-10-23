@@ -29,7 +29,8 @@ const injured = (time = '2042/5/6 10:00') => leaf({ ...scene(), time, protagonis
 ] } }, time);
 // 跨日后定点角色的位置需本楼重新确认(既有在场规则),这里同楼确认岑岚仍在医务室
 const nextDay = (time: string) => leaf({ time, npcs: { update: [{ name: '岑岚', location: '医务室' }] } }, time);
-const reminder = () => { const t = buildStateInjectionText(); const i = t.indexOf('[伤势进展提醒]'); return i < 0 ? '' : t.slice(i, t.indexOf(INJURY_REMINDER_TAIL, i) + INJURY_REMINDER_TAIL.length); };
+// 提醒块以独占一行的标题开头;[主要角色]标题里也会提到「[伤势进展提醒]」,按块标题定位
+const reminder = () => { const t = buildStateInjectionText(); const i = t.indexOf('[伤势进展提醒]\n'); return i < 0 ? '' : t.slice(i, t.indexOf(INJURY_REMINDER_TAIL, i) + INJURY_REMINDER_TAIL.length); };
 
 beforeEach(() => {
   Object.assign(memory, createEmptyMemory());
@@ -82,10 +83,13 @@ describe('伤势进展提醒的阈值', () => {
     expect(text).not.toContain('远客');
     expect(text.indexOf('沈遥')).toBeLessThan(text.indexOf('洛伊'));
     expect(text.indexOf('洛伊')).toBeLessThan(text.indexOf('岑岚'));
+    // 有提醒时,[主要角色]标题注明伤情按提醒处理,不与「离场后不凭空推测」冲突
+    expect(buildStateInjectionText()).toContain('伤情按[伤势进展提醒]处理');
   });
-  it(`过得越久措辞越重:满 ${INJURY_DAY_LEVELS[1]} 天、满 ${INJURY_DAY_LEVELS[2]} 天`, () => {
+  it(`过得越久措辞越重:满 ${INJURY_DAY_LEVELS[1]} 天按轻重区分,满 ${INJURY_DAY_LEVELS[2]} 天应已痊愈`, () => {
     useChat([injured(), user(), leaf({ time: '2042/5/14 09:00' }, '2042/5/14 09:00')]);
-    expect(reminder()).toContain('已过约 8 天);时间已久,除非正文另有说明,按常理大多应已明显好转或痊愈');
+    expect(reminder()).toContain('已过约 8 天);轻伤多半已好转或痊愈,重伤仍在恢复,按伤情轻重体现');
+    expect(reminder()).not.toContain('大多应已明显好转或痊愈');
     useChat([injured(), user(), leaf({ time: '2042/7/6 09:00' }, '2042/7/6 09:00')]);
     expect(reminder()).toContain('已过约 2 个月);时间很久,除确属长期伤病或后遗症外应已痊愈');
   });
@@ -97,6 +101,15 @@ describe('伤势进展提醒的阈值', () => {
     chat.push(user(), leaf({}));
     useChat(chat);
     expect(reminder()).toContain(`- 沈遥:左腿扭伤(记录后已过 ${INJURY_FLOOR_LEVELS[0]} 个回复楼层,故事时间不明)`);
+  });
+  it('故事时间不明时不按楼层升级:一百多个回复楼层后仍只发一级中性提醒,保留不要无限期重复的说明', () => {
+    const chat = [leaf({ ...scene(), protagonist: { condition: '左腿扭伤' } }), ...Array.from({ length: 120 }, () => leaf({}))];
+    useChat(chat);
+    const text = reminder();
+    expect(text).toContain('- 沈遥:左腿扭伤(记录后已过 120 个回复楼层,故事时间不明)\n');
+    expect(text).not.toMatch(/应已痊愈|时间已久|多半已好转/);
+    expect(text).toContain('不要无限期重复同样的伤情描写');
+    expect(injuryElapsed({ name: '甲', condition: '伤', conditionFloor: 0 }, '', () => 500)).toMatchObject({ level: 1, floors: 500 });
   });
   it('伤情记录更新后重新计时,提醒随之消失', () => {
     const chat = [injured(), user(), leaf({ time: '2042/5/9 09:00' }, '2042/5/9 09:00')];
@@ -111,6 +124,7 @@ describe('伤势进展提醒的阈值', () => {
     useChat(chat);
     apiSettings.injection.injuryReminder = false;
     expect(reminder()).toBe('');
+    expect(buildStateInjectionText()).not.toContain('伤情按[伤势进展提醒]处理');
     apiSettings.injection.injuryReminder = true;
     apiSettings.injection.npcs = false;
     expect(reminder()).toContain('沈遥');

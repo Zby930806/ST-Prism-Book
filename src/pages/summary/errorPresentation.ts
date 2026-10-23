@@ -18,6 +18,7 @@ const MERGE_RECOVERY = '重新批量补摘会从这组楼层继续；反复失�
 
 /** 批量补摘「较早楼层合并摘要」未通过校验的原因。 */
 function mergeReason(error: string): string {
+  if (error.includes('整体错位')) return '模型写的楼层号与材料对不上，可能整体错位';
   if (error.includes('漏掉了楼层')) return '模型漏写了其中的楼层';
   if (error.includes('不止一条')) return '模型给同一层写了不止一条';
   if (error.includes('材料以外的楼层')) return '模型写的楼层号与材料不符';
@@ -35,9 +36,11 @@ function validationReason(error: string): string {
     return error.includes('不匹配') ? '角色位置的引用与本楼正文不一致' : '角色位置缺少本楼正文依据';
   }
   if (error.includes('items.add.qty')) return '物品数量写得不明确';
+  if (error.includes('lifeDetails.add') && error.includes('subject')) return '生活档案没有写明所属人物';
   if (error.includes('摘要结果必须是根对象')) return '模型没有按要求输出摘要 JSON（可能是拒答，或只写了说明文字）';
   if (error.includes('stateChanges')) return '状态清单与实际写出的更新不一致';
   if (error.includes('同一计划每楼只能')) return '同一条计划在这一楼里更新冲突';
+  if (/编号 \S+ 不存在/.test(error)) return '状态更新引用的计划、生活档案或信息差编号不存在';
   if (/不是合法操作数组|含无效条目|包含操作数组的对象|并列放在根对象|放在对应 protagonist/.test(error)) return '状态更新的格式不对';
   return '摘要内容没有通过校验';
 }

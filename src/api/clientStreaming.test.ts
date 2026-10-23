@@ -169,7 +169,8 @@ describe('stream reader edge cases', () => {
     mockResponse(new Response(body));
     const onDelta = vi.fn();
     const promise = requestCompletion(channel, messages, { onDelta });
-    const rejection = expect(promise).rejects.toThrow('API 请求超时（超过 2 秒）');
+    // 流式请求按空闲时长计时：服务商响应后 2 秒没有任何数据即超时
+    const rejection = expect(promise).rejects.toThrow('API 请求超时（超过 2 秒没有收到新内容）');
     await vi.advanceTimersByTimeAsync(2000);
     await rejection;
     expect(cancel).toHaveBeenCalledTimes(1);
@@ -215,17 +216,18 @@ describe('stream cancellation and timeout', () => {
     expect(onDelta).not.toHaveBeenCalled();
   });
 
-  it('超时覆盖等待中的流式读取,保留已有错误文案并清理计时器', async () => {
+  it('超时覆盖等待中的流式读取:超过空闲时长没有新数据即中断,带回已收到的正文并清理计时器', async () => {
     vi.useFakeTimers();
     const { body, controller, cancel, fetchMock } = openStream();
     const onDelta = vi.fn();
     const promise = requestCompletion(channel, messages, { onDelta });
-    const rejection = expect(promise).rejects.toThrow('API 请求超时（超过 2 秒）');
+    const rejection = expect(promise).rejects.toMatchObject({ kind: 'timeout', partial: 'partial', retryable: false });
     controller.enqueue(encoder.encode(`${event('partial')}\n`));
     await vi.advanceTimersByTimeAsync(0);
     expect(onDelta).toHaveBeenCalledExactlyOnceWith('partial');
     await vi.advanceTimersByTimeAsync(2000);
     await rejection;
+    await expect(promise).rejects.toThrow('API 请求超时（超过 2 秒没有收到新内容）');
     expect(fetchMock.mock.calls[0][1]?.signal?.aborted).toBe(true);
     expect(cancel).toHaveBeenCalled();
     expect(body.locked).toBe(false);

@@ -113,8 +113,11 @@ async function exclusive<T>(task: () => Promise<T>): Promise<T> {
   try { return await task(); } finally { writerState.busy = false; }
 }
 
-/** 应用一批中的若干条建议：一次读取、一次保存。返回已应用的建议和未应用的原因。 */
-export function applySuggestions(batchId: string, ids: string[]): Promise<ApplyOutcome> {
+/**
+ * 应用一批中的若干条建议：一次读取、一次保存。返回已应用的建议和未应用的原因。
+ * 依据的楼层被改写、重抽或删除后（批次失效），默认不应用；用户核对后选择「仍然应用」时传 allowStale。
+ */
+export function applySuggestions(batchId: string, ids: string[], opts: { allowStale?: boolean } = {}): Promise<ApplyOutcome> {
   return exclusive(async () => {
     const ctx = editableContext();
     const identity = captureChat(ctx);
@@ -122,7 +125,7 @@ export function applySuggestions(batchId: string, ids: string[]): Promise<ApplyO
     if (!batch) throw new Error('找不到这批建议，可能已经被清理。');
     const wanted = batch.suggestions.filter(s => ids.includes(s.id) && s.status === 'pending' && s.kind !== 'flag');
     if (!wanted.length) throw new Error('没有可以应用的建议。');
-    if (!rangeCurrent(batch.source, ctx)) throw new Error('这批建议依据的楼层（第 ' + batch.source.from + '–' + batch.source.to + ' 楼）已被改写、重抽或删除，建议已失效，不能再应用。可以重新生成建议。');
+    if (!opts.allowStale && !rangeCurrent(batch.source, ctx)) throw new Error('这批建议依据的楼层（第 ' + batch.source.from + '–' + batch.source.to + ' 楼）已被改写、重抽或删除。请核对建议内容后点「仍然应用」，或点「从第 ' + batch.source.from + ' 楼重新读取」后重新生成。');
     const issues: ApplyIssue[] = [];
     const allowed = wanted.filter(s => {
       const blocked = permissionBlock(s.kind, worldbookSettings.permission);
@@ -161,7 +164,10 @@ export function undoApplied(recordId: string): Promise<string> {
     const record = worldbookState.applied.find(r => r.id === recordId);
     if (!record) throw new Error('找不到这条写入记录。');
     if (record.undoneAt !== null) throw new Error('这次写入已经撤销过。');
-    const later = worldbookState.applied.find(r => r.id !== record.id && r.book === record.book && r.uid === record.uid && r.at > record.at && r.undoneAt === null);
+    // 写入记录按时间先后追加;同一毫秒内的两次写入按记录顺序区分先后,不能当成同时。
+    const index = worldbookState.applied.indexOf(record);
+    const later = worldbookState.applied.find((r, i) => r.id !== record.id && r.book === record.book && r.uid === record.uid && r.undoneAt === null
+      && (r.at > record.at || (r.at === record.at && i > index)));
     if (later) throw new Error('这个条目之后还有一次写入（' + KIND_LABELS[later.kind] + '），请先撤销较新的那次。');
     await refreshWorldHost();
     if (worldHost.names && !worldHost.names.includes(record.book)) throw new Error('世界书「' + record.book + '」不存在：可能已被删除或改名，无法撤销。');

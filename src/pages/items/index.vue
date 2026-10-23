@@ -24,8 +24,8 @@ const visibleItems = computed(() => {
   );
 });
 
-// 物品/计划是从叶子摘要重放出来的派生数据,手动操作写入「最新一条有效叶子」。
-// 没有任何有效叶子时无处挂载,禁止手动添加。
+// 物品/计划是从叶子摘要重放出来的派生数据,手动操作单独保存在「最新一条有效叶子」上
+// (重新摘要或重抽后仍然保留)。没有任何有效叶子时无处挂载,禁止手动添加。
 const hasLeaf = computed(() => derivedMeta.hasLeaf);
 
 function addItem() {
@@ -104,7 +104,7 @@ function saveEdit() {
         { value: carriedCount, label: '随身' },
         { value: memory.items.length - carriedCount, label: '存放' },
       ]"
-      :note="hasLeaf ? '手动修改记录在最新一条摘要上' : '生成摘要后可手动补录'"
+      :note="hasLeaf ? '手动修改单独保存，重新摘要或重抽后仍然保留' : '生成摘要后可手动补录'"
     />
 
     <div class="bbs-additem">
@@ -191,7 +191,7 @@ function saveEdit() {
       @confirm="confirmRemove"
       @cancel="removing = null"
     >
-      删除「{{ removing?.name }}」？删除操作记录在最新一条摘要上，删除该楼层可恢复。
+      删除「{{ removing?.name }}」？这项修改单独保存，重新摘要或重抽后仍然保留。
     </ConfirmDialog>
   </section>
 </template>

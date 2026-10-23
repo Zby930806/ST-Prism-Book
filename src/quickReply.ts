@@ -1,4 +1,5 @@
 import { openBook } from '@/state/ui';
+import { registerQrAssistantButton, unregisterQrAssistantButton } from '@/qrAssistant';
 
 const BTN_ID = 'bbs-qr-button';
 const BAR_CLASS = 'bbs-qr-bar'; // 仅当 #qr--bar 不存在时,我们自建的条加这个标记类,便于回收
@@ -20,6 +21,7 @@ const BAR_CLASS = 'bbs-qr-bar'; // 仅当 #qr--bar 不存在时,我们自建的�
  * 注意:.qr--button 的样式全靠祖先选择器 `#qr--bar > .qr--buttons .qr--button` 生效,
  * 按钮**必须**落在该结构内才有原生外观。而 ST 的快速回复会在切聊天/改设置时重建 #qr--bar,
  * 把我们的按钮一并冲掉——故用 MutationObserver 盯住 #send_form,被冲掉就补回(同 JS-Slash-Runner)。
+ * 装了 QR助手时,快捷回复栏的按钮会收进它的菜单,这里同时登记进 QR助手(见 qrAssistant.ts)。
  */
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let observer: MutationObserver | null = null;
@@ -74,6 +76,7 @@ function buildButton(): HTMLElement {
 function tryInject(): boolean {
   const sendForm = document.getElementById('send_form');
   if (!sendForm) return false;
+  registerQrAssistantButton(BTN_ID, '棱镜宝书');
   if (document.getElementById(BTN_ID)) return true;
 
   const holder = ensureButtonHolder(sendForm);
@@ -83,6 +86,7 @@ function tryInject(): boolean {
 
 function removeButton(): void {
   document.getElementById(BTN_ID)?.remove();
+  unregisterQrAssistantButton(BTN_ID);
   removeOwnBarIfEmpty();
 }
 

@@ -25,8 +25,9 @@ const preview = computed(() => previewChange(s.value, props.data));
 const conflict = computed(() => (pending.value && props.data ? suggestionConflict(s.value, props.data) : ''));
 const blocked = computed(() => (pending.value && s.value.kind !== 'flag' ? permissionBlock(s.value.kind, props.permission) : ''));
 // 世界书不存在、依据楼层失效的说明在整批的头部显示一次，卡片里只说明本条自己的问题（冲突、超出权限）
-const problem = computed(() => (pending.value && !props.stale && !props.bookError ? conflict.value || blocked.value : ''));
-const canApply = computed(() => pending.value && s.value.kind !== 'flag' && !props.stale && !props.bookError && !problem.value && !!props.data && !props.locked);
+const problem = computed(() => (pending.value && !props.bookError ? conflict.value || blocked.value : ''));
+// 依据楼层失效的批次也可以在核对后「仍然应用」（页面会先弹窗说明）
+const canApply = computed(() => pending.value && s.value.kind !== 'flag' && !props.bookError && !problem.value && !!props.data && !props.locked);
 const modifies = computed(() => ['append', 'replace', 'rewrite'].includes(s.value.kind));
 const expanded = ref(false);
 const fullParts = computed(() => (modifies.value && preview.value.entry ? changeParts(s.value, preview.value.before) : { before: [], after: [] }));
@@ -89,7 +90,7 @@ const basis = computed(() => [floorsText(s.value.floors), s.value.kind === 'flag
       <template v-else>
         <button type="button" class="bbs-btn bbs-btn-sm" :disabled="locked" @click="emit('ignore')">忽略</button>
         <IconButton icon="edit" size="sm" :label="'编辑建议：' + s.title" title="编辑后再应用" :disabled="locked || stale || !!bookError" @click="emit('edit')" />
-        <button type="button" class="bbs-btn bbs-btn-sm bbs-btn-primary" :disabled="!canApply" @click="emit('apply')"><Icon name="check" />应用</button>
+        <button type="button" class="bbs-btn bbs-btn-sm bbs-btn-primary" :disabled="!canApply" @click="emit('apply')"><Icon name="check" />{{ stale ? '仍然应用' : '应用' }}</button>
       </template>
     </footer>
   </article>

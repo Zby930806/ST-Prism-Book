@@ -5,12 +5,12 @@
  * 两个开关是 aria-pressed 按钮，名称固定，状态由按下样式表达；只发出事件，写入记忆由页面处理。
  * 档案缺外貌、身份或性别时，卡片底部显示所缺项与「从原文补全」（检索全部楼层，结果确认后写入）。
  */
-import { apiSettings } from '@/api/settings';
 import IconButton from '@/components/IconButton.vue';
 import type { MemNpc } from '@/memory/types';
 import { computed } from 'vue';
 import NpcCardBase from './NpcCardBase.vue';
 import { npcCardFields, npcChips, profileGapText, type NpcTier } from './npcView';
+import { blockSent } from './sendScope';
 
 const props = defineProps<{
   npc: MemNpc;
@@ -35,7 +35,7 @@ const fields = computed(() => npcCardFields(props.npc, props.tier));
 const gaps = computed(() => profileGapText(props.npc));
 const starTitle = computed(() => {
   if (props.tier === 'main') return '取消主要角色（改为 NPC）';
-  return apiSettings.summaryOnlyMode ? '设为主要角色（仅调整棱镜宝书内的角色分组）' : '设为主要角色（档案与当前状态始终随正文发送）';
+  return blockSent('npcs') ? '设为主要角色（档案与当前状态随正文发送）' : '设为主要角色（仅调整棱镜宝书内的角色分组）';
 });
 const following = computed(() => props.tier === 'present' && props.npc.follow === true);
 const followTitle = computed(() => {

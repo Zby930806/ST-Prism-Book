@@ -2,10 +2,12 @@
 /**
  * 模型可搜索下拉（combobox）：输入框既是当前值也是过滤词，聚焦时弹出过滤后的模型列表。
  * 没有可选模型（还没拉取）时就是普通输入框。渠道弹窗与向量端点共用。
+ * 列表最多显示 200 个，超出时在底部写明还有多少个、可输入关键词筛选。
  * 键盘：↓/↑ 在列表中移动（列表收起时 ↓ 展开），Enter 选中高亮项，Esc 只收起列表、不关闭所在弹窗。
  */
 import { computed, ref, useId } from 'vue';
 import { useBackLayer } from '@/composables/useBackLayer';
+import { filterModelOptions } from './modelFilter';
 
 const props = withDefaults(defineProps<{
   modelValue: string;
@@ -25,13 +27,10 @@ const menuOpen = ref(false);
 const query = ref(''); // 聚焦后用户输入的过滤词;失焦时清空
 /** 键盘或悬停高亮的选项序号；-1 表示没有高亮 */
 const activeIndex = ref(-1);
-// 过滤:有 query 按子串(大小写不敏感)过滤;为空则显示全部。性能上限 200 条,避免超长列表卡顿。
-const filtered = computed<string[]>(() => {
-  const q = query.value.trim().toLowerCase();
-  const list = props.options;
-  const out = q ? list.filter(m => m.toLowerCase().includes(q)) : list;
-  return out.slice(0, 200);
-});
+// 过滤:有 query 按子串(大小写不敏感)过滤;为空则显示全部。最多显示 200 条,避免超长列表卡顿,超出的条数另行提示。
+const filteredResult = computed(() => filterModelOptions(props.options, query.value));
+const filtered = computed<string[]>(() => filteredResult.value.shown);
+const moreCount = computed(() => filteredResult.value.more);
 /** 列表实际显示：展开且有可选模型 */
 const listShown = computed(() => menuOpen.value && props.options.length > 0);
 // 返回键只收起模型列表，不关所在的渠道弹窗（关弹窗会丢掉没保存的修改）
@@ -131,6 +130,7 @@ function onKeydown(e: KeyboardEvent) {
       >
         {{ m }}
       </li>
+      <li v-if="moreCount" class="bbs-combo-empty bbs-combo-more" role="option" aria-disabled="true" aria-selected="false">还有 {{ moreCount }} 个，输入关键词筛选</li>
     </ul>
   </div>
 </template>

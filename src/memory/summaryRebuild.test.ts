@@ -126,12 +126,13 @@ describe('逐楼完整重建的生产入口', () => {
     memory.summaries.push({ id: 'old-l1', text: '旧上层总结', level: 1, auto: false, childIds: ['一', '二'], createdAt: 0 });
     const oldSummaries = JSON.stringify(memory.summaries);
     const before = JSON.stringify(chat);
-    vi.mocked(client.requestViaMainApi).mockResolvedValue(JSON.stringify({ summary: '漏了状态清单的回复。' }));
+    // 缺 summary 的回复最后一次也不能用:整楼不保存
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(JSON.stringify({ stateChanges: [] }));
     expect(await batchBackfill({ regenerate: true })).toEqual({ done: 0, total: 2, cancelled: false });
     expect(client.requestViaMainApi).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(chat)).toBe(before);
     expect(JSON.stringify(memory.summaries)).toBe(oldSummaries);
-    expect(engineState.lastError).toContain('stateChanges');
+    expect(engineState.lastError).toContain('summary');
   });
   it('取消在楼层边界生效，保留已成功结果和未处理旧叶子', async () => {
     const chat = [msg('一', true), msg('二', true)]; useChat(chat);
@@ -173,14 +174,15 @@ describe('逐楼完整重建的生产入口', () => {
     expect(memory.summaries.some(s => s.id === 'old-l1')).toBe(false);
     expect(memory.summaries.some(s => s.id === 'import')).toBe(true);
   });
-  it('错误合同耗尽有限重试，保留旧数据而非只保存摘要', async () => {
+  it('缺状态清单时附原因重试一次；最后一次按实际字段补上清单，摘要照常保存', async () => {
     settings.apiSettings.summaryMaxRetries = 1;
     const chat = [msg('原文', true)]; useChat(chat);
     vi.mocked(client.requestViaMainApi).mockResolvedValue(JSON.stringify({ summary: '小A重新出现在厨房。' }));
-    expect(await batchBackfill({ regenerate: true })).toMatchObject({ done: 0 });
+    expect(await batchBackfill({ regenerate: true })).toMatchObject({ done: 1 });
     expect(client.requestViaMainApi).toHaveBeenCalledTimes(2);
-    expect(chat[0].extra?.bbs_leaf?.text).toBe('旧摘要');
-    expect(engineState.lastError).toContain('stateChanges');
+    expect(vi.mocked(client.requestViaMainApi).mock.calls[1][0].at(-2)?.content).toContain('stateChanges');
+    expect(chat[0].extra?.bbs_leaf?.text).toBe('小A重新出现在厨房。');
+    expect(engineState.lastError).toBe('');
   });
   it('整个批量操作可被生成拦截器等待，避免摘要和新正文并行', async () => {
     const chat = [msg('一'), msg('二')]; useChat(chat);
@@ -235,7 +237,8 @@ describe('v0.7 伤情补丁的生产链', () => {
     expect(chat[1].extra!.bbs_leaf).toMatchObject({ text: '省略了旧限制。' });
     expect(chat[1].extra!.bbs_leaf!.delta.npcs).toBeUndefined();
     expect(engineState.lastError).toBe('');
-    expect(notices.toast).toHaveBeenCalledWith(expect.stringContaining('小A的伤情没有更新'), 'warning');
+    expect(notices.toast).toHaveBeenCalledWith(expect.stringContaining('小A的伤情（伤情片段的编号或写法不符合要求）'), 'warning');
+    expect(chat[1].extra!.bbs_leaf).toMatchObject({ dropped: [{ kind: 'condition', name: '小A', reason: 'invalid' }] });
   });
   it('单楼重摘和连续重建均用楼前旧状态，不叠加当前叶子的休养估计', async () => {
     const chat = fixture();
@@ -306,7 +309,7 @@ describe('v0.8 NPC定位证据的生产链', () => {
     expect(chat[1].extra!.bbs_leaf!.delta.npcs).toBeUndefined();
     expect(JSON.stringify(chat)).not.toContain('locationEvidence');
     expect(engineState.lastError).toBe('');
-    expect(notices.toast).toHaveBeenCalledWith(expect.stringContaining('小A的位置没有更新'), 'warning');
+    expect(notices.toast).toHaveBeenCalledWith(expect.stringContaining('小A的位置（给出的原句与本楼正文对不上）'), 'warning');
   });
   it('纠错后引文对得上时照常定位，不提示', async () => {
     const chat = fixture(); chat[1].mes = '午后林舟在菜市遇到小A。';
@@ -350,13 +353,17 @@ describe('v0.9 交易方向与未知余额的正式入口', () => {
     expect(chat[0].extra!.bbs_leaf!.text).toContain('已付三张');
     expect(chat[0].extra!.bbs_leaf!.delta.items).toBeUndefined();
   });
-  it('无有效数量且纠错耗尽时不落盘、不生成获得旁注', async () => {
-    const chat = [msg(body, true)]; useChat(chat); const before = JSON.stringify(chat);
+  it('无有效数量且纠错耗尽时只去掉这条新增：摘要照常保存，不造库存、不生成获得旁注，并提示', async () => {
+    const chat = [msg(body, true)]; useChat(chat);
     settings.apiSettings.summaryMaxRetries = 1; vi.mocked(client.requestViaMainApi).mockResolvedValue(bad());
-    expect(await regenerateFloor(0)).toBe(false);
+    expect(await regenerateFloor(0)).toBe(true);
     expect(client.requestViaMainApi).toHaveBeenCalledTimes(2);
-    expect(JSON.stringify(chat)).toBe(before);
-    expect(engineState.lastError).toContain('qty');
+    expect(deriveMemory(chat).items).toEqual([]);
+    expect(chat[0].mes).not.toContain('获得');
+    expect(chat[0].extra!.bbs_leaf!.text).toBe('主角支付三张交易凭证。');
+    expect(chat[0].extra!.bbs_leaf!.delta.items).toBeUndefined();
+    expect(engineState.lastError).toBe('');
+    expect(notices.toast).toHaveBeenCalledWith(expect.stringContaining('物品「交易凭证」（没有明确数量）'), 'warning');
   });
   it('已知余额转出使用新余额，之后获得同类物品仅加本次增量，重摘不重复', async () => {
     const seed = msg('原有十枚筹码。', true);
@@ -632,7 +639,7 @@ describe('伤情排版证据与失败恢复生产链', () => {
     expect(deriveMemory(chat).npcs[0].condition).toBe('右腕受伤，不能负重');
     expect(chat[1].extra!.bbs_leaf!.text).toBe('错误恢复。'); expect(chat[2].extra!.bbs_leaf).toBeDefined();
     expect(engineState.lastError).toBe('');
-    expect(notices.toast).toHaveBeenCalledWith(expect.stringContaining('岑岚的伤情没有更新'), 'warning');
+    expect(notices.toast).toHaveBeenCalledWith(expect.stringContaining('岑岚的伤情（给出的原句与本楼正文对不上）'), 'warning');
     vi.mocked(client.requestViaMainApi).mockResolvedValue(valid());
     expect(await regenerateFloor(1)).toBe(true); expect(engineState.lastError).toBe('');
     expect(chat[1].extra!.bbs_leaf!.text).toBe('岑岚仍需休养三天。');
@@ -685,9 +692,9 @@ describe('重新摘要先对比再替换', () => {
   });
   it('请求失败时没有预览，原摘要不变', async () => {
     const chat = [msg('原文', true)]; useChat(chat);
-    vi.mocked(client.requestViaMainApi).mockResolvedValue(JSON.stringify({ summary: '缺了状态清单。' }));
+    vi.mocked(client.requestViaMainApi).mockResolvedValue('模型没有按格式回复。');
     expect(await engine.previewRegenerateFloor(0)).toBeNull();
-    expect(engineState.lastError).toContain('stateChanges');
+    expect(engineState.lastError).toContain('summary');
     expect(chat[0].extra?.bbs_leaf?.text).toBe('旧摘要');
   });
 });

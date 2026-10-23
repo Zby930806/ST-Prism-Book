@@ -10,7 +10,9 @@ import IconButton from '@/components/IconButton.vue';
 import ModalShell from '@/components/ModalShell.vue';
 import { fetchModels, testChannel } from '@/api/client';
 import { describeFailure } from '@/api/errors';
-import { apiSettings, newChannel, type ApiChannel } from '@/api/settings';
+import {
+  apiSettings, newChannel, normalizeChannelMaxTokens, normalizeChannelTemperature, normalizeChannelTimeoutSec, type ApiChannel,
+} from '@/api/settings';
 import { computed, ref } from 'vue';
 import ModelCombo from '../ModelCombo.vue';
 import { TONE_CLASS, type Notice } from '../notice';
@@ -76,10 +78,11 @@ function closeChannel() {
 function confirmChannel() {
   const draft = editingChannel.value;
   if (draft) {
-    draft.timeoutSec =
-      Number.isFinite(draft.timeoutSec) && draft.timeoutSec > 0
-        ? Math.floor(draft.timeoutSec)
-        : 180;
+    // 数字框清空时 v-model.number 留下空串:温度回到 1.0(并限在 0–2)、最大输出回到 65535、超时回到 180 秒,
+    // 与载入设置时的规整相同,免得把空串发给服务商。
+    draft.temperature = normalizeChannelTemperature(draft.temperature);
+    draft.maxTokens = normalizeChannelMaxTokens(draft.maxTokens);
+    draft.timeoutSec = normalizeChannelTimeoutSec(draft.timeoutSec);
     const list = apiSettings.channels;
     if (editingId.value) {
       const idx = list.findIndex(c => c.id === editingId.value);
@@ -217,7 +220,8 @@ defineExpose({ openNew, openExisting });
           />
         </div>
       </div>
-      <span class="bbs-field-hint">不确定思考强度时选 auto，DeepSeek 系列推荐 max。最大输出包含思考过程，摘要经常被截断时调大。</span>
+      <span class="bbs-field-hint">不确定思考强度时选 auto，DeepSeek 系列推荐 max。最大输出包含思考过程，摘要经常被截断时调大；但不能超过模型自身的单次输出上限（部分模型为 8192 或更低），超过时服务商会报错。温度、最大输出或超时留空时，点「完成」后恢复默认值（1.0、65535、180 秒）。</span>
+      <span class="bbs-field-hint">超时：未开启流式传输时按整次请求计时；开启后按多久没有收到新内容计时，持续输出的长回复不会被中断（整次最长为超时的 3 倍，至少 600 秒）。思考型模型或批量补摘可调到 300–600 秒。</span>
       <label class="bbs-switch-row">
         <span class="bbs-modal-label">流式传输</span>
         <input v-model="editingChannel.stream" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" />

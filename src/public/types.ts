@@ -218,6 +218,11 @@ export interface STBaiBaiBookApi {
   readonly apiVersion: 1;
   readonly pluginVersion: string;
   readonly capabilities: PublicCapabilities;
+  /**
+   * 斜杠命令和宏的注册是否已完成（等同于已发出 st-baibai-book:ready）。
+   * 全局对象在注册完成前就已挂上；为 true 之后 capabilities 不再变化。增量字段，apiVersion 仍为 1。
+   */
+  readonly ready: boolean;
   getVar(path: string, options?: SnapshotOptions): JsonValue | undefined;
   getSnapshot(options?: SnapshotOptions): PublicSnapshot;
   getHistory(options?: HistoryOptions): PublicHistory;

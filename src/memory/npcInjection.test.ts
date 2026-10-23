@@ -91,6 +91,22 @@ describe('不在场名单的人数上限与预算', () => {
     expect(text).toContain('洛伊(领航员)');
     expect(text).toContain(BUDGET_NOTICE);
   });
+  it('近期正文提到名字或旧名的不在场角色不受人数上限限制,排在最前', () => {
+    const chat = crowd(30);
+    chat[1].extra!.bbs_leaf!.delta.npcs!.add![0].formerNames = ['船工A'];
+    chat.push({ name: '沈遥', is_user: true, is_system: false, mes: '还记得旅人01号和那个船工A吗?' });
+    useChat(chat);
+    const blocks = fmtNpcContextBlocks(memory.npcs, memory.scenes, memory.state.location, memory.state.locationPath, memory.state.time, { mentionText: chat.at(-1)!.mes });
+    const lines = blocks.absent.join('\n').split('\n').filter(l => l.startsWith('  - '));
+    expect(lines).toHaveLength(ABSENT_NPC_LIMIT);
+    // 被提到的(含按旧名提到的)按最近出场排在最前,其余仍按最近出场补足
+    expect(lines[0]).toContain('旅人01号');
+    expect(lines[1]).toContain('旅人00号');
+    expect(lines[2]).toContain('旅人29号');
+    expect(blocks.absent.join('\n')).toContain('另有 6 位较久未出场的角色未列出');
+    // 状态注入用最近几楼的正文判断
+    expect(buildStateInjectionText()).toContain('旅人01号');
+  });
   it('摘要模式与 NPC 名册开关照旧生效', () => {
     useChat([leaf({ ...scene(), npcs: { add: [{ name: '洛伊', important: true, desc: '银灰短发' }] } })]);
     apiSettings.injection.npcs = false;
@@ -110,5 +126,28 @@ describe('旧数据兼容', () => {
     const text = buildStateInjectionText();
     expect(text.indexOf('旧主角团成员')).toBeGreaterThan(text.indexOf('[主要角色]'));
     expect(text.indexOf('旧配角')).toBeGreaterThan(text.indexOf('[NPC名册]'));
+  });
+});
+
+describe('地点信息拆成两个预算单元', () => {
+  it('当前所在放在前面,其他已知地点排在不在场角色之后、变量之前', () => {
+    useChat([leaf({ ...scene(), npcs: { add: [{ name: '梅芙', title: '修表师', location: '王都' }] }, varOps: [{ op: 'set', path: '金币', value: 5 }] })]);
+    const text = buildStateInjectionText();
+    const current = text.indexOf('当前所在(由大到小):港口(港城) › 酒馆(酒馆)');
+    const others = text.indexOf('其他已知地点(仅列名称):');
+    expect(current).toBeGreaterThan(0);
+    expect(current).toBeLessThan(text.indexOf('未了结的计划/悬念'));
+    expect(others).toBeGreaterThan(text.indexOf('[NPC名册·其他已知角色]'));
+    expect(others).toBeLessThan(text.indexOf('自定义变量'));
+  });
+  it('预算紧张时先省略其他地点的长列表,当前所在保留', () => {
+    apiSettings.memoryBudgetTokens = 2000;
+    const many = Array.from({ length: 300 }, (_, i) => ({ path: ['王都', `第${i}号仓库区`], desc: '仓库' }));
+    useChat([leaf({ ...scene(), scenes: { add: [...scene().scenes!.add!, ...many] } })]);
+    const text = buildStateInjectionText();
+    expect(estimateTokens(text)).toBeLessThanOrEqual(slotBudget('state'));
+    expect(text).toContain('当前所在(由大到小):港口(港城) › 酒馆(酒馆)');
+    expect(text).not.toContain('第299号仓库区');
+    expect(text).toContain(BUDGET_NOTICE);
   });
 });

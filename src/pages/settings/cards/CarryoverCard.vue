@@ -3,6 +3,7 @@
 import Collapsible from '@/components/Collapsible.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import { computeCarryoverPlan, createNewChatWithCarryover, type CarryoverPlan } from '@/memory/carryover';
+import { openBook } from '@/state/ui';
 import { computed, ref } from 'vue';
 import { readableError } from '../notice';
 
@@ -29,9 +30,16 @@ async function runCarryover() {
 <template>
   <Collapsible class="prism-settings-card" title="带数据创建新对话" :open="false">
     <p class="bbs-field-hint">将当前聊天最近的全文、合并后的历史摘要和当前状态（时间地点、场景、物品、角色、计划、信息差、变量）打包，带入新建的对话。新对话通过一条「种子摘要」还原状态，旧剧情以摘要形式保留；启用向量记忆时，旧聊天会保存一份快照，新对话也可召回其中的内容（多次接续时累加，分支也会继承）。</p>
-    <div v-if="carryPlan" class="bbs-field-hint">
-      将带入：AI 回复 {{ carryPlan.aiCount }} 条，实际消息 {{ carryPlan.carryCount }} 条；旧剧情摘要：{{ carryPlan.recapLen > 0 ? '有' : '无' }}。
-    </div>
+    <p v-if="carryPlan.blockedReason" class="bbs-field-hint bbs-carry-blocked">当前聊天暂时不能带数据新建对话：{{ carryPlan.blockedReason }}</p>
+    <template v-else>
+      <div class="bbs-field-hint">
+        将带入：AI 回复 {{ carryPlan.aiCount }} 条，实际消息 {{ carryPlan.carryCount }} 条；旧剧情摘要：{{ carryPlan.recapLen > 0 ? '有' : '无' }}。
+      </div>
+      <p v-if="carryPlan.pendingBefore" class="bbs-field-hint bbs-carry-warning">
+        保留窗口之前有 {{ carryPlan.pendingBefore }} 层没有摘要，这些楼层的剧情不会带入新对话。建议先在摘要页补摘。
+        <button class="bbs-btn bbs-btn-sm" type="button" @click="openBook('summary')">前往摘要页补摘</button>
+      </p>
+    </template>
     <button
       class="bbs-btn bbs-btn-sm bbs-btn-primary"
       type="button"
@@ -48,7 +56,13 @@ async function runCarryover() {
       confirm-text="创建并切入"
       @confirm="runCarryover"
     >
-      基于当前聊天新建一个对话，带入记忆并切换过去。是否继续？
+      基于当前聊天新建一个对话，带入记忆并切换过去。{{ carryPlan.pendingBefore ? `保留窗口之前还有 ${carryPlan.pendingBefore} 层没有摘要，它们的剧情不会带入。` : '' }}是否继续？
     </ConfirmDialog>
   </Collapsible>
 </template>
+
+<style scoped>
+.bbs-carry-blocked,
+.bbs-carry-warning { color: var(--bbs-warning); }
+.bbs-carry-warning .bbs-btn { margin-left: 6px; }
+</style>

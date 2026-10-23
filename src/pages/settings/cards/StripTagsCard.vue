@@ -23,7 +23,7 @@ function removeStripTag(tag: string) {
 
 <template>
   <Collapsible class="prism-settings-card" title="自定义清洗标签" :open="false">
-    <p class="bbs-field-hint">正文中混有其他插件或世界书生成的格式块时（如状态栏 <code>&lt;snow&gt;…&lt;/snow&gt;</code>），在此填写标签名（只填 <code>snow</code>，不带尖括号），摘要、建立索引和召回时会删除整块及其内容。修改对召回立即生效（索引中存储原文，召回时再清洗），无需重建索引。</p>
+    <p class="bbs-field-hint">正文中混有其他插件或世界书生成的格式块时（如状态栏 <code>&lt;snow&gt;…&lt;/snow&gt;</code>），在此填写标签名（只填 <code>snow</code>，不带尖括号），摘要、建立索引和召回时会删除整块及其内容。修改后召回时立即按新规则清洗，索引里的原文在下次召回前自动刷新（只更新原文，不重新生成向量），无需重建索引。</p>
     <div class="bbs-striptag-bar">
       <input
         v-model="stripTagDraft"

@@ -8,9 +8,12 @@
  */
 import { calculateRelativeDays } from './timeRel';
 
-/** 故事时间按天数分级;时间未知或无法比较时改按其后的回复楼层数分级。数组下标 = 级别 - 1。 */
+/**
+ * 故事时间按天数分级;时间未知或无法比较时改按其后的回复楼层数判断,只发一级中性提醒、不再升级
+ * (楼层数不代表经过了多久,慢节奏剧情里几十楼可能只过了几个小时)。数组下标 = 级别 - 1。
+ */
 export const INJURY_DAY_LEVELS = [1, 7, 30] as const;
-export const INJURY_FLOOR_LEVELS = [10, 40, 100] as const;
+export const INJURY_FLOOR_LEVELS = [10] as const;
 /** 每次最多提醒的人数(主角在前,其后主要角色、在场、同区域)。 */
 export const INJURY_REMINDER_LIMIT = 8;
 
@@ -36,7 +39,7 @@ function levelOf(value: number, thresholds: readonly number[]): 0 | 1 | 2 | 3 {
 
 /**
  * 记录后经过了多久。两端故事时间都能比较时只看天数(同一天内不提醒,时间倒退也不提醒);
- * 否则看锚点楼层之后的回复楼层数。都不知道时不提醒。
+ * 否则看锚点楼层之后的回复楼层数,满一定楼层只给一级提醒。都不知道时不提醒。
  */
 export function injuryElapsed(subject: InjuryReminderSubject, now: string, floorsAfter: (floor: number) => number): InjuryElapsed {
   const days = subject.conditionTime && now ? calculateRelativeDays(subject.conditionTime, now) : null;
@@ -56,20 +59,21 @@ function daysText(days: number): string {
   return `约 ${days} 天`;
 }
 
+/** 按天数加重的措辞;按楼层判断时不加重(楼层数不代表经过的时间)。 */
 const LEVEL_NOTE: Record<2 | 3, string> = {
-  2: '时间已久,除非正文另有说明,按常理大多应已明显好转或痊愈',
+  2: '轻伤多半已好转或痊愈,重伤仍在恢复,按伤情轻重体现',
   3: '时间很久,除确属长期伤病或后遗症外应已痊愈,不要再写成新伤',
 };
 
 /** 提醒在伤情记录更新前每轮都在,所以要写明「只在相关时体现」,不能让正文为回应提醒而每轮硬写伤情。 */
 export const INJURY_REMINDER_TAIL = '下次写到伤处或相关行动时,按轻重和经过的时间体现进展(好转、继续休养、留下后遗症或痊愈);与本轮情节无关时不必提及伤情。不要无限期重复同样的伤情描写,也不要无故加重。这是写作参考,不要在正文中提及这条提醒。';
 
-/** 一行提醒:谁、什么伤、记录于何时、过了多久;级别高时加重措辞。 */
+/** 一行提醒:谁、什么伤、记录于何时、过了多久;按天数级别高时加重措辞。 */
 export function fmtInjuryReminderLine(subject: InjuryReminderSubject, elapsed: InjuryElapsed): string {
   const when: string[] = [];
   if (subject.conditionTime && elapsed.days !== undefined) when.push(`记录于 ${oneLine(subject.conditionTime)},已过${daysText(elapsed.days)}`);
   else if (elapsed.floors !== undefined) when.push(`记录后已过 ${elapsed.floors} 个回复楼层,故事时间不明`);
-  const note = elapsed.level >= 2 ? `;${LEVEL_NOTE[elapsed.level as 2 | 3]}` : '';
+  const note = elapsed.days !== undefined && elapsed.level >= 2 ? `;${LEVEL_NOTE[elapsed.level as 2 | 3]}` : '';
   return `- ${oneLine(subject.name)}:${oneLine(subject.condition)}(${when.join('')})${note}`;
 }
 

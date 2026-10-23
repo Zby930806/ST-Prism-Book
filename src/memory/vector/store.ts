@@ -175,22 +175,24 @@ const localStore: VectorStore = {
     return { upserted: items.length };
   },
 
+  // 按主键逐条读写,不把整段 scope(含全部向量)读出来:索引升级时会分批刷新所有叶子的原文。
   async updatePayload(database, scope, items) {
     if (!items.length) return { updated: 0 };
-    const rows = await getScopeRows(database, scope);
-    const byId = new Map(rows.map(row => [row.leafId, row]));
     const db = await openDb();
     const tx = db.transaction(STORE, 'readwrite');
     const os = tx.objectStore(STORE);
     let updated = 0;
     for (const it of items) {
-      const rec = byId.get(it.leafId);
-      if (!rec) continue;
-      rec.payloadHash = it.payloadHash;
-      rec.mesFull = it.mesFull ?? null;
-      rec.storyTime = it.storyTime ?? null;
-      os.put(rec);
-      updated++;
+      const req = os.get([database, scope, it.leafId]);
+      req.onsuccess = () => {
+        const rec = req.result as LocalRecord | undefined;
+        if (!rec) return;
+        rec.payloadHash = it.payloadHash;
+        rec.mesFull = it.mesFull ?? null;
+        rec.storyTime = it.storyTime ?? null;
+        os.put(rec);
+        updated++;
+      };
     }
     await txDone(tx);
     return { updated };

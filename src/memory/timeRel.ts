@@ -235,7 +235,10 @@ export function calculateRelativeDays(fromDate: string, toDate: string): number 
     fromObj.setFullYear(fromYear, (from.month ?? 1) - 1, from.day ?? 1);
     const toObj = new Date(0);
     toObj.setFullYear(toYear, (to.month ?? 1) - 1, to.day ?? 1);
-    return Math.round((toObj.getTime() - fromObj.getTime()) / DAY_MS);
+    const days = Math.round((toObj.getTime() - fromObj.getTime()) / DAY_MS);
+    // 两端都没写年份时按同一年算:相差超过半年多半是跨年(如 12/30 → 1/2),算出来方向会反,宁可不标。
+    if (from.year == null && to.year == null && Math.abs(days) > 182) return null;
+    return days;
   }
 
   // 架空日历:仅同月可算,跨架空月名易误判 → 放弃

@@ -155,31 +155,68 @@ describe('较早楼层合并摘要', () => {
     expect(sent).toContain('【这些楼层之前的主线时间】2031/4/1 07:00');
   });
 
-  it('漏写楼层时附原因重试，仍失败就停下，这组楼层保持待摘要', async () => {
+  it('漏写楼层时附原因重试；最后一次先保存缺口之前的楼层，缺的楼层改为逐层摘要，仍失败才停下', async () => {
     const chat = chatOf(12);
     useChat(chat);
     Object.assign(settings.apiSettings, { batchFullRecent: 0, batchMaxFloors: 12, summaryMaxRetries: 1 });
     vi.mocked(client.requestViaMainApi).mockImplementation(async messages => liteReply(liteFloorsOf(messages).slice(0, -1)));
 
-    expect(await batchBackfill({ lite: true })).toEqual({ done: 0, total: 12, cancelled: false });
+    expect(await batchBackfill({ lite: true })).toEqual({ done: 11, total: 12, cancelled: false });
     const calls = vi.mocked(client.requestViaMainApi).mock.calls.map(c => c[0]);
-    expect(calls).toHaveLength(2);
+    expect(calls.filter(isLite)).toHaveLength(2);
     expect(textOf(calls[1])).toContain('上一次摘要结果未通过校验');
     expect(textOf(calls[1])).toContain('漏掉了楼层 #23');
-    expect(engineState.lastError).toContain('楼层 #1–#23 合并摘要未保存');
-    expect(chat.some(m => m.extra?.bbs_leaf)).toBe(false);
+    // 第一个缺口之前的 11 层照常写入,不在中间留缺口
+    expect(aiFloors(0, 10).every(f => chat[f].extra?.bbs_leaf?.lite)).toBe(true);
+    // 缺的那一层改为逐层完整摘要(这里模拟的回复不是摘要格式,两次都失败),批量停在这一层
+    expect(calls.slice(2).every(m => !isLite(m))).toBe(true);
+    expect(calls).toHaveLength(4);
+    expect(chat[23].extra?.bbs_leaf).toBeUndefined();
+    expect(engineState.lastError).toContain('楼层 #23 摘要未保存');
   });
 
-  it('回复被截断时停下，提示里给出调小每次合并楼层数的改法', async () => {
-    const chat = chatOf(12);
+  it('最后一次既漏写又出现材料以外的楼层号时整组不保存，对半拆开重试', async () => {
+    const chat = chatOf(4);
     useChat(chat);
-    Object.assign(settings.apiSettings, { batchFullRecent: 0, batchMaxFloors: 12 });
+    Object.assign(settings.apiSettings, { batchFullRecent: 0, batchMaxFloors: 4, summaryMaxRetries: 0 });
+    vi.mocked(client.requestViaMainApi).mockImplementation(async messages => {
+      const floors = liteFloorsOf(messages);
+      // 整组请求时楼层号整体错位;拆开后的两组正常
+      if (floors.length === 4) return liteReply(floors.map(f => f + 1).slice(0, -1));
+      return liteReply(floors);
+    });
+    expect(await batchBackfill({ lite: true })).toEqual({ done: 4, total: 4, cancelled: false });
+    const lite = vi.mocked(client.requestViaMainApi).mock.calls.map(c => c[0]).filter(isLite).map(liteFloorsOf);
+    expect(lite).toEqual([aiFloors(0, 3), aiFloors(0, 1), aiFloors(2, 3)]);
+    expect(chat[1].extra?.bbs_leaf?.text).toBe('楼层1的简要摘要。');
+    expect(batchState.steps).toBe(3);
+  });
+
+  it('材料里的楼层都写全时，忽略材料以外的楼层号、同层重复取第一条', async () => {
+    const chat = chatOf(3);
+    useChat(chat);
+    Object.assign(settings.apiSettings, { batchFullRecent: 0, batchMaxFloors: 3, summaryMaxRetries: 0 });
+    vi.mocked(client.requestViaMainApi).mockImplementation(async messages => JSON.stringify({ floors: [
+      ...liteFloorsOf(messages).map(f => ({ floor: f, summary: `楼层${f}。` })),
+      { floor: 1, summary: '重复的第二条。' }, { floor: 99, summary: '材料以外。' },
+    ] }));
+    expect(await batchBackfill({ lite: true })).toMatchObject({ done: 3 });
+    expect(client.requestViaMainApi).toHaveBeenCalledOnce();
+    expect(chat[1].extra?.bbs_leaf?.text).toBe('楼层1。');
+  });
+
+  it('回复被截断时对半拆开重试，拆到一层改为逐层摘要，仍被截断才停下', async () => {
+    const chat = chatOf(4);
+    useChat(chat);
+    Object.assign(settings.apiSettings, { batchFullRecent: 0, batchMaxFloors: 4 });
     vi.mocked(client.requestViaMainApi).mockResolvedValue('<thinking>核对</thinking>{"floors":[{"floor":1,"summary":"写到一半');
 
-    expect(await batchBackfill({ lite: true })).toEqual({ done: 0, total: 12, cancelled: false });
-    expect(client.requestViaMainApi).toHaveBeenCalledOnce();
-    expect(engineState.lastFailure?.title).toContain('楼层 #1–#23 合并摘要未完成');
-    expect(engineState.lastFailure?.hint).toContain('每次合并的楼层数');
+    expect(await batchBackfill({ lite: true })).toEqual({ done: 0, total: 4, cancelled: false });
+    const calls = vi.mocked(client.requestViaMainApi).mock.calls.map(c => c[0]);
+    // 4 层 → 前 2 层 → 第 1 层逐层摘要仍被截断,停下
+    expect(calls.filter(isLite).map(liteFloorsOf)).toEqual([aiFloors(0, 3), aiFloors(0, 1)]);
+    expect(calls.filter(m => !isLite(m))).toHaveLength(1);
+    expect(engineState.lastFailure?.title).toContain('楼层 #1 摘要未完成');
     expect(chat.some(m => m.extra?.bbs_leaf)).toBe(false);
   });
 

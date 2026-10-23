@@ -13,12 +13,15 @@ const defaults = (): NotesSettings => ({ enabled: false, autoGenerate: false, in
 export const notesSettings = reactive<NotesSettings>(defaults());
 let protectedSettings = false;
 const bounded = (v: unknown, fallback: number, lo: number, hi: number) => typeof v === 'number' && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : fallback;
+/** 「摘要和状态最多读多少字」：0＝不限制，其余按 1000–40000 取整。 */
+export const NOTES_MEMORY_CHARS_BOUNDS = [1000, 40000] as const;
+const memoryChars = (v: unknown): number => v === 0 ? 0 : Math.floor(bounded(v, 12000, ...NOTES_MEMORY_CHARS_BOUNDS));
 function normalize(value: Partial<NotesSettings>): NotesSettings {
   const d = defaults(), c = value.channel ?? d.channel;
   return { enabled: value.enabled === true, autoGenerate: value.autoGenerate === true, injectConfirmed: value.injectConfirmed === true,
     // 旧设置没有这一项:按默认显示(札记本身默认关,没启用札记的聊天不受影响)
     showInChat: value.showInChat !== false,
-    recentFloors: Math.floor(bounded(value.recentFloors,8,1,40)), memoryChars: Math.floor(bounded(value.memoryChars,12000,1000,40000)),
+    recentFloors: Math.floor(bounded(value.recentFloors,8,1,40)), memoryChars: memoryChars(value.memoryChars),
     channel: { ...d.channel, url: typeof c.url === 'string' ? c.url.trim() : '', key: typeof c.key === 'string' ? c.key : '', model: typeof c.model === 'string' ? c.model.trim() : '',
       temperature: bounded(c.temperature,.8,0,2), maxTokens: Math.floor(bounded(c.maxTokens,NOTES_DEFAULT_MAX_TOKENS,256,NOTES_MAX_TOKENS_LIMIT)), timeoutSec: Math.floor(bounded(c.timeoutSec,180,10,600)), stream: c.stream !== false } };
 }

@@ -9,31 +9,54 @@ export interface CompatibilityReport {
   summaries: number;
   issues: string[];
   conversion: Array<{ floor: number; leaf: LeafExtra }>;
+  /**
+   * 只因总结引用了当前聊天里找不到的楼层而进入保护时(开分支、检查点或删楼后残留),可以清理掉的残缺总结 id
+   * (含其上层);其余结构都正常。版本未知、重复 ID、循环引用、层级倒置等真正的损坏时为空,仍整段保护。
+   */
+  repairable: string[];
+  /** 旧摘要没有记录分页、当前又不在第一页的楼层:只冻结这一楼(不注入、不摘要、不覆盖),不锁整段聊天。 */
+  frozenFloors: number[];
 }
 export const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const hasText = (v: unknown): v is string => typeof v === 'string' && !!v.trim();
 
-/** 缺省页码只兼容第一页；不能把无法归属的旧摘要猜到当前新回复。 */
-export function legacyLeafIssue(raw: unknown, message: STMessage): string | null {
+/** 旧摘要没有记录分页,而这条消息当前不在第一页:不能确定旧摘要属于哪一页。 */
+export function legacyLeafFrozen(raw: unknown, message: STMessage): boolean {
+  return isRecord(raw) && raw.swipe === undefined && (message.swipe_id ?? 0) !== 0;
+}
+
+/** 叶子本身的结构问题(会让整段聊天进入只读保护)。不含「未记录分页」——那只冻结这一楼。 */
+export function legacyLeafStructureIssue(raw: unknown): string | null {
   if (raw == null) return null;
   if (!isRecord(raw) || !hasText(raw.id) || typeof raw.text !== 'string' || !isRecord(raw.delta)) return '摘要结构不完整（需保留原记录核对）';
   if (raw.v !== undefined && raw.v !== 1) return '摘要版本尚未支持';
   if (raw.swipe !== undefined && (!Number.isInteger(raw.swipe) || (raw.swipe as number) < 0)) return '摘要分页标记无效';
-  if (raw.swipe === undefined && (message.swipe_id ?? 0) !== 0) return '旧摘要未记录分页，不能确定属于当前哪一条回复';
+  return null;
+}
+
+/** 这一楼的旧摘要不能使用或覆盖的原因:结构问题,或缺省页码只兼容第一页(不能把无法归属的旧摘要猜到当前新回复)。 */
+export function legacyLeafIssue(raw: unknown, message: STMessage): string | null {
+  const structure = legacyLeafStructureIssue(raw);
+  if (structure) return structure;
+  if (raw != null && legacyLeafFrozen(raw, message)) return '旧摘要未记录分页，不能确定属于当前哪一条回复';
   return null;
 }
 
 export function inspectCompatibility(raw: unknown, chat: STMessage[]): CompatibilityReport {
-  const result: CompatibilityReport = { mode: 'ready', leaves: 0, summaries: 0, issues: [], conversion: [] };
-  const issue = (text: string) => { if (result.issues.length < 12) result.issues.push(text); result.mode = 'protected'; };
+  const result: CompatibilityReport = { mode: 'ready', leaves: 0, summaries: 0, issues: [], conversion: [], repairable: [], frozenFloors: [] };
+  let hardIssues = 0;
+  const issue = (text: string) => { if (result.issues.length < 12) result.issues.push(text); result.mode = 'protected'; hardIssues++; };
+  // 总结引用的楼层在当前聊天里不存在:单独记下,其余都正常时可以清理残缺的总结链
+  const orphans: Array<{ summary: string; child: string }> = [];
   const ids = new Set<string>();
   const addId = (id: string) => { if (ids.has(id)) issue('重复的记忆 ID：' + id); ids.add(id); };
   for (let i = 0; i < chat.length; i++) {
     const m = chat[i];
     const leaf = m?.extra?.bbs_leaf;
     if (leaf == null) continue;
-    const why = legacyLeafIssue(leaf, m);
+    const why = legacyLeafStructureIssue(leaf);
     if (why) { issue('#' + i + '：' + why); continue; }
+    if (legacyLeafFrozen(leaf, m)) result.frozenFloors.push(i);
     addId(leaf.id);
     result.leaves++;
   }
@@ -71,6 +94,7 @@ export function inspectCompatibility(raw: unknown, chat: STMessage[]): Compatibi
   }
   result.summaries = nodes.length;
   // 同一楼的其它分页属于有效存档，不能因当前页不显示而判为丢失。
+  // 未记录分页的旧摘要存档在非第一页时同样无法归属:只在翻到那一页时冻结,不锁整段聊天。
   for (const m of chat) {
     const pages = (m as unknown as Record<string, unknown>).swipe_info;
     if (!Array.isArray(pages)) continue;
@@ -78,8 +102,7 @@ export function inspectCompatibility(raw: unknown, chat: STMessage[]): Compatibi
       const extra = isRecord(page) && isRecord(page.extra) ? page.extra : null;
       if (!extra || extra.bbs_leaf == null) continue;
       const archived = extra.bbs_leaf;
-      const pageIndex = pages.indexOf(page);
-      const why = legacyLeafIssue(archived, { ...m, swipe_id: pageIndex });
+      const why = legacyLeafStructureIssue(archived);
       if (why) { issue('历史分页摘要：' + why); continue; }
       ids.add((archived as unknown as LeafExtra).id);
     }
@@ -104,7 +127,7 @@ export function inspectCompatibility(raw: unknown, chat: STMessage[]): Compatibi
     visiting.add(id);
     let depth = 1;
     for (const child of n.childIds as string[]) {
-      if (!ids.has(child)) issue('总结 ' + id + ' 引用的历史记录缺失：' + child);
+      if (!ids.has(child)) orphans.push({ summary: id, child });
       else depth = Math.max(depth, 1 + visit(child));
     }
     if (depth > 64) issue('总结层级过深，停止自动解析');
@@ -112,6 +135,23 @@ export function inspectCompatibility(raw: unknown, chat: STMessage[]): Compatibi
     return depth;
   };
   for (const id of byId.keys()) visit(id);
+  if (orphans.length) {
+    for (const o of orphans) if (result.issues.length < 12) result.issues.push('总结 ' + o.summary + ' 引用的历史记录缺失：' + o.child);
+    result.mode = 'protected';
+    // 只有缺失引用、没有其他损坏时,才给出可清理的残缺总结链(含引用它们的上层)
+    if (!hardIssues) {
+      const broken = new Set(orphans.map(o => o.summary));
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const n of nodes) {
+          const nid = n.id as string;
+          if (!broken.has(nid) && (n.childIds as string[]).some(c => broken.has(c))) { broken.add(nid); grew = true; }
+        }
+      }
+      result.repairable = nodes.map(n => n.id as string).filter(nid => broken.has(nid));
+    }
+  }
   if (result.mode !== 'protected' && raw.version === 2) result.mode = 'convert';
   return result;
 }

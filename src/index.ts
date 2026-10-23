@@ -8,7 +8,7 @@ import { bindNotesLifecycle, refreshNotesInjection } from '@/notes/service';
 import { apiSettings, hydrateSettings } from '@/api/settings';
 import { bindEngine, handleGenerationIntercept } from '@/memory/engine';
 import { bindBacklogNoticeCleanup, stripBacklogNoticesFromPrompt } from '@/backlogNotice';
-import { runVectorRecall, shouldRecallForType } from '@/memory/vector/recall';
+import { recallStopSignal, runVectorRecall, shouldRecallForType } from '@/memory/vector/recall';
 import { recallDebugWrites } from '@/memory/vector/debug';
 import { armFloorRecall, beginGenerationRecall, bindFloorRecall } from '@/memory/vector/floorRecall';
 import { bindContinuityNote, prepareContinuityNote } from '@/memory/continuity';
@@ -60,9 +60,15 @@ const HOST_ID = 'bbs-app-host';
     const intercepted = await handleGenerationIntercept(type, abort);
     // 放行且该类型需要召回 → 阻塞式向量召回(写注入槽后再放行生成)。
     // 召回内部自带向量开关/可用性判断,失败静默降级,绝不影响生成。
+    // 召回期间监听「停止生成」:用户点停止即取消召回,不必等各请求超时。
     if (!intercepted && shouldRecallForType(type)) {
       const writes = recallDebugWrites();
-      await runVectorRecall();
+      const stop = recallStopSignal();
+      try {
+        await runVectorRecall(stop.signal);
+      } finally {
+        stop.dispose();
+      }
       // 召回结果登记给这次生成的回复,回复到达时写进那一楼(供楼层面板显示)
       armFloorRecall(type, writes);
     }

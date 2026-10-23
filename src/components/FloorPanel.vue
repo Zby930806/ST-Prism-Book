@@ -23,14 +23,18 @@ import RegenerateCompare from '@/components/RegenerateCompare.vue';
 import FloorCardShell from '@/components/floor/FloorCardShell.vue';
 import DeltaGroups from '@/components/floor/DeltaGroups.vue';
 import FloorConflicts from '@/components/floor/FloorConflicts.vue';
+import FloorDropped from '@/components/floor/FloorDropped.vue';
 import FloorRecall from '@/components/floor/FloorRecall.vue';
 import { LEAF_EDIT, useLeafEdit } from '@/components/floor/useLeafEdit';
 import { getContext, type STMessage } from '@/st/context';
 import { toast } from '@/st/toast';
 import { getLeaf, leafValid, deleteLeafAt } from '@/memory/apply';
+import { legacyLeafFrozen } from '@/memory/compatibility';
 import { deltaTagGroups, type DeltaTagGroup } from '@/memory/deltaTags';
-import { applyFloorPreview, discardFloorPreview, engineState, floorBackfillState, previewRegenerateFloor, setFloorOmit, summarizeFloor, type FloorPreview } from '@/memory/engine';
+import { applyFloorPreview, discardFloorPreview, engineState, floorBackfillState, floorCoveredByImport, previewRegenerateFloor, setFloorOmit, summarizeFloor, type FloorPreview } from '@/memory/engine';
+import { legacyMigrationSeedFloor } from '@/memory/migrate';
 import { derivedMeta } from '@/memory/store';
+import { leafDropped } from '@/memory/summaryResponse';
 import { readFloorRecall } from '@/memory/vector/floorRecall';
 import { floorRecallView } from '@/memory/vector/recallView';
 import { ui } from '@/state/ui';
@@ -68,6 +72,29 @@ const valid = computed(() => {
 });
 const d = computed<StoredDelta | null>(() => leaf.value?.delta ?? null);
 
+// 由导入的旧总结覆盖的楼层没有逐楼摘要,也不单独摘要(补摘列表同样排除它们)
+const importCovered = computed(() => {
+  void props.sig.tick;
+  void derivedMeta.rev;
+  return !valid.value && floorCoveredByImport(props.floor);
+});
+// 旧摘要没有记录分页、当前又不在第一页:不能确定归属,这一页不摘要、不注入,翻回第一页即恢复
+const frozen = computed(() => {
+  void props.sig.tick;
+  void derivedMeta.rev;
+  const m = msg.value;
+  return !!m && legacyLeafFrozen(m.extra?.bbs_leaf, m);
+});
+// 生成本楼摘要时没写入的更新(最后一次尝试中不符合要求而去掉的项)
+const dropped = computed(() => (omit.value || !valid.value ? [] : leafDropped(leaf.value)));
+// 早先版本迁移时把 Horae 的最终状态写在这一楼的摘要里:重新摘要会替换它们
+const migrationSeed = computed(() => {
+  void props.sig.tick;
+  void derivedMeta.rev;
+  const chat = getContext()?.chat;
+  return !!chat && valid.value && legacyMigrationSeedFloor(chat) === props.floor;
+});
+
 // 生成本楼前的召回记录(启用楼层面板之后生成的回复才有;记录写入在 floorRecall.ts)
 const recall = computed(() => {
   void props.sig.tick;
@@ -104,9 +131,11 @@ const summarizingHere = computed(() => {
     && floorBackfillState.floor === props.floor
     && floorBackfillState.chatId === chatId;
 });
-const summaryActionDisabled = computed(() => busy.value || engineState.running || omit.value || !!comparePreview.value);
+const summaryActionDisabled = computed(() => busy.value || engineState.running || omit.value || importCovered.value || frozen.value || !!comparePreview.value);
 const summaryActionTitle = computed(() => {
   if (omit.value) return '番外楼不参与摘要，请先取消番外';
+  if (importCovered.value) return `楼层 #${props.floor} 已由导入的旧总结覆盖，不单独摘要`;
+  if (frozen.value) return `楼层 #${props.floor} 的旧摘要没有记录分页，这一页不摘要`;
   if (summarizingHere.value) return `正在生成楼层 #${props.floor} 的摘要`;
   return valid.value ? `重新生成楼层 #${props.floor} 的摘要` : `生成楼层 #${props.floor} 的摘要`;
 });
@@ -120,6 +149,8 @@ const summaryActionText = computed(() => {
 const previewText = computed(() => {
   if (omit.value) return '不计入记忆';
   if (valid.value && leaf.value?.text) return leaf.value.text;
+  if (importCovered.value) return '已由导入的旧总结覆盖';
+  if (frozen.value) return '旧摘要未记录分页，这一页不摘要';
   return valid.value ? '（无摘要正文）' : '待摘要';
 });
 const previewMuted = computed(() => omit.value || !(valid.value && leaf.value?.text));
@@ -223,14 +254,13 @@ function requestSummary() {
 
 async function generateMissingSummary() {
   if (summaryActionDisabled.value) return;
-  await summarizeFloor(props.floor);
-  if (engineState.lastError) {
-    toast(engineState.lastError, 'error');
+  // 按这一次的结果提示:没有执行时(例如有别的摘要在进行)不把之前留下的错误当成这次的
+  const result = await summarizeFloor(props.floor);
+  if (result === 'failed') {
+    toast(engineState.lastError || `楼层 #${props.floor} 的摘要没有生成`, 'error');
     return;
   }
-  if (leafValid(getContext()?.chat?.[props.floor])) {
-    toast(`楼层 #${props.floor} 摘要已生成`, 'success');
-  }
+  if (result === 'done') toast(`楼层 #${props.floor} 摘要已生成`, 'success');
 }
 
 // 先生成新结果、不写入;生成好了打开对比,用户选「用新的」才替换
@@ -303,8 +333,10 @@ function keepCurrentSummary() {
       </template>
 
       <p v-if="omit" class="bbs-fp-note">此楼已标为番外，以下数据不参与记忆；取消番外即恢复。</p>
+      <p v-else-if="importCovered" class="bbs-fp-note">此楼已由导入的旧总结覆盖，不单独摘要。需要逐楼摘要时，先在摘要页删除导入的旧总结。</p>
+      <p v-else-if="frozen" class="bbs-fp-note">此楼的旧摘要没有记录分页，不能确定属于当前哪一页。这一页不摘要、不注入，也不覆盖旧摘要；翻回第一页即恢复。</p>
 
-      <template v-if="leaf">
+      <template v-if="leaf && !frozen">
         <!-- 时间 / 地点(可点编辑) -->
         <div class="bbs-fp-chips">
           <!-- 时间 -->
@@ -379,7 +411,10 @@ function keepCurrentSummary() {
         <DeltaGroups v-if="hasTags" :groups="groups" :omit="omit" />
       </template>
 
-      <p v-else class="bbs-summary-text bbs-fp-text is-muted">此楼尚无摘要。</p>
+      <p v-else-if="!importCovered && !frozen" class="bbs-summary-text bbs-fp-text is-muted">此楼尚无摘要。</p>
+
+      <!-- 生成本楼摘要时没写入的更新:最后一次尝试中不符合要求而去掉,原记录保持不变 -->
+      <FloorDropped v-if="dropped.length" :dropped="dropped" />
 
       <!-- 正文与记录不一致:摘要时标出,记录保持原样;可提醒正文模型或忽略 -->
       <FloorConflicts v-if="conflicts.length" :floor="floor" :conflicts="conflicts" />
@@ -388,7 +423,7 @@ function keepCurrentSummary() {
       <FloorRecall v-if="recall" :recall="recall" />
 
       <!-- 页脚:生成 / 重新生成摘要;删除摘要(行内两步确认:每楼是独立的 shadow,没有弹窗宿主,行内确认更可靠) -->
-      <div v-if="!omit" class="bbs-fp-footer">
+      <div v-if="!omit && !importCovered && !frozen" class="bbs-fp-footer">
         <div class="bbs-fp-footer-actions">
           <template v-if="confirmingDelete">
             <span class="bbs-fp-confirm-text">删除此楼摘要？</span>
@@ -419,6 +454,7 @@ function keepCurrentSummary() {
       @confirm="confirmRegenerate"
     >
       先生成新摘要并与现有摘要并排对比；选择「用新的」时替换，选择「保留现在的」时不修改。生成需请求一次 AI。
+      <template v-if="migrationSeed">这一楼的摘要带有从 Horae 迁移来的物品、计划等最终状态（早先版本迁移时写在摘要里），换成新摘要后这些状态会被替换，需要时可在物品、计划页手动补回。</template>
     </ConfirmDialog>
     <RegenerateCompare :preview="comparePreview" :busy="applyingPreview" @keep="keepCurrentSummary" @replace="useNewSummary" />
   </div>

@@ -20,12 +20,12 @@ import { engineActiveHere } from '@/api/settings';
 import { getContext } from '@/st/context';
 import { toast } from '@/st/toast';
 import { bookNameIssue, createChatBook, hostApiIssue, refreshWorldHost, worldHost } from '@/worldbook/host';
-import { saveSuggestionEdit, setSuggestionStatus, setTarget, worldbookState, worldbookWriteIssue } from '@/worldbook/store';
+import { saveSuggestionEdit, setCursor, setSuggestionStatus, setTarget, worldbookState, worldbookWriteIssue } from '@/worldbook/store';
 import { batchStale, cancelSuggestions, currentTarget, defaultTarget, generateSuggestions, pendingCount, targetIssue, worldbookRun } from '@/worldbook/service';
 import { applySuggestions, missingBookMessage, undoApplied, writerState, type ApplyOutcome } from '@/worldbook/writer';
 import { worldbookChannelIssue, worldbookSettings } from '@/worldbook/settings';
 import { KIND_LABELS, PERMISSION_LABELS } from '@/worldbook/protocol';
-import { planRead, rangeCurrent } from '@/worldbook/source';
+import { cursorBefore, planRead, rangeCurrent } from '@/worldbook/source';
 import { diffSentences, findEntry, listEntries } from '@/worldbook/entries';
 import { formatTime } from '@/worldbook/view';
 import { WB_LIMITS } from '@/worldbook/limits';
@@ -132,7 +132,7 @@ const nextRead = computed(() => {
   void worldbookState.revision;
   const ctx = getContext();
   if (!ctx) return '';
-  const plan = planRead(ctx, worldbookState.cursor, worldbookSettings.read, { allowReread: true, floorText: WB_LIMITS.floorText });
+  const plan = planRead(ctx, worldbookState.cursor, worldbookSettings.read, { allowReread: true, floorText: worldbookSettings.read.maxChars });
   if (!plan) return '当前聊天还没有可以读取的正文。';
   const span = '第 ' + plan.floors[0] + '–' + plan.floors[plan.floors.length - 1] + ' 楼（' + plan.floors.length + ' 层）';
   const cursor = worldbookState.cursor;
@@ -170,6 +170,8 @@ function settleFeedback(batchId: string) {
   if (!stillShown) feedbackAt.value = 'panel';
 }
 function applyOne(batch: SuggestionBatch, s: Suggestion) {
+  // 依据楼层已失效的批次：先弹窗说明，核对后才「仍然应用」
+  if (stale(batch)) { if (!locked.value) batchConfirm.value = { kind: 'apply', batch, ids: [s.id] }; return; }
   return runAction('batch:' + batch.id, async () => {
     const out = await applySuggestions(batch.id, [s.id]);
     const text = outcomeText(out, batch.book);
@@ -184,20 +186,35 @@ function ignoreOne(batch: SuggestionBatch, s: Suggestion) {
     settleFeedback(batch.id);
   });
 }
+/** 依据楼层失效后，把读取进度设到这批的起点，下次生成会重新覆盖这一范围。 */
+function rereadFrom(batch: SuggestionBatch) {
+  return runAction('batch:' + batch.id, async () => {
+    const ctx = getContext();
+    if (!ctx) throw new Error('请先打开一个已保存的聊天。');
+    await setCursor(cursorBefore(ctx, batch.source.from));
+    notice.value = '下次从第 ' + batch.source.from + ' 楼开始读取。点「生成建议」重新生成；这批旧建议可以忽略。';
+  });
+}
 
-/* 批量应用、批量忽略：确认后执行 */
-type BatchConfirm = { kind: 'apply' | 'ignore'; batch: SuggestionBatch };
+/* 批量应用、批量忽略：确认后执行。ids 为空表示整批中尚未处理的建议 */
+type BatchConfirm = { kind: 'apply' | 'ignore'; batch: SuggestionBatch; ids?: string[] };
 const batchConfirm = shallowRef<BatchConfirm | null>(null);
 const batchConfirmOpen = computed({ get: () => !!batchConfirm.value, set: (v: boolean) => { if (!v && !pendingAction.value) batchConfirm.value = null; } });
 function pendingWrites(batch: SuggestionBatch) { return batch.suggestions.filter(s => s.status === 'pending' && s.kind !== 'flag'); }
+const staleNote = (batch: SuggestionBatch) => '这批建议依据的第 ' + batch.source.from + '–' + batch.source.to + ' 楼已被改写、重抽或删除，内容可能与现在的正文不符，请核对后再写入。';
 const batchConfirmText = computed(() => {
   const c = batchConfirm.value; if (!c) return '';
   const list = c.batch.suggestions.filter(s => s.status === 'pending');
   if (c.kind === 'ignore') return '忽略这批中尚未处理的 ' + list.length + ' 条建议。忽略后不再显示，世界书不会改动。';
+  const prefix = stale(c.batch) ? staleNote(c.batch) : '';
+  if (c.ids) {
+    const s = c.batch.suggestions.find(x => x.id === c.ids![0]);
+    return prefix + '把「' + (s?.title ?? '') + '」写入世界书「' + c.batch.book + '」；写入后可在「已写入记录」中撤销。';
+  }
   const counts = new Map<string, number>();
   for (const s of pendingWrites(c.batch)) counts.set(KIND_LABELS[s.kind], (counts.get(KIND_LABELS[s.kind]) ?? 0) + 1);
   const parts = [...counts].map(([k, n]) => k + ' ' + n + ' 条').join('、');
-  return '把这批中 ' + pendingWrites(c.batch).length + ' 条建议写入世界书「' + c.batch.book + '」：' + parts + '。有冲突或超出当前修改权限的会跳过并说明原因；写入后可在「已写入记录」中撤销。提醒不写入。';
+  return prefix + '把这批中 ' + pendingWrites(c.batch).length + ' 条建议写入世界书「' + c.batch.book + '」：' + parts + '。有冲突或超出当前修改权限的会跳过并说明原因；写入后可在「已写入记录」中撤销。提醒不写入。';
 });
 function askBatch(kind: BatchConfirm['kind'], batch: SuggestionBatch) { if (!locked.value) batchConfirm.value = { kind, batch }; }
 async function confirmBatch() {
@@ -208,7 +225,7 @@ async function confirmBatch() {
       const n = await setSuggestionStatus(c.batch.id, ids, 'ignored');
       notice.value = '已忽略 ' + n + ' 条建议。';
     } else {
-      const out = await applySuggestions(c.batch.id, pendingWrites(c.batch).map(s => s.id));
+      const out = await applySuggestions(c.batch.id, c.ids ?? pendingWrites(c.batch).map(s => s.id), { allowStale: stale(c.batch) });
       const text = outcomeText(out, c.batch.book);
       notice.value = text.ok; actionError.value = text.fail;
     }
@@ -341,6 +358,7 @@ const badgeClass = (kind: string) => (kind === 'replace' || kind === 'rewrite' ?
       <p v-if="worldbookState.issue">{{ worldbookState.issue }}</p>
     </div>
     <p v-if="worldbookState.saveWarning" class="bbs-callout is-warning">{{ worldbookState.saveWarning }}</p>
+    <p v-if="worldbookState.pruneNotice" class="bbs-callout is-warning">{{ worldbookState.pruneNotice }}</p>
     <details v-if="worldbookRun.lastDropped.length" class="bbs-disclosure wb-dropped">
       <summary>模型给出的 {{ worldbookRun.lastDropped.length }} 条建议不符合要求，已丢弃</summary>
       <ul><li v-for="(d, i) in worldbookRun.lastDropped" :key="i"><strong>{{ d.label }}</strong>：{{ d.reason }}</li></ul>
@@ -361,14 +379,17 @@ const badgeClass = (kind: string) => (kind === 'replace' || kind === 'rewrite' ?
           </div>
           <div class="wb-batch-actions">
             <button type="button" class="bbs-btn bbs-btn-sm" :disabled="locked" @click="askBatch('ignore', batch)">全部忽略</button>
-            <button type="button" class="bbs-btn bbs-btn-sm bbs-btn-primary" :disabled="locked || stale(batch) || !pendingWrites(batch).length || !!bookError(batch)" @click="askBatch('apply', batch)"><Icon name="check" />全部应用</button>
+            <button type="button" class="bbs-btn bbs-btn-sm bbs-btn-primary" :disabled="locked || !pendingWrites(batch).length || !!bookError(batch)" @click="askBatch('apply', batch)"><Icon name="check" />{{ stale(batch) ? '仍然全部应用' : '全部应用' }}</button>
           </div>
         </header>
         <div v-if="feedbackAt === 'batch:' + batch.id && (notice || actionError)" class="wb-inline wb-batch-feedback">
           <p v-if="notice" class="wb-status" role="status">{{ notice }}</p>
           <p v-if="actionError" class="bbs-callout is-danger wb-pre" role="alert">{{ actionError }}</p>
         </div>
-        <p v-if="stale(batch)" class="bbs-callout is-warning">这批建议依据的楼层已被改写、重抽或删除，建议已失效，不能再应用；可以忽略后重新生成。</p>
+        <div v-if="stale(batch)" class="bbs-callout is-warning wb-stale">
+          <span>这批建议依据的第 {{ batch.source.from }}–{{ batch.source.to }} 楼已被改写、重抽或删除，建议可能与现在的正文不符。可以逐条核对后点「仍然应用」，或从第 {{ batch.source.from }} 楼重新读取后重新生成。</span>
+          <button type="button" class="bbs-btn bbs-btn-sm" :disabled="locked" @click="rereadFrom(batch)">从第 {{ batch.source.from }} 楼重新读取</button>
+        </div>
         <p v-else-if="bookError(batch)" class="bbs-callout is-warning">{{ bookError(batch) }}</p>
         <SuggestionCard
           v-for="s in batch.suggestions"
@@ -428,7 +449,7 @@ const badgeClass = (kind: string) => (kind === 'replace' || kind === 'rewrite' ?
 
     <WorldbookSettingsPanel ref="settingsPanel" :locked="locked" :next-read="nextRead" />
 
-    <ConfirmDialog v-model:open="batchConfirmOpen" :title="batchConfirm?.kind === 'ignore' ? '全部忽略' : '全部应用'" :confirm-text="batchConfirm?.kind === 'ignore' ? '忽略' : '写入'"
+    <ConfirmDialog v-model:open="batchConfirmOpen" :title="batchConfirm?.kind === 'ignore' ? '全部忽略' : batchConfirm?.ids ? '仍然应用' : batchConfirm && stale(batchConfirm.batch) ? '仍然全部应用' : '全部应用'" :confirm-text="batchConfirm?.kind === 'ignore' ? '忽略' : '写入'"
       :confirm-icon="batchConfirm?.kind === 'ignore' ? '' : 'check'" :busy="pendingAction || writerState.busy" busy-text="处理中…" @confirm="confirmBatch">{{ batchConfirmText }}</ConfirmDialog>
     <ConfirmDialog v-model:open="undoOpen" title="撤销写入" confirm-text="撤销" tone="danger" :busy="pendingAction || writerState.busy" busy-text="撤销中…" @confirm="confirmUndo">{{ undoText }}</ConfirmDialog>
     <SuggestionEditDialog :suggestion="editing?.suggestion ?? null" :entry="editEntry" :data="editData" :busy="locked" @close="editing = null" @save="saveEdit" />
@@ -493,6 +514,8 @@ const badgeClass = (kind: string) => (kind === 'replace' || kind === 'rewrite' ?
 .wb-batch-title { display: flex; flex-direction: column; gap: 1px; min-width: 0; font-size: 14px; }
 .wb-batch-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .wb-batch > .bbs-callout { margin: 10px 0 0; }
+.wb-stale { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+.wb-stale > span { flex: 1 1 260px; min-width: 0; }
 
 .wb-records-section :deep(.bbs-fold) { gap: 8px; }
 .wb-records { margin: 4px 0 0; padding: 0; list-style: none; }

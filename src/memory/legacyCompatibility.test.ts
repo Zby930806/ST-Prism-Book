@@ -11,8 +11,8 @@ import { ensureRecallIndex, scheduleVectorIndex, syncVectorIndex, vectorIndexabl
 import * as vectorStore from './vector/store';
 import { refreshInjection, renderHistoryNodes, selectHistoryNodesBefore, selectInjectionNodes } from './inject';
 import {
-  compatibilityState, convertLegacyMemory, derivedMeta, flushLeavesNow, loadMemory, memory,
-  memoryWriteIssue, recomputeDerived, saveMemory, scheduleLeafFlush,
+  compatibilityState, convertLegacyMemory, derivedMeta, flushLeavesNow, LegacyBackupConflictError, loadMemory, memory,
+  memoryWriteIssue, recomputeDerived, repairBrokenSummaries, saveMemory, scheduleLeafFlush,
 } from './store';
 import { createEmptyMemory, MEMORY_KEY, type LeafExtra, type MemSummary, type StoredDelta } from './types';
 
@@ -426,7 +426,7 @@ describe('legacy user flows through real summary request entry points', () => {
     // No explicit reload: the entry-point must notice raw object identity changed.
     expect(vectorIndexableHere()).toBe(false);
     expect(compatibilityState.mode).toBe('protected');
-    expect(await syncVectorIndex()).toEqual({ embedded: 0, payloadUpdated: 0 });
+    expect(await syncVectorIndex()).toMatchObject({ embedded: 0, payloadUpdated: 0 });
     await ensureRecallIndex();
     scheduleVectorIndex();
     await vi.runAllTimersAsync();
@@ -448,7 +448,6 @@ describe('read-only compatibility rejection and explicit page mismatch', () => {
     ['delta-only persistent leaf lacking text', f => { delete (f.chat[0].extra!.bbs_leaf as Partial<LeafExtra>).text; }],
     ['missing leaf ID', f => { f.chat[0].extra!.bbs_leaf!.id = ''; }],
     ['future leaf version', f => { (f.chat[0].extra!.bbs_leaf as unknown as { v: number }).v = 99; }],
-    ['unknown legacy page on a nonzero swipe', f => { f.chat[0].swipe_id = 1; }],
     ['invalid negative swipe marker', f => { f.chat[0].extra!.bbs_leaf!.swipe = -1; }],
     ['orphan child reference', f => { f.raw.summaries[0].childIds.push('missing-old-leaf'); }],
     ['empty non-imported compression node', f => { f.raw.summaries[0].childIds = []; }],
@@ -536,7 +535,6 @@ describe('read-only compatibility rejection and explicit page mismatch', () => {
     ['invalid delta', leaf => { (leaf as { delta: unknown }).delta = []; }, 0],
     ['future version', leaf => { (leaf as { v: number }).v = 999; }, 0],
     ['negative page marker', leaf => { leaf.swipe = -1; }, 0],
-    ['unknown nonzero page', leaf => { delete leaf.swipe; }, 1],
   ];
   it.each(badArchives)('protects an archived leaf with %s, without altering any page', (_label, mutate, pageIndex) => {
     const { chat, raw } = legacyTree(30);
@@ -689,7 +687,7 @@ describe('explicit local V2 single-floor conversion and persistence safety', () 
 
   it.each([
     ['backup metadata', 0, 1], ['chat', 1, 1], ['final metadata', 1, 2],
-  ] as const)('restores originals and protects backup after %s fails', async (stage, chatCalls, metadataCalls) => {
+  ] as const)('restores originals, keeps the backup after %s fails, and retries without rewriting it', async (stage, chatCalls, metadataCalls) => {
     const { chat, raw } = legacyV2();
     const original = clone(raw);
     const originalChat = clone(chat);
@@ -713,11 +711,14 @@ describe('explicit local V2 single-floor conversion and persistence safety', () 
     expect(host.saveChat).toHaveBeenCalledTimes(chatCalls);
     expect(host.saveMetadata).toHaveBeenCalledTimes(metadataCalls);
     expect(host.saveMetadataDebounced).not.toHaveBeenCalled();
+    // The kept backup equals the current legacy record, so a retry is allowed and reuses it.
     const backup = host.chatMetadata[BACKUP_KEY];
-    await expect(convertLegacyMemory()).rejects.toThrow(/备份/);
+    await convertLegacyMemory();
     expect(host.chatMetadata[BACKUP_KEY]).toBe(backup);
-    expect(host.saveChat).toHaveBeenCalledTimes(chatCalls);
-    expect(host.saveMetadata).toHaveBeenCalledTimes(metadataCalls);
+    expect(host.saveChat).toHaveBeenCalledTimes(chatCalls + 1);
+    expect(host.saveMetadata).toHaveBeenCalledTimes(metadataCalls + 1);
+    expect(compatibilityState.mode).toBe('ready');
+    expect(memoryWriteIssue()).toBe('');
   });
 
   const switches = (['backup', 'chat', 'final metadata'] as const).flatMap(stage =>
@@ -768,8 +769,24 @@ describe('explicit local V2 single-floor conversion and persistence safety', () 
     const before = JSON.stringify({ chat, metadata: host.chatMetadata });
     loadMemory();
     await expect(convertLegacyMemory()).rejects.toThrow(/备份/);
+    await expect(convertLegacyMemory()).rejects.toThrow(LegacyBackupConflictError);
     expect(JSON.stringify({ chat, metadata: host.chatMetadata })).toBe(before);
     expectNoSave(host);
+  });
+
+  it('replaces a differing backup only after the user confirms', async () => {
+    const { chat, raw } = legacyV2();
+    const original = clone(raw);
+    const host = useChat(chat, raw);
+    host.chatMetadata[BACKUP_KEY] = { evidence: '上次转换备份' };
+    loadMemory();
+    await expect(convertLegacyMemory()).rejects.toThrow(LegacyBackupConflictError);
+    expectNoSave(host);
+    await convertLegacyMemory({ replaceBackup: true });
+    expect(host.chatMetadata[BACKUP_KEY]).toEqual(original);
+    expect(compatibilityState.mode).toBe('ready');
+    expect(host.saveChat).toHaveBeenCalledTimes(1);
+    expect(host.saveMetadata).toHaveBeenCalledTimes(2);
   });
 
   it.each(['saveChat', 'saveMetadata'] as const)('refuses conversion without reliable %s, before creating a backup', async missingSave => {
@@ -808,7 +825,7 @@ describe('explicit local V2 single-floor conversion and persistence safety', () 
 });
 
 describe('in-place swipe changes and lossless V2 delta compatibility regressions', () => {
-  it('rechecks a ready chat after an in-place swipe change and never resummarizes or overwrites its unpaged legacy leaf', async () => {
+  it('freezes only the floor whose unpaged legacy leaf is viewed on another page, never resummarizing or overwriting it', async () => {
     const chat = [ai(0, false)];
     const leaf = storedLeaf(0);
     delete leaf.swipe;
@@ -823,18 +840,22 @@ describe('in-place swipe changes and lossless V2 delta compatibility regressions
     expect(memoryWriteIssue()).toBe('');
     expect(leafValid(chat[0])).toBe(true);
 
-    // No load/event/identity change: the ready cache must notice mutation in place.
+    // No load/event/identity change: an in-place swipe only freezes this floor.
     chat[0].swipe_id = 1;
     const before = JSON.stringify({ chat, metadata });
     expect(host.chat).toBe(chat);
     expect(host.chatMetadata).toBe(metadata);
     expect(metadata[MEMORY_KEY]).toBe(raw);
-    expect(memoryWriteIssue()).not.toBe('');
-    expect(compatibilityState.mode).toBe('protected');
+    expect(memoryWriteIssue()).toBe('');
+    expect(compatibilityState.mode).toBe('ready');
+    expect(inspectCompatibility(raw, chat).frozenFloors).toEqual([0]);
+    expect(leafValid(chat[0])).toBe(false);
+    expect(pendingAiFloors(chat)).toEqual([]);
     expect(openingPendingFloor(chat)).toBe(-1);
     await runSummary(0);
     await vi.runAllTimersAsync();
     expect(client.requestViaMainApi).not.toHaveBeenCalled();
+    expect(engineState.lastError).toContain('没有记录分页');
     expect(chat[0].extra!.bbs_leaf).toBe(leaf);
     expect(leaf).toEqual(originalLeaf);
     expect(JSON.stringify({ chat, metadata })).toBe(before);
@@ -922,4 +943,66 @@ it('never saves either chat when a scheduled leaf flush outlives a switch to a p
     expect(JSON.stringify({ chat, metadata: oldHost.chatMetadata })).toBe(oldBefore);
     expect(JSON.stringify({ chat: newHost.chat, metadata: newHost.chatMetadata })).toBe(newBefore);
   }
+});
+
+describe('unpaged legacy leaves and summaries that reference missing floors', () => {
+  it('freezes an unpaged first-page leaf viewed on another page instead of protecting the chat', () => {
+    const fixture = legacyTree(30);
+    fixture.chat[0].swipe_id = 1;
+    expect(inspectCompatibility(fixture.raw, fixture.chat)).toMatchObject({ mode: 'ready', issues: [], frozenFloors: [0] });
+  });
+
+  it('accepts an unpaged archived leaf on a nonzero page without locking the chat', () => {
+    const { chat, raw } = legacyTree(30);
+    const archived: Partial<LeafExtra> = { ...clone(chat[0].extra!.bbs_leaf!) };
+    delete archived.swipe;
+    chat[0].extra!.bbs_leaf = { ...storedLeaf(999), swipe: 2 };
+    chat[0].swipe_id = 2;
+    Object.assign(chat[0], { swipe_info: [{ extra: {} }, { extra: { bbs_leaf: archived } }] });
+    expect(inspectCompatibility(raw, chat)).toMatchObject({ mode: 'ready', issues: [] });
+  });
+
+  function branchOf(count: number, keep: number) {
+    const { chat, raw } = legacyTree(count);
+    return { chat: chat.slice(0, keep), raw };
+  }
+
+  it('cleans the broken summary chain of a branch on load, keeping complete summaries and every leaf', () => {
+    const { chat, raw } = branchOf(60, 45);
+    const host = useChat(chat, raw);
+    host.chatMetadata.main_chat = '原聊天';
+    loadMemory();
+    expect(compatibilityState.mode).toBe('ready');
+    expect(memory.summaries.map(s => s.id)).toEqual(['legacy-l1-0']);
+    expect(host.saveMetadataDebounced).toHaveBeenCalled();
+    expect(host.saveChat).not.toHaveBeenCalled();
+    expect(notices.toast).toHaveBeenCalledWith(expect.stringContaining('其中 2 条总结'), 'info');
+    expect(derivedMeta.leaves).toHaveLength(45);
+  });
+
+  it('keeps a non-branch chat read-only but offers an explicit cleanup, without suggesting to turn off auto summary', async () => {
+    const { chat, raw } = branchOf(60, 45);
+    const host = useChat(chat, raw);
+    loadMemory();
+    expect(compatibilityState.mode).toBe('protected');
+    expect(compatibilityState.repairable).toEqual(['legacy-l1-1', 'legacy-l2-0']);
+    expect(memoryWriteIssue()).toContain('清理残缺的总结');
+    expect(memoryWriteIssue()).not.toContain('关闭自动摘要');
+    expect(host.saveMetadataDebounced).not.toHaveBeenCalled();
+    expect(await repairBrokenSummaries()).toBe(2);
+    expect(host.saveMetadata).toHaveBeenCalledTimes(1);
+    expect(compatibilityState.mode).toBe('ready');
+    expect(memory.summaries.map(s => s.id)).toEqual(['legacy-l1-0']);
+  });
+
+  it('still protects the whole chat when missing references come with real corruption', () => {
+    const { chat, raw } = branchOf(60, 45);
+    raw.summaries.push({ ...raw.summaries[0] });
+    const host = useChat(chat, raw);
+    host.chatMetadata.main_chat = '原聊天';
+    loadMemory();
+    expect(compatibilityState.mode).toBe('protected');
+    expect(compatibilityState.repairable).toEqual([]);
+    expect(host.saveMetadataDebounced).not.toHaveBeenCalled();
+  });
 });

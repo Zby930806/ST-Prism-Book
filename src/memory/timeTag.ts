@@ -59,21 +59,44 @@ export const TIME_TAG_PROMPT = `【主线时间锚点】
 /** 当前生效的固定提示词(用户自定义优先,空则用内置默认)。 */
 export function timeTagPrompt(): string {
   const custom = normalizeSavedTimeTag(apiSettings.prompts.timeTag).trim();
+  return (custom || TIME_TAG_PROMPT) + timeTagBaselineLine();
+}
+
+/**
+ * 时间指令末尾附加的「当前主线时间基准」行;没有已知时间时为空串。
+ * 注入预算按「内置指令 + 这一行」的长度为时间指令预留份额(见 budget.ts)。
+ */
+export function timeTagBaselineLine(): string {
   const ctx = getContext();
   const current = ctx?.getCurrentChatId?.() ? latestStoryTime(ctx.chat) || initialStoryTime() : '';
   const fictional = current && current === initialStoryTime() && ctx?.chatMetadata?.[INITIAL_TIME_ORIGIN_KEY] === 'fictional';
-  return (custom || TIME_TAG_PROMPT) + (current ? `\n当前主线时间基准:${current}${fictional ? '(虚构后备;正文明确时间优先)' : ''}` : '');
+  return current ? `\n当前主线时间基准:${current}${fictional ? '(虚构后备;正文明确时间优先)' : ''}` : '';
 }
 
 // 解析用正则:容忍标签名大小写与首尾空白;非贪婪取内部文本。
 const RE_START = new RegExp(`<${START_TAG}\\b[^>]*>([\\s\\S]*?)</${START_TAG}>`, 'i');
 const RE_END = new RegExp(`<${END_TAG}\\b[^>]*>([\\s\\S]*?)</${END_TAG}>`, 'i');
+/** 全局版本:正文可能分成几段、各带一对时间标签,替换和扫描时要覆盖每一处。 */
+const RE_START_ALL = new RegExp(RE_START.source, 'gi');
+const RE_END_ALL = new RegExp(RE_END.source, 'gi');
 
-/** 从一段正文里解析起止时间;取不到的为 undefined(降级:调用方各自兜底)。 */
+/** 列出全部匹配的起止位置(每次新建正则,不受 lastIndex 影响)。 */
+function tagSpans(s: string, re: RegExp): Array<{ index: number; end: number; text: string }> {
+  const out: Array<{ index: number; end: number; text: string }> = [];
+  const g = new RegExp(re.source, 'gi');
+  for (let m = g.exec(s); m; m = g.exec(s)) out.push({ index: m.index, end: m.index + m[0].length, text: m[1] });
+  return out;
+}
+
+/**
+ * 从一段正文里解析起止时间;取不到的为 undefined(降级:调用方各自兜底)。
+ * 正文分成几段、各带一对标签时,起始取第一个开始标签,结束取最后一个结束标签。
+ */
 export function parseTimeRange(mes: string): { start?: string; end?: string } {
   const s = String(mes ?? '');
   const start = storyTimeValue(s.match(RE_START)?.[1]);
-  const end = storyTimeValue(s.match(RE_END)?.[1]);
+  const ends = tagSpans(s, RE_END);
+  const end = storyTimeValue(ends[ends.length - 1]?.text);
   return { start, end };
 }
 
@@ -146,9 +169,12 @@ function stripCustomTags(s: string): string {
  *
  * 两步:
  *  ① 整块删除噪声标签(含内部内容);
- *  ② 裁剪到时间标签区间:取「最后一个 <bbs_start>」+「第一个 </bbs_end>」之间(标签保留)——
- *     思维链/状态栏可能混入同名标签,开始标签取末次、结束标签取首次,精准框出真正的正文段;
- *     仅在对应标签存在时才裁剪,缺标签的一侧保持原样(两侧都没有则不裁,覆盖「旧聊天无标签」场景)。
+ *  ② 按时间标签分段收集正文(标签保留):从每个 <bbs_start> 到下一个 <bbs_start> 之前的最后一个 </bbs_end>
+ *     算一段,各段按原顺序拼接。时间跳跃处另起一对标签、或中途多写一个 </bbs_end> 时,后面的正文照样保留。
+ *     某个开始标签到下一个开始标签之间没有结束标签(多半写在状态栏里)时,丢弃这个开始标签。
+ *     第一个保留的开始标签之前、最后一个结束标签之后,以及两段之间的文字仍然排除。
+ *     只有开始标签时从最后一个开始标签取到末尾;只有结束标签时取到最后一个结束标签;都没有则不裁(旧聊天无标签)。
+ *     取舍:状态栏如果也写了成对的时间标签,会被并进正文。
  *     `<content>` 等其它容器标签不参与边界判断,避免时间标签位于容器外时被提前截掉。
  *  ③ 规范空白。
  *
@@ -302,6 +328,26 @@ function readManagedTagText(mes: string, tag: string): string | null {
 }
 
 export function clampToTimeTags(mes: string): string {
+  return tidyBody(collectTimeTagSegments(stripNonStory(mes)));
+}
+
+/**
+ * 札记、规划、世界书的楼层指纹专用:沿用 1.4.0 之前的边界(最后一个开始标签到它之后的第一个结束标签)。
+ * 指纹已存进聊天数据,改用新的分段规则会让升级后的旧规划暂停、旧札记和世界书批次失效;读取正文一律用 clampToTimeTags。
+ */
+export function clampToTimeTagsForFingerprint(mes: string): string {
+  let s = stripNonStory(mes);
+  const startRe = new RegExp(RE_START.source, 'gi');
+  let lastStart = -1;
+  for (let m = startRe.exec(s); m; m = startRe.exec(s)) lastStart = m.index;
+  if (lastStart >= 0) s = s.slice(lastStart);
+  const endMatch = s.match(RE_END);
+  if (endMatch && endMatch.index !== undefined) s = s.slice(0, endMatch.index + endMatch[0].length);
+  return tidyBody(s);
+}
+
+/** 裁正文前的清洗:去掉思维链、注释、旧格式、柏宝绘和自定义标签,以及插件托管的旁注块。 */
+function stripNonStory(mes: string): string {
   let s = stripAftertalk(String(mes ?? ''))
     .replace(RE_THINK_BLOCK, '') // 思维链
     .replace(/<!--[\s\S]+?-->/g, '') // HTML 注释
@@ -315,23 +361,33 @@ export function clampToTimeTags(mes: string): string {
   }
   const tail = tailManagedGroupStart(s);
   if (tail >= 0) s = s.slice(0, tail);
-  s = stripManagedTags(s);
+  return stripManagedTags(s);
+}
 
-  // 最后一个 <bbs_start> 的位置:全局扫一遍取末次
-  const startRe = new RegExp(RE_START.source, 'gi');
-  let lastStart = -1;
-  for (let m = startRe.exec(s); m; m = startRe.exec(s)) lastStart = m.index;
-  if (lastStart >= 0) s = s.slice(lastStart);
-  // 第一个 </bbs_end>(在已裁过前缀的串里找)
-  const endMatch = s.match(RE_END);
-  if (endMatch && endMatch.index !== undefined) {
-    s = s.slice(0, endMatch.index + endMatch[0].length);
-  }
-  // 规范空白(原由 stripHtml 负责,现内置)
+/** 规范空白(原由 stripHtml 负责,现内置)。 */
+function tidyBody(s: string): string {
   return s
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+/** 按时间标签分段收集正文;规则见 clampToTimeTags 的说明。 */
+function collectTimeTagSegments(s: string): string {
+  const starts = tagSpans(s, RE_START);
+  const ends = tagSpans(s, RE_END);
+  if (!starts.length && !ends.length) return s;
+  if (!ends.length) return s.slice(starts[starts.length - 1].index);
+  if (!starts.length) return s.slice(0, ends[ends.length - 1].end);
+  const segments: string[] = [];
+  starts.forEach((start, i) => {
+    const nextStart = starts[i + 1]?.index ?? Infinity;
+    let last: { index: number; end: number } | undefined;
+    for (const end of ends) if (end.index >= start.end && end.index < nextStart) last = end;
+    if (last) segments.push(s.slice(start.index, last.end));
+  });
+  // 每个开始标签之后都没有结束标签:按只有开始标签处理
+  return segments.length ? segments.join('\n') : s.slice(starts[starts.length - 1].index);
 }
 
 /**
@@ -344,12 +400,12 @@ export function cleanBody(mes: string): string {
 
 /** 时间标签只是边界/元数据，不能把只有标签与旁注的空楼当作故事事实。 */
 export function hasStoryBody(mes: string): boolean {
-  return !!clampToTimeTags(mes).replace(RE_START, '').replace(RE_END, '').trim();
+  return !!clampToTimeTags(mes).replace(RE_START_ALL, '').replace(RE_END_ALL, '').trim();
 }
 
 /** 缺端点的本地兜底仅识别明确时间行/开头时段，不扫描正文中的任意年份或闪回。 */
 export function explicitOpeningTime(mes: string): string | undefined {
-  const body = clampToTimeTags(mes).replace(RE_START, '').replace(RE_END, '').trim();
+  const body = clampToTimeTags(mes).replace(RE_START_ALL, '').replace(RE_END_ALL, '').trim();
   const line = body.split(/[，,。；;\n]/, 1)[0].trim();
   const labelled = line.match(/^(?:当前(?:主线)?时间|开场时间)\s*[：:]\s*(.{1,80})$/);
   if (labelled && !/[<>]|回忆|闪回|插叙|往事|当年|曾经/.test(labelled[1])) return storyTimeValue(labelled[1]);
@@ -360,12 +416,12 @@ export function explicitOpeningTime(mes: string): string | undefined {
 /**
  * 把正文里的时间标签转成可读内联文本(cleanBody 的最后一步)。
  * 时间标签 <bbs_start>…</bbs_start> 不在「整块删除」之列,但其尖括号形态对模型不友好,
- * 故转成「(起始时间:X)/(结束时间:X)」纯文本,保留时间信息又去掉标签外形。
+ * 故转成「(起始时间:X)/(结束时间:X)」纯文本,保留时间信息又去掉标签外形。正文分成几段时每一处都转换。
  */
 export function inlineTimeTags(mes: string): string {
   return String(mes ?? '')
-    .replace(RE_START, (_, t) => `(起始时间:${String(t).trim()})`)
-    .replace(RE_END, (_, t) => `(结束时间:${String(t).trim()})`);
+    .replace(RE_START_ALL, (_, t) => `(起始时间:${String(t).trim()})`)
+    .replace(RE_END_ALL, (_, t) => `(结束时间:${String(t).trim()})`);
 }
 
 // 时间段压缩用的「分隔边界」:回退公共前缀到这些字符之后,避免切到 token 中间。

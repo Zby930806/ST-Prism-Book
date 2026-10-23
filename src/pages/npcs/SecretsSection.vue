@@ -2,9 +2,8 @@
 /**
  * 信息差：谁知道什么。未结案条目可结案或删除，已结案条目可重开或删除。
  * 默认收起，避免打开角色页就看到剧透；折叠状态存 localStorage（bbs.ui.secretsCollapsed.v1）。
- * 在场的不知情角色会在注入时收到提醒；仅本地记录或注入设置关闭信息差时，标题行显示提醒。
+ * 在场的不知情角色会在注入时收到提醒；仅本地记录或注入设置里关闭信息差（或它依赖的 NPC 名册、场景信息）时，标题行显示提醒。
  */
-import { apiSettings } from '@/api/settings';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import IconButton from '@/components/IconButton.vue';
 import { removeSecret, reopenSecret, resolveSecret } from '@/memory/apply';
@@ -15,6 +14,7 @@ import { computed, ref } from 'vue';
 import NpcEntry from './NpcEntry.vue';
 import NpcFoldSection from './NpcFoldSection.vue';
 import { labelSnippet, loadCollapsed, persistCollapsed } from './npcView';
+import { blockLocalNote } from './sendScope';
 
 const COLLAPSE_KEY = 'bbs.ui.secretsCollapsed.v1';
 const collapsed = ref(loadCollapsed(COLLAPSE_KEY, true));
@@ -23,7 +23,8 @@ function toggleFold() {
   collapsed.value = !collapsed.value;
   persistCollapsed(COLLAPSE_KEY, collapsed.value);
 }
-const localOnly = computed(() => apiSettings.summaryOnlyMode || !apiSettings.injection.secrets);
+// 信息差依赖 NPC 名册的在场判定:名册或场景信息关闭时同样不发送(与注入的条件一致)
+const localNote = computed(() => blockLocalNote('secrets'));
 const openSecrets = computed(() => memory.secrets.filter(s => s.status === 'open'));
 const resolvedSecrets = computed(() => memory.secrets.filter(s => s.status === 'resolved'));
 function secretMeta(s: MemSecret): string {
@@ -56,9 +57,9 @@ function confirmRemove() {
     :count="openSecrets.length"
     :foldable="foldable"
     :collapsed="collapsed"
-    :warning="localOnly ? '仅供棱镜宝书记录，不发送给主对话 AI' : undefined"
+    :warning="localNote"
     empty-hint="摘要记录正文中明确的隐瞒，以及重要事件发生时角色不在场的情况。"
-    :note="localOnly ? undefined : '注入正文时提醒在场的不知情角色。'"
+    :note="localNote ? undefined : '注入正文时提醒在场的不知情角色。'"
     @toggle="toggleFold"
   >
     <div v-if="openSecrets.length" class="bbs-life-group">
@@ -92,7 +93,7 @@ function confirmRemove() {
     @confirm="confirmRemove"
     @cancel="removing = null"
   >
-    删除「{{ removing ? labelSnippet(removing.content, 24) : '' }}」？删除操作记录在最新一条摘要上，删除该楼层可恢复。
+    删除「{{ removing ? labelSnippet(removing.content, 24) : '' }}」？这项修改单独保存，重新摘要或重抽后仍然保留。
   </ConfirmDialog>
 </template>
 

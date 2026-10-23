@@ -7,7 +7,7 @@
  *   (含已隐藏的楼层,不含番外楼)。没有摘录就不发请求。结果存在本楼叶子的 enriched 上,重放时只填空。
  * - 手动:角色页「从原文补全档案」,检索全部楼层,确认后写进最新一条有效叶子的 enriched。
  * - 记录:每个聊天在 chatMetadata 里记下哪些角色补过,补过或确认没有可补内容的不再自动请求;
- *   请求失败只记失败次数(最多自动尝试两次),不影响摘要本身。
+ *   请求失败,或模型给出的字段因超出长度上限、原句对不上而全被丢弃时,只记失败次数(最多自动尝试两次),不影响摘要本身。
  * - 重新摘要(含先对比):沿用该楼原有的补档结果,不再发新请求。
  */
 import { reactive } from 'vue';
@@ -352,11 +352,14 @@ export class EnrichReplyError extends Error {}
 export interface EnrichResult {
   fields: EnrichFields;
   evidence: EnrichFields;
+  /** 模型给了内容、但因超出长度上限或原句与摘录对不上而没有采用的字段数 */
+  rejected: number;
 }
 
 /**
  * 解析补档结果:根键 npcs 为数组。只收待补字段;每个字段都要有能在该角色摘录中连续找到的 evidence,
- * 否则只丢弃这个字段。结构不对时抛 EnrichReplyError。
+ * 且不超过长度上限(外貌 240、性格 160、身份 60 字),否则只丢弃这个字段(不截断)。结构不对时抛 EnrichReplyError。
+ * 给了内容却全被丢弃的角色也在结果里(fields 为空、rejected 大于 0),调用方据此记为失败、之后可以再试。
  */
 export function parseEnrichReply(raw: string, targets: EnrichTarget[]): Map<string, EnrichResult> {
   const parsed = extractJsonObject<unknown>(raw);
@@ -370,16 +373,16 @@ export function parseEnrichReply(raw: string, targets: EnrichTarget[]): Map<stri
     if (!target) continue;
     const evidence = record(item.evidence) ? item.evidence : {};
     const matches = createSourceEvidenceMatcher(target.excerpts.map(e => e.text));
-    const result = out.get(target.name) ?? { fields: {}, evidence: {} };
+    const result = out.get(target.name) ?? { fields: {}, evidence: {}, rejected: 0 };
     for (const key of target.missing) {
       const value = typeof item[key] === 'string' ? oneLine(item[key] as string) : '';
-      if (!value || value.length > FIELD_MAX[key] || /^(未知|不详|未提及|不明|无)$/.test(value)) continue;
+      if (!value || /^(未知|不详|未提及|不明|无)$/.test(value)) continue;
       const quote = typeof evidence[key] === 'string' ? (evidence[key] as string).trim() : '';
-      if (!quote || !matches(quote)) continue;
+      if (value.length > FIELD_MAX[key] || !quote || !matches(quote)) { result.rejected++; continue; }
       result.fields[key] = value;
       result.evidence[key] = quote;
     }
-    if (Object.keys(result.fields).length) out.set(target.name, result);
+    if (Object.keys(result.fields).length || result.rejected) out.set(target.name, result);
   }
   return out;
 }
@@ -421,9 +424,12 @@ export async function runAutoEnrichment(
     const results = await Promise.race([requestEnrichment(send, plan.targets, opts), timeout]);
     for (const t of plan.targets) {
       const r = results.get(t.name);
-      if (r) {
+      if (r && Object.keys(r.fields).length) {
         entries.push({ name: t.name, fields: r.fields, source: 'auto' });
         records.push({ name: t.name, status: 'filled', floor, fields: r.fields });
+      } else if (r?.rejected) {
+        // 给了内容却因超长或原句对不上全被丢弃:记为失败,之后按尝试次数上限再试,不当作「原文没有可补内容」
+        records.push({ name: t.name, status: 'failed', floor });
       } else {
         records.push({ name: t.name, status: 'empty', floor });
       }
@@ -474,7 +480,12 @@ export async function previewManualEnrichment(name: string): Promise<ManualEnric
   try {
     const results = await requestEnrichment(sender.send, [target], { user: ctx.name1, char: ctx.name2, contentBoundary: sender.contentBoundary });
     const r = results.get(npc.name);
-    return r ? { name: npc.name, status: 'ok', fields: r.fields, evidence: r.evidence, excerpts: excerpts.length } : empty('empty', excerpts.length);
+    if (r && Object.keys(r.fields).length) return { name: npc.name, status: 'ok', fields: r.fields, evidence: r.evidence, excerpts: excerpts.length };
+    if (r?.rejected) {
+      const hint = '外貌不超过 240 字、性格不超过 160 字、身份不超过 60 字，且每项都要附与原文一致的原句；超出或原句对不上的字段不采用，也不截断。可以重试，或换一个模型。';
+      return { ...empty('error', excerpts.length), error: { message: '模型给出的档案没有采用。' + hint, title: '模型给出的档案超出长度上限或原句与原文对不上', hint, detail: '' } };
+    }
+    return empty('empty', excerpts.length);
   } catch (error) {
     if (error instanceof EnrichReplyError) {
       const hint = `可以重试；也可以在「${sender.settings}」中换一个模型。`;

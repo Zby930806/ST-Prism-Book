@@ -1,5 +1,5 @@
-import { LEDGER_PROTOCOL } from './ledgerProtocol';
-import { fitMemoryUnits, fitTimeTagPrompt } from './budget';
+import { chatShowsLedgerTags, LEDGER_PROTOCOL } from './ledgerProtocol';
+import { fitHistoryUnits, fitMemoryUnits, fitTimeTagPrompt, type HistoryUnit } from './budget';
 import { npcLocationLabel } from './npcLocation';
 /**
  * 把记忆注入回主对话上下文。
@@ -17,10 +17,10 @@ import { apiSettings, engineActiveHere } from '@/api/settings';
 import type { STMessage } from '@/st/context';
 import { getContext } from '@/st/context';
 import { buildSceneLocationIndex, classifyNpcPresence, findCurrentSceneId, getLeaf, itemReachableAtScene, leafValid, staleLastSeenRelation } from './apply';
-import { fmtItems, fmtPlans, fmtResolvedPlans, renderVarsState, selectRecentResolvedPlans, MEMORY_BRIEFING_NOTE, MEMORY_BRIEFING_END } from './prompts';
+import { fmtItems, fmtPlans, fmtResolvedPlans, renderVarsState, selectRecentResolvedPlans, MEMORY_BRIEFING_NOTE, MEMORY_BRIEFING_END, MEMORY_BRIEFING_HISTORY_END } from './prompts';
 import { fmtLifeDetail } from './lifeDetails';
 import { fmtInjuryReminder, type InjuryReminderSubject } from './injuryReminder';
-import { isNpcLabelName } from './npcLabel';
+import { isNpcLabelName, npcMentioned } from './npcLabel';
 import { fmtNpcAffinity, fmtNpcTiesContext, NPC_AFFINITY_BRIEFING } from './npcRelations';
 import { memory, memoryWriteIssue } from './store';
 import { compactTimeLabel, formatRange, latestStoryTime, splitTimeLabel, timeTagPrompt } from './timeTag';
@@ -277,16 +277,26 @@ export function renderHistoryNodesWithRelative(nodes: ViewNode[], now: string): 
     .join('\n\n');
 }
 
-/** 组合历史摘要注入文本;无启用摘要时返回空串(注入空串等于清除)。 */
-export function buildHistoryInjectionText(): string {
+/**
+ * 组合历史摘要注入文本;无启用摘要时返回空串(注入空串等于清除)。
+ * 填写了注入预算且放不下时:覆盖故事开头的最高层总结优先保留,其余从新到旧连续保留(见 fitHistoryUnits)。
+ * fullEnd:完整的结束说明只放在离回复最近的记忆块。默认按状态块是否为空判断(状态块为空时历史块用完整版)。
+ */
+export function buildHistoryInjectionText(opts: { fullEnd?: boolean } = {}): string {
   const chat = getContext()?.chat ?? null;
 
   // 从森林选「最高存活压缩层」节点(被收纳的不重复、窗口内全文叶子不注入)
   const sums = selectInjectionNodes(memory.summaries, chat);
   if (!sums.length) return '';
   // 注入路径带相对时间前缀;参照点 = 故事内最新时间(读正文标签,不受是否已摘影响)
+  const now = latestStoryTime(chat);
+  const units: HistoryUnit[] = sums.map((n, i) => {
+    const { start, end } = nodeTimeRange(n);
+    return { text: renderHistoryNodesWithRelative([n], now), opening: i === 0 && n.kind === 'comp', start, end };
+  });
+  const fullEnd = opts.fullEnd ?? !buildStateInjectionText();
   // 首尾私密简报框定,避免主模型把摘要当成要复述/输出的模板
-  return fitMemoryUnits(sums.map(n => renderHistoryNodesWithRelative([n], latestStoryTime(chat))), 'history', `${MEMORY_BRIEFING_NOTE}\n[历史剧情摘要]`, MEMORY_BRIEFING_END, true).text;
+  return fitHistoryUnits(units, `${MEMORY_BRIEFING_NOTE}\n[历史剧情摘要]`, fullEnd ? MEMORY_BRIEFING_END : MEMORY_BRIEFING_HISTORY_END).text;
 }
 
 /**
@@ -319,29 +329,36 @@ function sceneChain(scenes: MemScene[], node: MemScene | null): MemScene[] {
  * 渲染场景注入块(分三档省 token):
  *  - 当前地点 + 祖先链:逐级「名称(描述)」详细。
  *  - 其他去过的地点:仅列名称(完整路径名),帮 AI 复用既有命名、避免重复记录。
- * 无场景数据返回空串。
+ * 无场景数据返回空串。「前往」草稿用整段;状态注入拆成两个预算单元(见 fmtSceneUnits)。
  */
 function fmtSceneContext(scenes: MemScene[], here: string, locationPath?: string[]): string {
-  if (!scenes.length) return '';
+  const { current, others } = fmtSceneUnits(scenes, here, locationPath);
+  return [current, others].filter(Boolean).join('\n');
+}
+
+/**
+ * 场景信息的两个部分:当前所在(祖先链,详细)与其他已知地点(仅名称)。
+ * 状态注入时两者是独立的预算单元:其他地点列表放在状态块后部,列表再长也不连累「当前所在」。
+ */
+function fmtSceneUnits(scenes: MemScene[], here: string, locationPath?: string[]): { current: string; others: string } {
+  if (!scenes.length) return { current: '', others: '' };
   const current = findCurrentScene(scenes, here, locationPath);
   const chain = sceneChain(scenes, current);
   const chainIds = new Set(chain.map(s => s.id));
 
-  const lines: string[] = [];
+  let currentText = '';
   if (chain.length) {
     const detailed = chain
       .map(n => (oneLine(n.desc) ? `${n.name}(${oneLine(n.desc)})` : n.name))
       .join(' › ');
-    lines.push(`当前所在(由大到小):${detailed}`);
+    currentText = `当前所在(由大到小):${detailed}`;
   }
   // 其他地点:仅名称(用完整路径表达层级),排除已在祖先链里详述的
   const others = scenes
     .filter(s => !chainIds.has(s.id))
     .map(s => s.path.join(' › '));
-  if (others.length) {
-    lines.push(`其他已知地点(仅列名称):\n${others.map(o => `  - ${o}`).join('\n')}`);
-  }
-  return lines.join('\n');
+  const othersText = others.length ? `其他已知地点(仅列名称):\n${others.map(o => `  - ${o}`).join('\n')}` : '';
+  return { current: currentText, others: othersText };
 }
 
 /**
@@ -450,9 +467,18 @@ function relationHead(relation: string | undefined): string {
  * 不在场的有名字 NPC 最多列出的人数(按最近出场排序),以及每个预算单元的行数。
  * 不在场的人与眼前剧情关系最远:放在计划之后、按块进入注入预算,预算紧张时先省略这些块,
  * 不连累主要角色、在场角色和计划。超出人数的只说明数量。
+ * 近期正文(含最新一条用户输入)提到名字或旧名的,不受人数上限限制,排在第一块。
  */
 export const ABSENT_NPC_LIMIT = 24;
 export const ABSENT_NPC_CHUNK = 8;
+
+/** NPC 名册注入的附加信息。 */
+export interface NpcContextOptions {
+  /** 近期正文:提到名字或旧名的不在场角色一律列入 */
+  mentionText?: string;
+  /** 本次状态块里有[伤势进展提醒]时,在[主要角色]标题里注明伤情按提醒处理 */
+  injuryReminder?: boolean;
+}
 
 /** NPC 名册分段注入:主要角色、NPC(在场与同区域)、不在场 NPC(分块)。 */
 export interface NpcContextBlocks {
@@ -475,11 +501,12 @@ export interface NpcContextBlocks {
  *    如过了一夜、主角回到原处)→ 单列,附最后确认时间和「按身份作息与经过时间判断是否还在」的说明;
  *    无名角色也发,免得回到原处时被写成不见了或换了个人。主要角色同样标出。
  *  - NPC 不在场(更上级祖先/更远旁支/位置未确认)→ 有名字的发一行:名 + 性别 + 关系称谓 + 身份 + 位置 + 已有好感档位(省略说明)
- *    + 最后记录身体状态;「职业 + 字母」的无名角色不发(回到对应地点会重新在场)。最多 ABSENT_NPC_LIMIT 人,按最近出场排序。
+ *    + 最后记录身体状态;「职业 + 字母」的无名角色不发(回到对应地点会重新在场)。最多 ABSENT_NPC_LIMIT 人,按最近出场排序;
+ *    近期正文提到名字或旧名的不受上限限制,排在最前。
  * **性别在所有档都发**(包括不在场),防 AI 搞错性别;关系的**称谓头**同理(把亲哥写成陌生人同级严重)。
  * 年龄按锚点+当前故事时间(now)推算后注入,时间跳跃自动长岁。
  */
-export function fmtNpcContextBlocks(npcs: MemNpc[], scenes: MemScene[], here: string, locationPath: string[] | undefined, now: string): NpcContextBlocks {
+export function fmtNpcContextBlocks(npcs: MemNpc[], scenes: MemScene[], here: string, locationPath: string[] | undefined, now: string, opts: NpcContextOptions = {}): NpcContextBlocks {
   const empty: NpcContextBlocks = { main: '', npc: '', absent: [] };
   if (!npcs.length) return empty;
   const main: MemNpc[] = [];
@@ -512,9 +539,13 @@ export function fmtNpcContextBlocks(npcs: MemNpc[], scenes: MemScene[], here: st
     return condition ? ` 身体状态(最后记录):${condition}` : '';
   };
 
-  // 不在场名单按最近出场排序取前 ABSENT_NPC_LIMIT 人(派生的 lastFloor,旧数据回退 updatedAt)
+  // 不在场名单按最近出场排序取前 ABSENT_NPC_LIMIT 人(派生的 lastFloor,旧数据回退 updatedAt);
+  // 近期正文提到名字或旧名的不受上限限制,排在最前(回到旧话题时正文模型仍知道其性别、称谓和伤情)
   absent.sort((a, b) => (b.lastFloor ?? -1) - (a.lastFloor ?? -1) || b.updatedAt - a.updatedAt);
-  const absentShown = absent.slice(0, ABSENT_NPC_LIMIT);
+  const mentionText = opts.mentionText ?? '';
+  const mentioned = mentionText ? absent.filter(n => npcMentioned(mentionText, n.name, n.formerNames)) : [];
+  const others = absent.filter(n => !mentioned.includes(n));
+  const absentShown = [...mentioned, ...others.slice(0, Math.max(0, ABSENT_NPC_LIMIT - mentioned.length))];
   const absentHidden = absent.length - absentShown.length;
 
   // 好感说明与长期关系各输出一次,放在第一段有内容的名册前面
@@ -544,7 +575,8 @@ export function fmtNpcContextBlocks(npcs: MemNpc[], scenes: MemScene[], here: st
       })
       .join('\n');
     const lastSeenNote = main.some(n => seenRel.has(n)) ? `;标「最后确认在此处/附近」的,${LAST_SEEN_GUIDE}` : '';
-    out.main = withPreface(`[主要角色](快照为最后记录,离场后不凭空推测延续或演变${lastSeenNote})`, detailed);
+    const injuryNote = opts.injuryReminder ? ';伤情按[伤势进展提醒]处理' : '';
+    out.main = withPreface(`[主要角色](快照为最后记录,离场后不凭空推测延续或演变${injuryNote}${lastSeenNote})`, detailed);
   }
   const npcParts: string[] = [];
   if (present.length) {
@@ -630,9 +662,14 @@ function fmtNpcContext(npcs: MemNpc[], scenes: MemScene[], here: string, locatio
   return [blocks.main, blocks.npc, ...blocks.absent].filter(Boolean).join('\n');
 }
 
+/** 信息差每次最多注入的条数;超出的只说明数量。 */
+export const SECRET_INJECT_LIMIT = 12;
+
 /**
  * 信息差注入:只列未结案、且此刻有不知情者在场的条目,写「谁不知道什么」和知情者。
- * 在场 = 名册判定在场(含随行)、局势卡在场名单、主角(始终在场)。最多 8 条,防止挤占预算。
+ * 在场 = 名册判定在场(含随行)、局势卡在场名单、主角(始终在场)。
+ * 不知情者里有在场 NPC(主角以外)的条目排在前面,其次按记录先后从新到旧;
+ * 最多 SECRET_INJECT_LIMIT 条,超出时注明另有几条未列出,不代表已被知晓。
  */
 export function fmtSecretContext(
   secrets: MemSecret[],
@@ -645,19 +682,24 @@ export function fmtSecretContext(
 ): string {
   const open = secrets.filter(s => s.status === 'open' && s.unaware.length);
   if (!open.length) return '';
-  const present = new Set<string>();
-  for (const n of npcs) if (classifyNpcPresence(n, scenes, here, locationPath) === 'present') present.add(n.name);
-  for (const p of focus?.participants ?? []) if (p.trim()) present.add(p.trim());
-  if (userName.trim()) present.add(userName.trim());
-  const lines: string[] = [];
-  for (const s of open) {
-    const who = s.unaware.filter(name => present.has(name));
-    if (!who.length) continue;
+  const presentNpcs = new Set<string>();
+  for (const n of npcs) if (classifyNpcPresence(n, scenes, here, locationPath) === 'present') presentNpcs.add(n.name);
+  for (const p of focus?.participants ?? []) if (p.trim()) presentNpcs.add(p.trim());
+  const user = userName.trim();
+  if (user) presentNpcs.delete(user);
+  const present = new Set(presentNpcs);
+  if (user) present.add(user);
+  const candidates = open
+    .map((s, order) => ({ s, order, who: s.unaware.filter(name => present.has(name)), npcPresent: s.unaware.some(name => presentNpcs.has(name)) }))
+    .filter(c => c.who.length)
+    .sort((a, b) => Number(b.npcPresent) - Number(a.npcPresent) || (b.s.createdAt ?? 0) - (a.s.createdAt ?? 0) || b.order - a.order);
+  if (!candidates.length) return '';
+  const lines = candidates.slice(0, SECRET_INJECT_LIMIT).map(({ s, who }) => {
     const known = s.knownBy.length ? `(知情:${s.knownBy.map(oneLine).join('、')})` : '';
-    lines.push(`- ${who.map(oneLine).join('、')}不知道:${oneLine(s.content)}${known}`);
-    if (lines.length >= 8) break;
-  }
-  if (!lines.length) return '';
+    return `- ${who.map(oneLine).join('、')}不知道:${oneLine(s.content)}${known}`;
+  });
+  const hidden = candidates.length - lines.length;
+  if (hidden > 0) lines.push(`- 另有 ${hidden} 条信息差未列出,不代表已被知晓`);
   return `[信息差·保持人物视角]\n${lines.join('\n')}\n(不知情者不能说出、提及或依据这些事行动,除非正文中有人告诉他们;这是写作参考,不要在正文中点破)`;
 }
 
@@ -765,11 +807,10 @@ export function buildStateInjectionText(): string {
 
   const here = memory.state.location || '';
   const locPath = memory.state.locationPath;
-  // 场景树:当前地点 + 祖先链(详细) + 其他地点(仅名称)。祖先链同时用于物品/NPC 可达判定。
-  if (scenesOn) {
-    const sceneBlock = fmtSceneContext(memory.scenes, here, locPath);
-    if (sceneBlock) st.push(`地点记忆:\n${sceneBlock}`);
-  }
+  // 场景树:当前地点 + 祖先链(详细)在这里;其他地点(仅名称)放到状态块后部,作为单独的预算单元。
+  // 祖先链同时用于物品/NPC 可达判定。
+  const sceneUnits = scenesOn ? fmtSceneUnits(memory.scenes, here, locPath) : { current: '', others: '' };
+  if (sceneUnits.current) st.push(`地点记忆:\n${sceneUnits.current}`);
 
   // 物品分两组省 token:可达(随身 / 存放地落在当前地点或其祖先链)发全量(名+量+描述);
   // 他处寄存的只发名+数量(砍掉描述这个大头),既省 token 又不至于让主模型以为东西没了。
@@ -777,9 +818,15 @@ export function buildStateInjectionText(): string {
   // 注:近期物品变动不在此注入。改为摘要后写进对应楼层正文 </bbs_end> 之后(见 engine.ts),
   // 窗口内全文楼层天然可见、滚出窗口自然消失 —— 符合「物品变动只在那段时间有用」的取舍。
 
+  // 伤势进展提醒:伤情记录满一天(没有故事时间时按回复楼层数)未更新,提醒正文模型在相关时按轻重体现进展;只提醒随正文发送的角色。
+  // 先算出来:[主要角色]标题据此注明伤情按提醒处理。
+  const reminder = inj.injuryReminder ? buildInjuryReminder(inj.protagonist, npcsOn) : '';
+
   // 人物分三段:主角(上方 [主角当前状态])、主要角色、NPC 名册。NPC 按在场分档压缩,但所有档均保留身体状态;
-  // 不在场的 NPC 按块放到计划之后,预算紧张时先省略它们。最终仍受原注入预算与开关约束。
-  const npcBlocks = npcsOn ? fmtNpcContextBlocks(memory.npcs, memory.scenes, here, locPath, memory.state.time) : null;
+  // 不在场的 NPC 按块放到计划之后,预算紧张时先省略它们;近期正文提到的不在场角色排在最前。最终仍受原注入预算与开关约束。
+  const npcBlocks = npcsOn
+    ? fmtNpcContextBlocks(memory.npcs, memory.scenes, here, locPath, memory.state.time, { mentionText: recentContextText(), injuryReminder: !!reminder })
+    : null;
   if (npcBlocks?.main) st.push(npcBlocks.main);
   if (npcBlocks?.npc) st.push(npcBlocks.npc);
 
@@ -789,11 +836,7 @@ export function buildStateInjectionText(): string {
     if (secretBlock) st.push(secretBlock);
   }
 
-  // 伤势进展提醒:伤情记录满一天(没有故事时间时按回复楼层数)未更新,提醒正文模型在相关时按轻重体现进展;只提醒随正文发送的角色。
-  if (inj.injuryReminder) {
-    const reminder = buildInjuryReminder(inj.protagonist, npcsOn);
-    if (reminder) st.push(reminder);
-  }
+  if (reminder) st.push(reminder);
 
   const openPlans = memory.plans
     .filter(p => p.status === 'open')
@@ -807,6 +850,9 @@ export function buildStateInjectionText(): string {
 
   // 不在场的 NPC:按最近出场分块,排在计划之后
   if (npcBlocks?.absent.length) st.push(...npcBlocks.absent);
+
+  // 其他已知地点(仅名称):排在不在场 NPC 之后、变量之前
+  if (sceneUnits.others) st.push(sceneUnits.others);
 
   // 自定义变量:发当前状态 + 各字段「含义」给主模型(帮它理解并保持数值/设定连贯),明确框定为只读。
   // ⚠️ 绝不注入「变化规则」(rule)——那是给副API摘要用的「如何增删改」指令(含 set/assign 命令语法);
@@ -832,11 +878,26 @@ export function buildStateInjectionText(): string {
 }
 
 /**
+ * 历史块与状态块:完整的私密简报结束说明只放在离回复最近的记忆块——状态块(D1/D2);
+ * 状态块为空(仅摘要模式或没有状态)时放在历史块,否则历史块用短收尾。
+ */
+function buildMemoryBlocks(): { history: string; state: string } {
+  const state = buildStateInjectionText();
+  return { history: buildHistoryInjectionText({ fullEnd: !state }), state };
+}
+
+/**
  * 组合注入文本:已启用的历史摘要 + 当前结构化状态(时间/地点/物品/未了结计划)。
  * 保留给调试/兼容调用;实际注入由 refreshInjection 拆成两个 ST 槽位。
  */
 export function buildInjectionText(): string {
-  return [buildHistoryInjectionText(), buildStateInjectionText()].filter(Boolean).join('\n\n').trim();
+  const blocks = buildMemoryBlocks();
+  return [blocks.history, blocks.state].filter(Boolean).join('\n\n').trim();
+}
+
+/** 只读账本协议:只在发给正文模型的消息里有物品/变量旁注时注入(取不到聊天时照常注入)。 */
+function ledgerInjectionText(): string {
+  return chatShowsLedgerTags(getContext()?.chat) ? LEDGER_PROTOCOL : '';
 }
 
 /** 按 ST 自身 tokenizer 不可用时的兜底口径估算文本 token 数。 */
@@ -847,17 +908,17 @@ function estimateTextTokens(blocks: string[]): number {
 
 /**
  * 估算当前实际会注入主对话的 token 数,拆成摘要与其他两类。
- * “其他”包含当前结构化状态、只读账本协议与时间标签提示词。
+ * “其他”包含当前结构化状态、只读账本协议(实际注入时)与时间标签提示词。
  * 这里只用于给用户一个直观量级,不请求后端,也不计聊天模板包装带来的少量额外 token。
  */
 export function estimateInjectionTokenBreakdown(): { summary: number; other: number } {
   if (!engineActiveHere()) return { summary: 0, other: 0 };
-
+  const blocks = buildMemoryBlocks();
   return {
-    summary: estimateTextTokens([buildHistoryInjectionText()]),
+    summary: estimateTextTokens([blocks.history]),
     other: estimateTextTokens([
-      buildStateInjectionText(),
-      LEDGER_PROTOCOL,
+      blocks.state,
+      ledgerInjectionText(),
       apiSettings.autoSummaryEnabled ? fitTimeTagPrompt(timeTagPrompt()) : '',
     ]),
   };
@@ -876,11 +937,13 @@ export function refreshInjection(): void {
   const fn = ctx?.setExtensionPrompt;
   if (typeof fn !== 'function') return;
   const stateDepth = resolveStateInjectionDepth(ctx?.chat ?? null);
+  const blocks = buildMemoryBlocks();
   fn(LEGACY_INJECT_KEY, '', IN_CHAT, STATE_INJECT_DEPTH_BEFORE_LATEST_AI, false, ROLE_SYSTEM, null);
-  fn(HISTORY_INJECT_KEY, buildHistoryInjectionText(), IN_CHAT, HISTORY_INJECT_DEPTH, false, ROLE_SYSTEM, null);
-  fn(STATE_INJECT_KEY, buildStateInjectionText(), IN_CHAT, stateDepth, false, ROLE_SYSTEM, null);
-  // 旧旁注即使在仅摘要模式/关闭自动摘要后仍可能存在,分工协议始终随引擎注入。
-  fn(LEDGER_INJECT_KEY, LEDGER_PROTOCOL, IN_CHAT, 0, false, ROLE_SYSTEM, null);
+  fn(HISTORY_INJECT_KEY, blocks.history, IN_CHAT, HISTORY_INJECT_DEPTH, false, ROLE_SYSTEM, null);
+  fn(STATE_INJECT_KEY, blocks.state, IN_CHAT, stateDepth, false, ROLE_SYSTEM, null);
+  // 只读账本协议:发给正文模型的消息里有物品/变量旁注(含仅摘要模式、关闭自动摘要后留下的旧旁注)才注入。
+  // 聊天变动和窗口滑动都会走到这里,旁注滑出或被隐藏后随之撤下。
+  fn(LEDGER_INJECT_KEY, ledgerInjectionText(), IN_CHAT, 0, false, ROLE_SYSTEM, null);
   // 时间标签固定提示词:跟随自动摘要开关注入主对话,关闭时注入空串(等于清除)
   fn(TIMETAG_INJECT_KEY, apiSettings.autoSummaryEnabled ? fitTimeTagPrompt(timeTagPrompt()) : '', IN_CHAT, TIMETAG_INJECT_DEPTH, false, ROLE_SYSTEM, null);
 }

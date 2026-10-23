@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 「从原文补全档案」的确认弹窗：检索进行中、找到可补的字段（附原文依据）、没有可补内容、档案已完整、请求失败。
- * 只填该角色当前为空的字段；写入记在最新一条摘要上，与其他手动改动相同。写入与取消由页面处理。
+ * 只填该角色当前为空的字段；写入记在最新一条摘要的补档结果里（重新摘要该楼时沿用）。写入与取消由页面处理。
  */
 import ModalShell from '@/components/ModalShell.vue';
 import { ENRICH_FIELD_LABELS, type ManualEnrichResult } from '@/memory/npcEnrich';

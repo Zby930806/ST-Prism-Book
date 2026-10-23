@@ -23,7 +23,7 @@ export const PERMISSIONS: ReadonlyArray<{ value: WorldbookPermission; label: str
   { value: 'modify', label: '可修改', hint: '在可补充的基础上，可替换已有条目中的一段原文或整段改写。' },
 ];
 export const READ_BOUNDS = Object.freeze({
-  maxFloors: [4, 100], maxChars: [4000, 120000], entryChars: [0, 40000], refChars: [0, 40000],
+  maxFloors: [4, 100], maxChars: [4000, 120000], entryChars: [0, 40000], refChars: [0, 40000], indexChars: [2000, 40000],
 } as const);
 export const AUTO_INTERVAL_BOUNDS = [2, 50] as const;
 
@@ -37,7 +37,7 @@ const defaults = (): WorldbookSettings => ({
   permission: 'create',
   auto: { enabled: false, interval: 10 },
   newEntry: { position: 0, order: 100, depth: 4 },
-  read: { maxFloors: 24, maxChars: 24000, entryChars: 6000, refChars: 4000 },
+  read: { maxFloors: 24, maxChars: 24000, entryChars: 6000, refChars: 4000, indexChars: 10000 },
 });
 export const worldbookSettings = reactive<WorldbookSettings>(defaults());
 let protectedSettings = false;
@@ -82,6 +82,7 @@ export function normalizeWorldbookSettings(value: WorldbookSettings | Record<str
       maxChars: int(read.maxChars, d.read.maxChars, ...READ_BOUNDS.maxChars),
       entryChars: int(read.entryChars, d.read.entryChars, ...READ_BOUNDS.entryChars),
       refChars: int(read.refChars, d.read.refChars, ...READ_BOUNDS.refChars),
+      indexChars: int(read.indexChars, d.read.indexChars, ...READ_BOUNDS.indexChars),
     },
   };
 }

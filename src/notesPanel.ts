@@ -10,7 +10,7 @@ import NotesCard from '@/components/NotesCard.vue';
 import { getContext } from '@/st/context';
 import { guardEditableArrowKeys } from '@/st/keyboard';
 import { attachSharedStyles, ensureSharedSheet, SHADOW_HOST_CLASS } from '@/st/shadowStyles';
-import { engineActiveHere } from '@/api/settings';
+import { apiSettings, engineActiveHere } from '@/api/settings';
 import { notesSettings } from '@/notes/settings';
 import { notesState } from '@/notes/store';
 import { notesRun } from '@/notes/service';
@@ -173,13 +173,20 @@ export function syncNotesPanel(on: boolean): void {
   reconcile();
 }
 
-/** 启动链调用一次:跟随双子札记的开关、「在聊天中显示札记」和插件总开关;札记增删、生成楼层变化时重新对齐。 */
+/**
+ * 启动链调用一次:跟随双子札记的开关和「在聊天中显示札记」;札记增删、生成楼层变化时重新对齐。
+ * 插件总开关和角色排除不放进开关侦听:当前角色名不是响应式数据,切换聊天后侦听记下的值会过时
+ * (从被排除角色的聊天切到普通聊天时卡片不补挂)。改为每次对齐时用 engineActiveHere 判断,总开关或排除名单变化时重新对齐。
+ */
 export function bindNotesPanel(): void {
   watch(
-    () => notesSettings.enabled && notesSettings.showInChat && engineActiveHere(),
+    () => notesSettings.enabled && notesSettings.showInChat,
     on => syncNotesPanel(on),
     { immediate: true },
   );
+  watch(() => [apiSettings.enabled, apiSettings.excludedChars.join('\n')], () => {
+    if (enabled) scheduleReconcile(0);
+  });
   watch(() => [notesState.revision, notesState.records.length, notesRun.floor], () => {
     if (enabled) scheduleReconcile(0);
   });

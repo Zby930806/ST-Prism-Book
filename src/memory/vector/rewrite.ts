@@ -10,7 +10,8 @@ import { taskContextPrompt } from '@/memory/taskContext';
  *    快照 = deriveMemory(chat, 洞楼index),插在「连续叶子前缀末尾」之后、洞楼之前;
  *  - 快照只含**滚出窗口的主角档案/items/plans**(时间/地点/在场已在全文里,不重复)。
  *
- * 产出多条 query,各自 embed → 后端 vec/search 多路检索 + RRF 融合;INTENT 兼作 rerank 的 query。
+ * 产出多条 query,各自 embed → 后端 vec/search 多路检索 + RRF 融合;INTENT 兼作 rerank 的 query
+ * (INTENT 为空或因超长被清空时,召回端改用全部检索语句拼成的文本)。
  * 任何失败都抛错,由召回侧 catch 后清空召回槽,不阻断正文生成。
  */
 
@@ -23,20 +24,34 @@ import { renderHistoryNodes, selectHistoryNodesBefore } from '../inject';
 import { fmtItems, fmtNpcs, fmtPlans, fmtProtagonist, QUERY_REWRITE_SYSTEM, QUERY_REWRITE_TAIL } from '../prompts';
 import { memory } from '../store';
 import { cleanBody } from '../timeTag';
-import { EmbedError, fetchWithTimeoutRetry, vectorFailure, vectorHttpFailure } from './embed';
-import { emptyReply, finishKind, truncatedReply } from '@/api/errors';
+import { EmbedError, fetchWithTimeoutRetry, vectorFailure } from './embed';
+import { normalizeQueryRewriteMaxTokens, runtimeEndpoint } from './params';
+import { classifyHttpFailure, emptyReply, finishKind, truncatedReply } from '@/api/errors';
 
 /** rewrite 模型最多取几条 query(对齐 Horae) */
 const MAX_QUERIES = 5;
-/** 单条 query 限长 */
+/** 单条 query 限长:超出整条丢弃(不截断,以免截掉句末的否定或条件) */
 const MAX_QUERY_LEN = 220;
+/** INTENT 限长:超出时清空,重排改用全部检索语句 */
 const MAX_INTENT_LEN = 400;
 
 export interface RewriteResult {
-  /** 场景意图描述(兼作 rerank 的 query) */
+  /** 场景意图描述(兼作 rerank 的 query);为空时召回端改用全部检索语句做重排查询 */
   intent: string;
   /** 多条检索 query(已去重限长) */
   queries: string[];
+}
+
+/** parseResponse 的完整结果:另外带出解析过程,供报错区分原因。 */
+export interface ParsedRewrite extends RewriteResult {
+  /** 认出的 Q 行数(含因超长丢弃、重复的) */
+  queryLines: number;
+  /** 因超过长度上限整条丢弃的 Q 行数 */
+  droppedLong: number;
+  /** INTENT 是否因超长被清空 */
+  intentDropped: boolean;
+  /** 回复只有思考过程(<think> 没有闭合),没有正文 */
+  thinkingOnly: boolean;
 }
 
 interface ChatMsg {
@@ -162,34 +177,73 @@ function chatCompletionsEndpoint(rawUrl: string): string {
   return base ? `${base}/chat/completions` : '';
 }
 
-/** 解析 INTENT + 多行 Q(对齐 Horae:去前缀符号、去重、限长) */
-export function parseResponse(text: string): RewriteResult {
-  const lines = String(text || '')
+/** 行首可重复出现的 Markdown/列表标记(引用 >、标题 #、加粗/斜体 * _、列表 - •),以及一个数字编号。 */
+function stripLineMarkers(raw: string): string {
+  return raw
+    .replace(/^[\s>#*_\-•·]+/, '')
+    .replace(/^\d+\s*[.)、．）]\s*/, '')
+    .replace(/^[\s*_]+/, '')
+    .trim();
+}
+
+/** 标签后面可以跟着收尾的 **、__(如 `**INTENT:**`、`**Q1**:`),Q 编号后接受冒号、句点、顿号或右括号。 */
+const INTENT_LINE = /^INTENT\s*(?:\*\*|__)?\s*[:：]\s*(?:\*\*|__)?\s*(.+)$/i;
+const QUERY_LINE = /^Q\s*\d*\s*(?:\*\*|__)?\s*[:：.．、)）]\s*(?:\*\*|__)?\s*(.+)$/i;
+
+/**
+ * 去掉思考过程:整段闭合的 <think>/<thinking> 块先删掉;只剩结尾标签时,它之前都算思考;
+ * 开始标签没有闭合时,之后都算思考。返回剩下的正文,以及是否遇到了没闭合的思考块。
+ */
+function stripThinking(text: string): { body: string; unclosed: boolean } {
+  let body = text.replace(/<think(?:ing)?\b[\s\S]*?<\/think(?:ing)?>/gi, '');
+  const lower = body.toLowerCase();
+  const close = Math.max(lower.lastIndexOf('</think>'), lower.lastIndexOf('</thinking>'));
+  if (close >= 0) body = body.slice(close).replace(/^<\/think(?:ing)?>/i, '');
+  const open = body.search(/<think(?:ing)?\b/i);
+  if (open >= 0) return { body: body.slice(0, open), unclosed: true };
+  return { body, unclosed: false };
+}
+
+/**
+ * 解析 INTENT + 多行 Q(对齐 Horae:去前缀符号、去重、限长)。
+ * 容忍常见的格式偏差:行首的 Markdown 标记和编号、加粗的标签、「Q1.」「Q1、」这类编号写法。
+ * 超长的 Q 整条丢弃(不截断);超长的 INTENT 清空,由召回端改用全部检索语句做重排查询。
+ */
+export function parseResponse(text: string): ParsedRewrite {
+  const normalized = String(text || '')
     .replace(/\r\n?/g, '\n')
-    .replace(/\\n/g, '\n')
-    // 双保险:即便请求关了 enable_thinking,个别模型仍会吐 <think> 块,先整段剥掉再逐行解析,
-    // 否则思维链里出现的 INTENT/Q 字样会污染解析结果。
-    .replace(/<think(?:ing)?\b[\s\S]*?<\/think(?:ing)?>/gi, '')
+    .replace(/\\n/g, '\n');
+  // 即便请求关了 enable_thinking,个别模型仍会吐思考过程,先去掉再逐行解析,
+  // 否则思维链里出现的 INTENT/Q 字样会污染解析结果。
+  const { body, unclosed } = stripThinking(normalized);
+  const lines = body
     .split('\n')
     .map(l => l.trim())
     .filter(Boolean);
 
   let intent = '';
+  let intentDropped = false;
+  let queryLines = 0;
+  let droppedLong = 0;
   const queries: string[] = [];
   const seen = new Set<string>();
 
   for (const raw of lines) {
-    // 去掉行首的 -/*/•、数字编号
-    const line = raw.replace(/^\s*(?:[-*•]\s*)?(?:\d+[.)、]\s*)?/, '').trim();
-    const im = line.match(/^INTENT\s*[:：]\s*(.+)$/i);
+    const line = stripLineMarkers(raw);
+    const im = line.match(INTENT_LINE);
     if (im) {
       intent = sanitize(im[1], MAX_INTENT_LEN);
+      intentDropped = !intent && !!cleanValue(im[1]);
       continue;
     }
-    const qm = line.match(/^Q\s*\d*\s*[:：]\s*(.+)$/i);
+    const qm = line.match(QUERY_LINE);
     if (qm) {
+      queryLines++;
       const q = sanitize(qm[1]);
-      if (!q) continue;
+      if (!q) {
+        if (cleanValue(qm[1])) droppedLong++;
+        continue;
+      }
       const key = q.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
@@ -197,65 +251,132 @@ export function parseResponse(text: string): RewriteResult {
       if (queries.length >= MAX_QUERIES) break;
     }
   }
-  return { intent, queries };
+  return {
+    intent,
+    queries,
+    queryLines,
+    droppedLong,
+    intentDropped,
+    thinkingOnly: unclosed && !queryLines && !intent,
+  };
+}
+
+/** 去掉包在值两端的引号、反引号和 Markdown 标记,压缩空白。 */
+function cleanValue(text: string): string {
+  return String(text || '')
+    .trim()
+    .replace(/^["'“”‘’`*_]+|["'“”‘’`*_]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function sanitize(text: string, limit = MAX_QUERY_LEN): string {
-  const clean = String(text || '')
-    .trim()
-    .replace(/^["'“”‘’`]+|["'“”‘’`]+$/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const clean = cleanValue(text);
   // 单条查询视为完整语义单元;句号后的否定也可能改变前句,不能只保留前半段。
   return clean.length <= limit ? clean : '';
+}
+
+/** 解析结果里没有可用检索语句时,按原因写一句说明(含处理方法与设置位置)。 */
+function noQueryMessage(parsed: ParsedRewrite): string {
+  const where = '「设置 → 向量记忆 → Query 重写」';
+  if (parsed.thinkingOnly) {
+    return `Query 重写的回复只有思考过程，没有给出检索语句。可以在${where}调大「最大输出」，或换一个对话模型。`;
+  }
+  if (parsed.queryLines > 0 && parsed.droppedLong >= parsed.queryLines) {
+    return `Query 重写给出的检索语句都超过 ${MAX_QUERY_LEN} 字，已整条丢弃（不截断，以免改变原意）。可以重新生成一次，或在${where}换一个更遵守格式的对话模型。`;
+  }
+  return `Query 重写的回复里没有检索语句（需要以「Q:」开头的行）。可以重新生成一次，或在${where}换一个对话模型。`;
+}
+
+/* ============ 服务商拒收的可选参数 ============ */
+
+/**
+ * 查询重写默认附带 enable_thinking:false(关闭国产模型默认的思维链)和 top_p。
+ * 严格校验参数的接口会因为不认识它们返回 400/422:报错原文提到哪个参数,就去掉它重试,
+ * 并按接口地址记住,本次会话内不再发送。
+ */
+const OPTIONAL_PARAMS = ['enable_thinking', 'top_p'] as const;
+type OptionalParam = (typeof OPTIONAL_PARAMS)[number];
+const droppedParams = new Map<string, Set<OptionalParam>>();
+
+/** 清掉已记住的拒收参数(测试用)。 */
+export function resetRewriteParamMemory(): void {
+  droppedParams.clear();
+}
+
+function rejectedParams(status: number, body: string): OptionalParam[] {
+  if (status !== 400 && status !== 422) return [];
+  return OPTIONAL_PARAMS.filter(p => body.toLowerCase().includes(p));
 }
 
 /**
  * 执行查询重写。queryRewrite 端点未配 model 时抛错(调用方降级)。
  * 走前端直连 chat/completions(与 embed 同源策略,渠道地址/密钥可留空复用 embedding)。
+ * 超时不重试:召回在正文生成前阻塞,超时多半是服务商卡住;服务端出错或限流时仍按重试次数重试。
  */
 export async function rewriteQuery(signal?: AbortSignal): Promise<RewriteResult> {
-  const ep = resolveVectorModel('queryRewrite');
-  if (!ep.model) throw new EmbedError('向量记忆还没有填写 Query 重写模型，请到设置 → 向量记忆里补全。');
+  const ep = runtimeEndpoint(resolveVectorModel('queryRewrite'), 'queryRewrite');
+  if (!ep.model) throw new EmbedError('向量记忆还没有填写 Query 重写模型，请到「设置 → 向量记忆」里补全。', { kind: 'config' });
   const endpoint = chatCompletionsEndpoint(ep.url);
-  if (!endpoint) throw new EmbedError('向量记忆还没有填写 Query 重写地址（或 Embedding 地址），请到设置 → 向量记忆里补全。');
+  if (!endpoint) throw new EmbedError('向量记忆还没有填写 Query 重写地址（或 Embedding 地址），请到「设置 → 向量记忆」里补全。', { kind: 'config' });
 
   const ctx = getContext();
   const chat = ctx?.chat ?? [];
   if (!chat.length) throw new Error('无对话上下文可重写');
 
   const messages = buildMessages(chat);
+  const maxTokens = normalizeQueryRewriteMaxTokens(apiSettings.vector.queryRewriteMaxTokens);
+  const dropped = droppedParams.get(endpoint) ?? new Set<OptionalParam>();
+  const send = () => {
+    // 对齐 Horae:低温更服从格式;enable_thinking:false 关思维链——
+    // 国产模型(Qwen3/GLM 等)默认开思维链会先吐 <think> 推理,冲乱 INTENT/Q 行格式导致解析失败。
+    const body: Record<string, unknown> = { model: ep.model, messages, temperature: 0.1, max_tokens: maxTokens, stream: false };
+    if (!dropped.has('top_p')) body.top_p = 0.8;
+    if (!dropped.has('enable_thinking')) body.enable_thinking = false;
+    return fetchWithTimeoutRetry(
+      endpoint,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ep.key || ''}` },
+        body: JSON.stringify(body),
+      },
+      { timeoutSec: ep.timeoutSec, retries: ep.retries, label: 'Query 重写', externalSignal: signal, retryOnTimeout: false },
+    );
+  };
 
-  const resp = await fetchWithTimeoutRetry(
-    endpoint,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ep.key || ''}` },
-      body: JSON.stringify({
-        model: ep.model,
-        messages,
-        // 对齐 Horae:低温更服从格式;enable_thinking:false 关思维链——
-        // 国产模型(Qwen3/GLM 等)默认开思维链会先吐 <think> 推理,冲乱 INTENT/Q 行格式导致解析失败。
-        temperature: 0.1,
-        top_p: 0.8,
-        max_tokens: apiSettings.vector.queryRewriteMaxTokens,
-        stream: false,
-        enable_thinking: false,
-      }),
-    },
-    { timeoutSec: ep.timeoutSec, retries: ep.retries, label: 'Query 重写', externalSignal: signal },
-  );
-  if (!resp.ok) throw await vectorHttpFailure('Query 重写', resp);
-  const json = await resp.json();
-  const content = json?.choices?.[0]?.message?.content;
+  let resp = await send();
+  // 报错原文提到可选参数时,去掉它再试(两个参数都被拒时最多再试两次)
+  for (let round = 0; !resp.ok && round < OPTIONAL_PARAMS.length; round++) {
+    const text = await resp.text().catch(() => '');
+    const rejected = rejectedParams(resp.status, text).filter(p => !dropped.has(p));
+    if (!rejected.length) {
+      throw vectorFailure('Query 重写', classifyHttpFailure({ status: resp.status, statusText: resp.statusText, body: text, direct: true }));
+    }
+    for (const p of rejected) dropped.add(p);
+    droppedParams.set(endpoint, dropped);
+    resp = await send();
+  }
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw vectorFailure('Query 重写', classifyHttpFailure({ status: resp.status, statusText: resp.statusText, body: text, direct: true }));
+  }
+  const json = await resp.json().catch(() => {
+    throw new EmbedError('Query 重写接口返回的不是有效数据，请确认地址指向对话接口（OpenAI 兼容接口的地址通常以 /v1 结尾）。', { kind: 'format' });
+  });
+  const choice = json?.choices?.[0];
+  const content = choice?.message?.content;
   const raw = typeof content === 'string' ? content : '';
   if (!raw.trim()) {
     // 输出上限太小时,思考型模型常常整段都花在思考上,正文为空。
-    const meta = { finishReason: json?.choices?.[0]?.finish_reason, maxTokens: apiSettings.vector.queryRewriteMaxTokens };
+    const meta = {
+      finishReason: choice?.finish_reason,
+      maxTokens,
+      sawReasoning: !!(choice?.message?.reasoning_content || choice?.message?.reasoning),
+    };
     throw vectorFailure('Query 重写', finishKind(meta.finishReason) === 'truncated' ? truncatedReply(meta, '') : emptyReply(meta));
   }
 
   const parsed = parseResponse(raw);
-  if (!parsed.queries.length) throw new EmbedError('Query 重写的回复里没有可用的检索语句（需要 Q: 开头的行），可以换个模型或检查提示词。');
-  return parsed;
+  if (!parsed.queries.length) throw new EmbedError(noQueryMessage(parsed), { kind: 'format' });
+  return { intent: parsed.intent, queries: parsed.queries };
 }

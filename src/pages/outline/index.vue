@@ -11,8 +11,9 @@ import { OUTLINE_LIMITS as L } from '@/outline/limits';
 import { validateOutlineContent } from '@/outline/protocol';
 import { outlineSettings, outlineSettingsIssue, resolveOutlineChannel, saveOutlineSettings } from '@/outline/settings';
 import { outlineRun, generateOutline, generateOutlineAuto, cancelOutline, discussionRun } from '@/outline/service';
-import { autoAdvanceForCurrentStage, checkOutlineProgress, clearOutlineProgressResult, dismissOutlineProgress, outlineProgress, progressForCurrentStage } from '@/outline/progress';
+import { autoAdvanceForCurrentStage, checkOutlineProgress, clearOutlineProgressResult, dismissOutlineProgress, outlineProgress, progressForCurrentStage, progressMinMessages } from '@/outline/progress';
 import { discussionState } from '@/outline/discussionStore';
+import { outlineStageOverflows } from '@/outline/injection';
 import {
   outlineState, saveOutlineDraft, activateOutlineDraft, setOutlineEnabled,
   setOutlineChapter, setOutlineExitCriteria, reconfirmOutline, outlineSourceCurrent,
@@ -133,6 +134,22 @@ function contentForSave(): OutlineContent {
     throw cause;
   }
 }
+/* —— 各阶段连同整体约束注入正文时是否超出上限：编辑器里标出来，加入计划时会逐个阶段检查 —— */
+const stageOverflow = computed(() => {
+  const value = editor.value;
+  if (!value) return new Map<number, number>();
+  const content: OutlineContent = {
+    title: value.title.trim(), premise: value.premise.trim(), constraints: lines(value.constraints),
+    chapters: value.chapters.map(stage => ({ title: stage.title.trim(), goal: stage.goal.trim(), approach: stage.approach.trim(), beats: lines(stage.beats), exitCriteria: stage.exitCriteria.trim() })),
+  };
+  return new Map(outlineStageOverflows(content).map(stage => [stage.index, stage.over]));
+});
+const overflowText = computed(() => {
+  const list = [...stageOverflow.value].map(([index, over]) => `第 ${index + 1} 阶段多 ${over} 字`);
+  return list.length ? `${list.join('，')}：每个阶段连同整体约束注入正文时不能超过 ${L.injection} 字。草稿可以保存，加入计划前需要精简这些阶段或整体约束。` : '';
+});
+/* —— 生成草稿时对模型回复做的调整：只对这份草稿显示 —— */
+const draftWarnings = computed(() => (outlineRun.draftWarnings && outlineRun.draftWarnings.draftId === outlineState.draft?.id ? outlineRun.draftWarnings.items : []));
 function saveDraft() {
   return runAction(async () => {
     requireEditor();
@@ -465,7 +482,8 @@ async function startAutoGeneration(confirmed = false, fromEmpty = false) {
           <p>{{ outlineProgress.error }}</p>
           <details v-if="outlineProgress.errorDetail"><summary>技术细节</summary><p>{{ outlineProgress.errorDetail }}</p></details>
         </div>
-        <p class="hint">{{ autoAdvanceOn ? '检查使用规划 API，每次请求一次；自动检查判定满足时切换到下一阶段，手动检查的结果只作提示。' : '检查使用规划 API，每次请求一次；结果仅作提示，不会自动切换阶段。' }}</p>
+        <p v-if="outlineProgress.autoNote && progressAuto" class="bbs-callout is-warning" role="status">{{ outlineProgress.autoNote }}</p>
+        <p class="hint">检查使用规划 API，每次请求一次，发送本阶段上次检查以来的正文和用户原话（至少最近 {{ progressMinMessages(outlineSettings.progressCheck.interval) }} 条，放不下的较早楼层改用逐楼摘要）。{{ autoAdvanceOn ? '自动检查判定满足时切换到下一阶段，手动检查的结果只作提示。' : '结果仅作提示，不会自动切换阶段。' }}</p>
       </div>
       <div v-if="confirmation?.kind === 'reconfirm'" class="confirmation">
         <p>先对照当前剧情看一遍下面的各阶段。确认后会以当前剧情为准，重新启用当前阶段。</p>
@@ -530,15 +548,20 @@ async function startAutoGeneration(confirmed = false, fromEmpty = false) {
       <section v-if="editor" class="planner-section" aria-label="未确认的规划草稿编辑器">
         <h3 ref="editorHeading" tabindex="-1">规划草稿 <span class="hint">{{ dirty ? '有未保存的修改' : '已保存，尚未加入计划' }}</span></h3>
         <p v-if="!draftCurrent" class="bbs-callout is-warning">草稿生成后剧情有变动，请核对后重新保存再加入计划。</p>
+        <div v-if="draftWarnings.length" class="bbs-callout is-warning" role="status">
+          <p>模型的回复有 {{ draftWarnings.length }} 处不合要求，生成草稿时已自动调整，请核对：</p>
+          <ul><li v-for="(warning, index) in draftWarnings" :key="index">{{ warning }}</li></ul>
+        </div>
         <fieldset :disabled="locked">
           <label>规划标题<input v-model="editor.title" class="bbs-input" :maxlength="L.title" /></label>
           <label>整体发展方向<textarea v-model="editor.premise" class="bbs-input" rows="3" :maxlength="L.premise" /></label>
           <label>整体约束（每行一条）<textarea v-model="editor.constraints" class="bbs-input" rows="3" /></label>
           <label>当时的要求<textarea v-model="editBrief" class="bbs-input" rows="3" maxlength="8000" /></label>
           <div class="planner-row">
-            <label class="planner-stage-pick">编辑哪个阶段<select v-model.number="selectedChapter" class="bbs-input"><option v-for="(stage, index) in editor.chapters" :key="index" :value="index">{{ index + 1 }} · {{ stage.title || '未命名阶段' }}</option></select></label>
+            <label class="planner-stage-pick">编辑哪个阶段<select v-model.number="selectedChapter" class="bbs-input"><option v-for="(stage, index) in editor.chapters" :key="index" :value="index">{{ index + 1 }} · {{ stage.title || '未命名阶段' }}{{ stageOverflow.has(index) ? '（超出注入上限）' : '' }}</option></select></label>
             <div class="actions"><button type="button" class="bbs-btn" :disabled="editor.chapters.length >= 12" @click="addStage">新增阶段</button><button type="button" class="bbs-btn" :disabled="editor.chapters.length <= 1" @click="removeStage">删除这个阶段</button></div>
           </div>
+          <p v-if="overflowText" class="bbs-callout is-warning">{{ overflowText }}</p>
           <div v-if="currentEdit" class="stage-editor">
             <label>阶段标题<input v-model="currentEdit.title" class="bbs-input" :maxlength="L.title" /></label>
             <label>阶段目标<textarea v-model="currentEdit.goal" class="bbs-input" rows="3" :maxlength="L.goal" /></label>
@@ -557,7 +580,7 @@ async function startAutoGeneration(confirmed = false, fromEmpty = false) {
 
       <details ref="apiEl" class="bbs-disclosure planner-api" :open="apiOpen" @toggle="apiOpen = ($event.target as HTMLDetailsElement).open">
         <summary>规划 API 设置 <span class="bbs-disclosure-meta">{{ outlineSettings.apiMode === 'notes' ? '用札记的 API' : '专用 API' }}</span></summary>
-        <p class="hint">默认使用札记中填写的 API（无需启用札记功能），也可为规划单独设置。修改后点击保存生效；密钥保存在酒馆的扩展设置中，分享设置备份前需删除。</p>
+        <p class="hint">默认使用札记中填写的 API（无需启用札记功能），也可为规划单独设置。修改后点击保存生效。密钥保存在酒馆的扩展设置（settings.json）中，分享 settings.json 或截图前需删除或遮盖；用「设置备份」导出的文件已去掉密钥。</p>
         <form @submit.prevent="saveApi">
           <fieldset :disabled="locked || protectedSettings">
             <label>用哪个 API<select v-model="apiMode" class="bbs-input" aria-label="API 模式"><option value="notes">用札记的 API（默认）</option><option value="independent">规划专用 API</option></select></label>
@@ -575,6 +598,7 @@ async function startAutoGeneration(confirmed = false, fromEmpty = false) {
                 <label>最大输出 tokens<input v-model.number="apiDraft.maxTokens" class="bbs-input" type="number" required min="256" max="65535" step="1" /></label>
                 <label>超时（秒）<input v-model.number="apiDraft.timeoutSec" class="bbs-input" type="number" required min="10" max="600" step="1" /></label>
               </div>
+              <p class="hint">最大输出默认 8000，思考型模型的思考过程也计入其中。规划经常被截断时调大；超过模型上限时服务商会报错，需按提示调小。</p>
               <label class="checkbox"><input v-model="apiDraft.stream" type="checkbox" class="bbs-switch" />流式输出</label>
             </template>
             <button type="submit" class="bbs-btn bbs-btn-primary">保存</button>

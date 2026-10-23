@@ -10,7 +10,9 @@
 import Icon from '@/components/Icon.vue';
 import BbsSelect from '@/components/BbsSelect.vue';
 import type { JsonValue } from '@/memory/types';
+import { toast } from '@/st/toast';
 import { computed } from 'vue';
+import { renameObjectKey } from './jsonTree';
 
 const props = defineProps<{ modelValue: JsonValue }>();
 const emit = defineEmits<{ 'update:modelValue': [JsonValue] }>();
@@ -52,11 +54,16 @@ function changeObjType(key: string, t: JType) {
   setObjChild(key, blankOf(t));
 }
 function renameKey(oldKey: string, ev: Event) {
-  const newKey = (ev.target as HTMLInputElement).value.trim();
-  if (!newKey || newKey === oldKey) return;
-  const o: Record<string, JsonValue> = {}; // 保序重建,避免改名跳到末尾
-  for (const k of objKeys.value) o[k === oldKey ? newKey : k] = asObject.value[k];
-  emit('update:modelValue', o);
+  const input = ev.target as HTMLInputElement;
+  const result = renameObjectKey(asObject.value, oldKey, input.value);
+  if (result.ok) {
+    emit('update:modelValue', result.value); // 保序重建,避免改名跳到末尾
+    return;
+  }
+  // 没有改名:输入框改回旧名,免得界面显示的名字与数据不一致
+  input.value = oldKey;
+  if (result.reason === 'duplicate') toast(`已有名为「${result.key}」的字段，没有改名。`, 'warning');
+  else if (result.reason === 'forbidden') toast(`「${result.key}」不能用作字段名，没有改名。`, 'warning');
 }
 function addObjField() {
   const o = { ...asObject.value };

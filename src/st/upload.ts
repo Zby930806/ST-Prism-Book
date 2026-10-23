@@ -72,15 +72,24 @@ async function compressToBase64(file: File): Promise<string> {
 }
 
 /**
- * 上传一张本地图片作悬浮球图标,返回服务器路径串;失败抛错(调用方提示用户)。
- * 文件名带一个序号避免覆盖(纯前端拼,不依赖时间戳——Date.now 在某些环境受限)。
+ * 给图片路径加上版本参数:文件名固定(覆盖同一个文件,不在服务器上留下一堆旧图),
+ * 路径字符串每次上传都不同,悬浮球和预览才会重新加载,而不是继续显示浏览器缓存里的旧图。
+ */
+export function withCacheBuster(path: string, stamp: number = Date.now()): string {
+  const clean = path.replace(/[?&]v=\d+$/, '');
+  return `${clean}${clean.includes('?') ? '&' : '?'}v=${stamp}`;
+}
+
+/**
+ * 上传一张本地图片作悬浮球图标,返回带版本参数的服务器路径串;失败抛错(调用方提示用户)。
+ * 文件名固定为 orb(扩展名随格式),每次上传覆盖同一个文件;返回的路径附带 ?v=时间戳,
+ * 换图后路径字符串变化,页面会重新加载图片。
  *
  * 直接 POST /api/images/upload(后端稳定端点):
  *   body { image: 纯base64, format, ch_name: 子目录, filename: 不含扩展名 }
  *   返回 { path }。认证头走 getRequestHeaders(含 CSRF token)。
  *   GIF 用 format='gif' 原样上传(保留动画);其余压成 'webp'。
  */
-let seq = 0;
 export async function uploadOrbImage(file: File): Promise<string> {
   if (!file.type.startsWith('image/')) throw new Error('请选择图片文件');
 
@@ -110,7 +119,7 @@ export async function uploadOrbImage(file: File): Promise<string> {
       image: base64,
       format,
       ch_name: 'baibai_book',
-      filename: `orb_${++seq}`,
+      filename: 'orb',
     }),
   });
   if (!res.ok) {
@@ -124,5 +133,5 @@ export async function uploadOrbImage(file: File): Promise<string> {
   }
   const data = (await res.json()) as { path?: string };
   if (!data.path) throw new Error('服务器未返回图片路径');
-  return data.path;
+  return withCacheBuster(data.path);
 }

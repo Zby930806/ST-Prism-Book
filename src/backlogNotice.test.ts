@@ -200,10 +200,12 @@ describe('发给正文模型前过滤', () => {
     expect(prompt.map(m => m.name)).toEqual(['角色', '玩家', '棱镜宝书']); // 没标记的不动
     expect(chat).toHaveLength(5);
   });
-  it('插件未启用时不动', () => {
+  it('插件未启用（总开关关闭或角色被排除）时也过滤带标记的提示，聊天本身不变', () => {
     vi.mocked(settings.engineActiveHere).mockReturnValue(false);
-    const prompt = [notice()];
-    expect(stripBacklogNoticesFromPrompt(prompt)).toBe(0);
-    expect(prompt).toHaveLength(1);
+    const chat = [ai(), notice(), user(), notice(false)];
+    const prompt = chat.map(m => ({ ...m }));
+    expect(stripBacklogNoticesFromPrompt(prompt)).toBe(1);
+    expect(prompt.map(m => m.name)).toEqual(['角色', '玩家', '棱镜宝书']);
+    expect(chat).toHaveLength(4);
   });
 });

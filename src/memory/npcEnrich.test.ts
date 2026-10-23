@@ -92,8 +92,13 @@ describe('回看原文:取材范围', () => {
       { name: '别人', desc: '高个', evidence: { desc: '酒保' } },
     ] }), [target]);
     expect(parsed.get('酒保A')?.fields).toEqual({ gender: '男', desc: '络腮胡,体型胖' });
+    // 原句对不上的字段不采用;给了内容却全被丢弃时结果里记下丢弃了几项,供调用方记为失败
     const forged = parseEnrichReply(enrichReply({ desc: '金发碧眼' }, { desc: '他有一头金发' }), [target]);
-    expect(forged.size).toBe(0);
+    expect(forged.get('酒保A')).toEqual({ fields: {}, evidence: {}, rejected: 1 });
+    // 超出长度上限(外貌 240 字)同样整字段不采用,不截断
+    const long = parseEnrichReply(enrichReply({ desc: '络腮胡'.repeat(90) }, { desc: '留着络腮胡的胖子' }), [target]);
+    expect(long.get('酒保A')).toEqual({ fields: {}, evidence: {}, rejected: 1 });
+    expect(parseEnrichReply(JSON.stringify({ npcs: [] }), [target]).size).toBe(0);
     expect(() => parseEnrichReply('好的,我来补全。', [target])).toThrow();
   });
 });
@@ -189,6 +194,29 @@ describe('回看原文:摘要时自动补档', () => {
     expect(engineState.lastError).toBe('');
     expect(chat[4].extra!.bbs_leaf!.delta.npcs?.add?.[0].name).toBe('酒保A');
     expect(readEnrichRecord(ctx.chatMetadata as Record<string, unknown>).npcs['酒保a']).toMatchObject({ status: 'failed', attempts: 1 });
+  });
+
+  it('模型给的字段超长或原句对不上而全被丢弃时记为失败,之后可再试一次,不当作「原文没有可补内容」', async () => {
+    const chat = barChat();
+    const ctx = useChat(chat);
+    let enrichCalls = 0;
+    vi.spyOn(client, 'requestViaMainApi').mockImplementation(async messages => {
+      if (isEnrich(messages)) { enrichCalls++; return enrichReply({ desc: '络腮胡'.repeat(90) }, { desc: '留着络腮胡的胖子' }); }
+      return addBartender;
+    });
+    await summarizeFloor(4);
+    const record = () => readEnrichRecord(ctx.chatMetadata as Record<string, unknown>).npcs['酒保a'];
+    expect(record()).toMatchObject({ status: 'failed', attempts: 1 });
+    expect(chat[4].extra!.bbs_leaf!.enriched).toBeUndefined();
+    chat.push(user('再来一杯。'), ai('酒保又倒了一杯。'));
+    recomputeDerived();
+    vi.mocked(client.requestViaMainApi).mockImplementation(async messages => {
+      if (isEnrich(messages)) { enrichCalls++; return enrichReply({ desc: '络腮胡,体型胖' }, { desc: '留着络腮胡的胖子' }); }
+      return response({ npcs: { update: [{ name: '酒保A', outfit: '围裙' }] } });
+    });
+    await summarizeFloor(6);
+    expect(enrichCalls).toBe(2);
+    expect(record()).toMatchObject({ status: 'filled', fields: { desc: '络腮胡,体型胖' } });
   });
 
   it('补过(或确认原文没有内容)的角色不再自动请求', async () => {
@@ -326,6 +354,11 @@ describe('回看原文:角色页手动补全', () => {
     const garbled = await previewManualEnrichment('酒保A');
     expect(garbled.status).toBe('error');
     expect(garbled.error?.message).toContain('没有按要求输出');
+    // 给了内容但超出长度上限:写明各字段的上限,不当作「原文没有可补内容」
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(enrichReply({ desc: '络腮胡'.repeat(90) }, { desc: '留着络腮胡的胖子' }));
+    const rejected = await previewManualEnrichment('酒保A');
+    expect(rejected.status).toBe('error');
+    expect(rejected.error?.hint).toContain('外貌不超过 240 字');
     chat[4].extra!.bbs_leaf!.delta = { npcs: { add: [{ name: '酒保A', title: '酒保', desc: '胖', gender: '男', age: '40', personality: '寡言' }] } };
     recomputeDerived();
     expect((await previewManualEnrichment('酒保A')).status).toBe('complete');

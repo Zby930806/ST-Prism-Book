@@ -22,6 +22,8 @@ const HOST_CLASS = 'bbs-fp-host';
 const MARK_ATTR = 'data-bbs-fp'; // 标在 .mes 上,防重复注入
 
 let enabled = false;
+// 上一次全量重扫时插件是否在当前聊天生效(面板是否按生效挂上);开关侦听据此判断要不要重扫
+let appliedActive = false;
 let observer: MutationObserver | null = null;
 const bound = new Set<string>(); // 已绑定的事件名(幂等)
 
@@ -101,7 +103,8 @@ function rebuildAll(): void {
   for (const idx of [...mountedByFloor.keys()]) removeFloor(idx);
   document.querySelectorAll(`.${HOST_CLASS}`).forEach(n => n.remove());
   document.querySelectorAll(`.mes[${MARK_ATTR}]`).forEach(n => n.removeAttribute(MARK_ATTR));
-  if (!activeNow()) return;
+  appliedActive = activeNow();
+  if (!appliedActive) return;
   const len = currentChatLen();
   const chat = getContext()?.chat ?? [];
   for (let i = 0; i < len; i++) if (isRealAiReply(chat[i])) injectFloor(i);
@@ -196,7 +199,7 @@ function stopObserver(): void {
 
 /* ============ 对外 ============ */
 
-/** 按开关同步楼内面板的有无(幂等)。 */
+/** 按开关同步楼内面板的有无(幂等)。on 只表示「楼层面板」开关;插件在当前聊天是否生效由 activeNow 另行判断。 */
 export function syncFloorPanel(on: boolean): void {
   enabled = on;
   if (!on) {
@@ -210,11 +213,22 @@ export function syncFloorPanel(on: boolean): void {
   rebuildAll();
 }
 
-/** 启动链调用一次:开关跟随(设置项 apiSettings.ui.showFloorPanel)。主题由组件内 ui.theme 响应式绑定。 */
+/**
+ * 启动链调用一次:跟随「楼层面板」开关(apiSettings.ui.showFloorPanel),也跟随插件总开关和角色排除名单——
+ * 关掉总开关或把当前角色加入排除名单时立即撤下已挂的面板,重新打开时立即补挂(rebuildAll 按 activeNow 决定)。
+ * 切换到别的角色由 CHAT_CHANGED 处理(那时 engineActiveHere 按新角色重新判断)。主题由组件内 ui.theme 响应式绑定。
+ * 当前角色名不是响应式数据,切换聊天后侦听器记下的旧值可能已经过时(例如从生效的聊天切到被排除的角色,
+ * 再把它移出名单时,新旧值相同),所以每次依赖变化都进回调,与面板的实际状态比较后再决定是否重扫。
+ */
 export function bindFloorPanel(): void {
+  let first = true;
   watch(
-    () => apiSettings.ui.showFloorPanel,
-    v => syncFloorPanel(!!v),
+    () => [!!apiSettings.ui.showFloorPanel, engineActiveHere()] as const,
+    ([show, active]) => {
+      if (!first && show === enabled && (show && active) === appliedActive) return;
+      first = false;
+      syncFloorPanel(show);
+    },
     { immediate: true },
   );
 }

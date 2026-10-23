@@ -1,4 +1,4 @@
-import { apiSettings } from '@/api/settings';
+import { apiSettings, type ApiSettings } from '@/api/settings';
 import {
   JAILBREAK_PROMPT,
   RESUMMARY2_MACROS,
@@ -31,7 +31,7 @@ export const PROMPT_METAS: PromptMeta[] = [
   {
     key: 'resummary',
     label: '总结提示词',
-    hint: '将多条楼层摘要合并为一条 L1 总结，字数由「字数档位」决定。',
+    hint: '将多条楼层摘要合并为一条 L1 总结，字数由「字数档位」决定；「摘要字数」高于档位默认值时按比例放大，最多 3 倍。',
     builtin: RESUMMARY_PROMPT,
     macros: RESUMMARY_MACROS,
   },
@@ -61,6 +61,15 @@ export const PROMPT_METAS: PromptMeta[] = [
 // 该任务是否已自定义(非空即视为已覆盖内置)
 export function isCustom(key: PromptKey): boolean {
   return key === 'jailbreak' ? apiSettings.taskContextMode === 'custom' : apiSettings.prompts[key].trim().length > 0;
+}
+
+/**
+ * 保存任务说明后的模式:原来是「禁用」的保持禁用,只保存内容(查看后点「完成」不会悄悄重新启用);
+ * 原来是内置或自定义的按内容切换——与内置相同为内置,否则为自定义。
+ */
+export function taskContextModeAfterSave(current: ApiSettings['taskContextMode'], sameAsBuiltin: boolean): ApiSettings['taskContextMode'] {
+  if (current === 'disabled') return 'disabled';
+  return sameAsBuiltin ? 'default' : 'custom';
 }
 
 /**

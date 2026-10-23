@@ -12,7 +12,7 @@ import type { WorldData, WorldbookSettings } from './types';
 // 上下文：目标书索引、触发条目全文、预算、参考书只读；读取楼层与依据范围；提示词档位与内容边界。
 vi.mock('@/memory/engine', () => ({ isAiFloor: (m: { is_user?: boolean; extra?: Record<string, unknown> }) => !!m && !m.is_user && !m.extra?.bbs_omit && !m.extra?.bbs_internal_notice }));
 
-const read: WorldbookSettings['read'] = { maxFloors: 24, maxChars: 24000, entryChars: 6000, refChars: 4000 };
+const read: WorldbookSettings['read'] = { maxFloors: 24, maxChars: 24000, entryChars: 6000, refChars: 4000, indexChars: 10000 };
 let tavern: ReturnType<typeof makeTavern>;
 beforeEach(() => {
   tavern = makeTavern({ chat: [
@@ -109,12 +109,51 @@ describe('请求内容', () => {
     expect(built.stats).toMatchObject({ indexed: 3, omitted: 0, related: 1 });
   });
 
-  it('索引超出预算时相关条目优先，并注明省略的条数', () => {
+  it('索引超出预算时相关条目优先；其余条目只列 uid 和标题，仍放不下时注明省略的条数', () => {
     const data = bookWith(400, { 999: { comment: '钟塔', key: ['钟塔'], content: '城北的旧钟塔。' } });
     const built = buildWorldbookContext({ ctx: tavern.ctx, target: { name: '大书', data }, references: [], plan: plan(), read, permission: 'create', contentBoundary: true });
     expect(built.stats.omitted).toBeGreaterThan(0);
-    expect(built.messages[1].content).toContain('[uid 999] 钟塔');
-    expect(built.messages[1].content).toContain('另有 ' + built.stats.omitted + ' 条没有列出');
+    expect(built.stats.compact).toBe(built.stats.omitted);
+    const target = built.messages[1].content;
+    expect(target).toContain('[uid 999] 钟塔');
+    expect(target).toContain('[其余条目：索引放不下，只列 uid 和标题，内容没有发送]');
+    expect(target).toContain('[uid 399] 条目399');
+    expect(target).toContain('对其余条目只能用 flag 提醒，或按 uid 追加内容、关键词');
+    expect(target).not.toContain('连标题也没有列出');
+    const huge = buildWorldbookContext({ ctx: tavern.ctx, target: { name: '超大书', data: bookWith(3000) }, references: [], plan: plan(), read, permission: 'create', contentBoundary: true });
+    const hidden = huge.stats.omitted - huge.stats.compact;
+    expect(hidden).toBeGreaterThan(0);
+    expect(huge.messages[1].content).toContain('另有 ' + hidden + ' 条连标题也没有列出');
+  });
+
+  it('索引的字数上限可在「读取范围」中调整', () => {
+    const data = bookWith(400);
+    const small = buildWorldbookContext({ ctx: tavern.ctx, target: { name: '书', data }, references: [], plan: plan(), read: { ...read, indexChars: 2000 }, permission: 'create', contentBoundary: true });
+    const large = buildWorldbookContext({ ctx: tavern.ctx, target: { name: '书', data }, references: [], plan: plan(), read: { ...read, indexChars: 40000 }, permission: 'create', contentBoundary: true });
+    expect(small.stats.indexed).toBeLessThan(large.stats.indexed);
+    expect(large.stats.omitted).toBe(0);
+  });
+
+  it('只有全文完整发送的条目可以整段改写：返回这些条目的 uid', () => {
+    const data = bookWith(0, {
+      2: { comment: '钟塔', key: ['钟塔'], content: '钟'.repeat(3000) },
+      3: { comment: '怀表', key: ['怀表'], content: '表'.repeat(100) },
+      4: { comment: '无关', key: ['沙漠'], content: '沙' },
+    });
+    const built = buildWorldbookContext({ ctx: tavern.ctx, target: { name: '书', data }, references: [], plan: plan(), read, permission: 'modify', contentBoundary: true });
+    expect([...built.fullUids].sort()).toEqual([3]);
+  });
+
+  it('单层正文最多读到「正文字数上限」；超出时记下被截断的楼层', () => {
+    tavern.ctx.chat.push(message('长'.repeat(10000)));
+    const long = planRead(tavern.ctx, null, read, { allowReread: true, floorText: read.maxChars })!;
+    const full = buildWorldbookContext({ ctx: tavern.ctx, target: { name: '书', data: bookWith(0) }, references: [], plan: long, read, permission: 'create', contentBoundary: true });
+    expect(full.messages.find(m => m.content.startsWith('[新的剧情正文'))!.content).toContain('长'.repeat(10000));
+    expect(full.stats.truncatedFloors).toEqual([]);
+    const tight = { ...read, maxChars: 4000 };
+    const cut = buildWorldbookContext({ ctx: tavern.ctx, target: { name: '书', data: bookWith(0) }, references: [], plan: planRead(tavern.ctx, null, tight, { allowReread: true, floorText: tight.maxChars })!, read: tight, permission: 'create', contentBoundary: true });
+    expect(cut.stats.truncatedFloors).toEqual([5]);
+    expect(cut.messages.find(m => m.content.startsWith('[新的剧情正文'))!.content).toContain('以下截断');
   });
 
   it('相关条目全文受字数上限约束；常驻条目排在触发条目之后', () => {

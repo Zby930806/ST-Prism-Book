@@ -5,7 +5,7 @@ import type { STContext } from '@/st/context';
 import * as sources from './source';
 import {
   DISCUSSION_DATA_KEY, discussionState, loadOutlineDiscussion, discussionWriteIssue,
-  appendDiscussionTurn, clearOutlineDiscussion, type DiscussionMessage,
+  appendDiscussionTurn, clearOutlineDiscussion, removeOldestDiscussionTurn, discussionRoom, DISCUSSION_LIMITS, type DiscussionMessage,
 } from './discussionStore';
 
 // 宿主、网络完全 mock；来源快照 / 正文 fingerprint 使用真实实现。
@@ -243,7 +243,7 @@ describe('输入与整轮容量限制', () => {
   it('第13轮明确拒绝，不保存且不丢弃最老记录；确认清空后才能继续', async () => {
     const original = Array.from({ length: 12 }, (_, i) => pair(`问${i}`, `答${i}`)).flat();
     seed(original); const previous = saved(), state = copy(discussionState);
-    await expect(append()).rejects.toThrow('请先确认清空讨论');
+    await expect(append()).rejects.toThrow('请先删除最早的一轮或确认清空讨论');
     expect(saved()).toBe(previous);
     expect(discussionState).toEqual(state);
     expect(discussionState.messages).toEqual(original);
@@ -257,7 +257,7 @@ describe('输入与整轮容量限制', () => {
     const original = Array.from({ length: 4 }, () => pair('问'.repeat(4000), '答'.repeat(8000))).flat();
     seed(original); expect(discussionWriteIssue()).toBe('');
     const previous = saved(), state = copy(discussionState);
-    await expect(append('问', '答')).rejects.toThrow('请缩短本轮内容或先确认清空讨论');
+    await expect(append('问', '答')).rejects.toThrow('请缩短本轮内容，或先删除最早的一轮、确认清空讨论');
     expect(saved()).toBe(previous);
     expect(discussionState).toEqual(state);
     expect(discussionState.messages).toEqual(original);
@@ -283,6 +283,24 @@ describe('输入与整轮容量限制', () => {
     expect(discussionState.messages).toHaveLength(24);
     expect(discussionState.messages.reduce((sum, message) => sum + message.content.length, 0)).toBe(48000);
     expect(ctx.saveMetadata).toHaveBeenCalledTimes(1);
+  });
+  it('删除最早的一轮：只删第一对问答，其余记录和时间原样保留；版本变化时不删', async () => {
+    const original = [...pair('最早的问题', '最早的回答'), ...pair('第二问', '第二答'), ...pair('第三问', '第三答')];
+    seed(original);
+    await expect(removeOldestDiscussionTurn(discussionState.revision - 1)).rejects.toThrow('版本已变化');
+    await removeOldestDiscussionTurn(discussionState.revision);
+    expect(discussionState.messages).toEqual(original.slice(2));
+    expect(saved()).toEqual(data(original.slice(2)));
+    seed([]);
+    await expect(removeOldestDiscussionTurn(discussionState.revision)).rejects.toThrow('没有可以删除的讨论');
+  });
+  it('发送前的余量：预留一条最长回答（8000 字）的空间，满 12 轮时不能再发', () => {
+    expect(DISCUSSION_LIMITS).toEqual({ question: 4000, answer: 8000, rounds: 12, total: 48000 });
+    expect(discussionRoom([])).toEqual({ used: 0, question: 4000, full: false });
+    const heavy = Array.from({ length: 3 }, () => pair('问'.repeat(4000), '答'.repeat(8000))).flat();
+    expect(discussionRoom(heavy)).toEqual({ used: 36000, question: 4000, full: false });
+    expect(discussionRoom([...heavy, ...pair('问'.repeat(1000), '答'.repeat(1000))])).toEqual({ used: 38000, question: 2000, full: false });
+    expect(discussionRoom(Array.from({ length: 12 }, () => pair()).flat()).full).toBe(true);
   });
 });
 

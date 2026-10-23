@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import BrandMark from '@/components/BrandMark.vue';
 import { openBook, ui } from '@/state/ui';
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { beyondSlop } from './orbGesture';
 
 /**
  * 悬浮球 —— 棱镜宝书伸进宿主页面的「书签坠」。
@@ -11,6 +12,9 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
  *
  * 行为(按用户要求):自由拖动 —— 拖到屏幕中间就停在中间;拖到接近左/右边缘才吸附贴边。
  * 贴边时半隐于边缘(只露一窄条),hover/聚焦/触摸才整条滑出;停在中间则常显。
+ * 点按与拖动:按下后移动不超过容差(鼠标 6px、触屏 10px,见 orbGesture.ts)算点按,悬浮球不动;
+ * 系统手势打断(pointercancel)不算点按,拖到一半被打断时回到原位。
+ * 自定义图标加载失败(图片被删、从别的酒馆导入了设置)时改显示默认的小狐狸。
  *
  * 位置存本机 localStorage(纯视觉态、各设备屏幕尺寸不同,同步反而会跑到屏幕外)。
  * 开关与自定义图标(ui.orbImage,服务器路径)跨设备同步,由设置承载。
@@ -21,7 +25,6 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 const orbW = computed(() => (ui.orbShape === 'bookmark' ? Math.round(ui.orbSize * 0.78) : ui.orbSize));
 const orbH = computed(() => ui.orbSize);
 const SNAP_ZONE = 56; // 松手时距左/右边缘 ≤ 此值即吸附贴边
-const CLICK_SLOP = 6; // 位移 < 此值视为点击而非拖动
 const POS_KEY = 'bbs.orb.pos.v1';
 
 type Dock = 'left' | 'right' | 'none';
@@ -53,9 +56,11 @@ const pos = reactive<OrbPos>(loadPos());
 const dragging = ref(false);
 const awake = ref(false); // hover/聚焦/拖动 → 贴边态整条滑出
 let activePointer: number | null = null;
+let pointerType = 'mouse';
 let startX = 0;
 let startY = 0;
-let moved = 0; // 累计位移,用于点击/拖动判定
+let dragMoved = false; // 位移已超过点按容差,进入拖动
+let startPos: OrbPos | null = null; // 按下时的位置,拖到一半被系统手势打断时还原
 
 // 状态栏与底部手势条的高度(安全区)。页面画到系统栏下面时,悬浮球不停在被盖住、点不到的位置。
 // 只在挂载和窗口尺寸变化时量一次,拖动时直接用。
@@ -115,14 +120,20 @@ const orbStyle = computed(() => {
 });
 
 const orbImage = computed(() => ui.orbImage.trim());
+// 自定义图标加载失败时改显示小狐狸;换了图标再试
+const imageFailed = ref(false);
+watch(orbImage, () => { imageFailed.value = false; });
+const showImage = computed(() => !!orbImage.value && !imageFailed.value);
 // 小狐狸在不同形状里的大小：书签按宽度，圆和方按边长留出边距，免得耳朵被裁掉。
 const foxSize = computed(() => Math.round(ui.orbShape === 'bookmark' ? orbW.value * 0.86 : ui.orbSize * (ui.orbShape === 'circle' ? 0.7 : 0.76)));
 
 // —— 拖动 ——
 function onDown(e: PointerEvent) {
   activePointer = e.pointerId;
+  pointerType = e.pointerType || 'mouse';
   dragging.value = true;
-  moved = 0;
+  dragMoved = false;
+  startPos = { ...pos };
   startX = e.clientX;
   startY = e.clientY;
   // 记录手指相对左上角的抓取点,拖动时保持
@@ -143,7 +154,11 @@ function currentLeft(): number {
 
 function onMove(e: PointerEvent) {
   if (!dragging.value || e.pointerId !== activePointer) return;
-  moved = Math.max(moved, Math.abs(e.clientX - startX) + Math.abs(e.clientY - startY));
+  if (!dragMoved) {
+    // 点按时手指的轻微抖动不挪动悬浮球,也不让它离开贴边;超过容差才开始拖动
+    if (!beyondSlop(e.clientX - startX, e.clientY - startY, pointerType)) return;
+    dragMoved = true;
+  }
   // 拖动中一律切 free 跟手(整条可见)
   pos.dock = 'none';
   pos.x = e.clientX - grabDX;
@@ -156,8 +171,8 @@ function onUp(e: PointerEvent) {
   dragging.value = false;
   activePointer = null;
 
-  if (moved < CLICK_SLOP) {
-    // 视为点击 → 打开棱镜宝书(贴边态保持)
+  if (!dragMoved) {
+    // 视为点按 → 打开棱镜宝书(位置与贴边状态都没动过)
     openBook();
     return;
   }
@@ -170,6 +185,18 @@ function onUp(e: PointerEvent) {
   else pos.dock = 'none';
   clampToViewport();
   savePos();
+}
+
+/** 系统手势接管(如安卓返回手势)时浏览器发 pointercancel:不算点按,拖到一半的回到原位。 */
+function onCancel(e: PointerEvent) {
+  if (!dragging.value || e.pointerId !== activePointer) return;
+  dragging.value = false;
+  activePointer = null;
+  if (dragMoved && startPos) {
+    Object.assign(pos, startPos);
+    clampToViewport();
+  }
+  dragMoved = false;
 }
 
 // —— 键盘可达 ——
@@ -196,7 +223,7 @@ onUnmounted(() => window.removeEventListener('resize', onResize));
 <template>
   <div
     class="bbs-orb"
-    :class="[`shape-${ui.orbShape}`, { 'is-dragging': dragging, 'has-image': !!orbImage }]"
+    :class="[`shape-${ui.orbShape}`, { 'is-dragging': dragging, 'has-image': showImage }]"
     :style="orbStyle"
     role="button"
     tabindex="0"
@@ -204,14 +231,14 @@ onUnmounted(() => window.removeEventListener('resize', onResize));
     @pointerdown="onDown"
     @pointermove="onMove"
     @pointerup="onUp"
-    @pointercancel="onUp"
+    @pointercancel="onCancel"
     @pointerenter="awake = true"
     @pointerleave="awake = false"
     @focus="awake = true"
     @blur="awake = false"
     @keydown="onKey"
   >
-    <img v-if="orbImage" :src="orbImage" class="bbs-orb-img" alt="" draggable="false" />
+    <img v-if="showImage" :src="orbImage" class="bbs-orb-img" alt="" draggable="false" @error="imageFailed = true" />
     <BrandMark v-else :size="foxSize" class="bbs-orb-brand" />
   </div>
 </template>

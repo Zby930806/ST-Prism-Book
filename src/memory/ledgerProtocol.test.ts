@@ -10,8 +10,8 @@ import { memory, recomputeDerived } from './store';
 import { createEmptyMemory, type SummaryDelta } from './types';
 import { refreshInjection, clearInjection, estimateInjectionTokenBreakdown } from './inject';
 import { LEDGER_ATTRIBUTES, LEDGER_PROTOCOL } from './ledgerProtocol';
-import { estimateTokens, slotBudget } from './budget';
-import { cleanBody, readItemsTagText, readVarsTagText, writeItemLogTag, writeVarLogTag, ensureHideRegexRegistered } from './timeTag';
+import { budgetLayout, estimateTokens, slotBudget } from './budget';
+import { cleanBody, readItemsTagText, readVarsTagText, timeTagPrompt, writeItemLogTag, writeVarLogTag, ensureHideRegexRegistered } from './timeTag';
 
 const saved = JSON.stringify(settings.apiSettings);
 const msg = (mes: string): STMessage => ({ name: '角色', is_user: false, is_system: false, mes, extra: {} });
@@ -67,14 +67,60 @@ describe('主模型只读账本协议', () => {
     refreshInjection();
     expect([...slots.values()].every(s => s === '')).toBe(true);
   });
-  it.each([2000, 6000, 50000])('预算%s包含账本且不挤掉原时间份额', budget => {
+  it.each([2000, 6000, 50000])('预算%s先按实际长度预留账本与时间指令,内置时间指令总能放下,合计不超预算', budget => {
     settings.apiSettings.memoryBudgetTokens = budget;
+    settings.apiSettings.autoSummaryEnabled = true;
+    const { slots } = useChat([msg('正文。\n<bbs_items>\n获得 罗盘 1\n</bbs_items>')]);
+    const layout = budgetLayout();
     expect(slotBudget('ledger')).toBe(estimateTokens(LEDGER_PROTOCOL));
+    expect(layout.ledgerReserved).toBe(estimateTokens(LEDGER_PROTOCOL));
+    expect(layout.timeTagReserved).toBe(estimateTokens(timeTagPrompt()));
+    expect(slotBudget('timeTag')).toBeGreaterThanOrEqual(Math.floor(budget * 0.05));
     expect(slotBudget('state')).toBeGreaterThan(0);
-    expect(slotBudget('timeTag')).toBe(Math.floor(budget * 0.05));
-    expect(['history', 'state', 'timeTag', 'recall', 'ledger'].reduce((n, slot) => n + slotBudget(slot as Parameters<typeof slotBudget>[0]), 0)).toBeLessThanOrEqual(budget);
-    const { slots } = useChat([]); refreshInjection();
+    // 向量记忆关闭:召回份额并入历史,召回槽不发送
+    expect(layout.recallActive).toBe(false);
+    expect(layout.history + layout.state + layout.timeTagReserved + layout.ledgerReserved).toBeLessThanOrEqual(budget);
+    refreshInjection();
     expect(slots.get('baibai_book_ledger_protocol')).toBe(LEDGER_PROTOCOL);
+    expect(slots.get('baibai_book_time_tag')).toBe(timeTagPrompt());
+    expect([...slots.values()].reduce((n, s) => n + estimateTokens(s), 0)).toBeLessThanOrEqual(budget);
+  });
+  it('没有旁注的聊天不注入账本说明,也不为它预留份额;旁注只在被隐藏的旧楼里时同样不注入', () => {
+    settings.apiSettings.memoryBudgetTokens = 6000;
+    const chat = [msg('普通正文。')];
+    const { slots } = useChat(chat);
+    refreshInjection();
+    expect(slots.get('baibai_book_ledger_protocol')).toBe('');
+    expect(budgetLayout().ledgerReserved).toBe(0);
+    expect(estimateInjectionTokenBreakdown().other).toBeLessThan(estimateTokens(LEDGER_PROTOCOL) + estimateTokens(timeTagPrompt()));
+    chat.unshift({ ...msg('旧楼。\n<bbs_vars>\n变更 能量 -1\n</bbs_vars>'), is_system: true });
+    refreshInjection();
+    expect(slots.get('baibai_book_ledger_protocol')).toBe('');
+    chat.push(msg('新楼。\n<bbs_vars source="baibai-book" status="settled">\n变更 能量 -2\n</bbs_vars>'));
+    refreshInjection();
+    expect(slots.get('baibai_book_ledger_protocol')).toBe(LEDGER_PROTOCOL);
+    expect(budgetLayout().ledgerReserved).toBe(estimateTokens(LEDGER_PROTOCOL));
+  });
+  it('关闭自动摘要时时间指令不发送、不预留,原时间份额归状态', () => {
+    settings.apiSettings.memoryBudgetTokens = 6000;
+    useChat([msg('普通正文。')]);
+    settings.apiSettings.autoSummaryEnabled = true;
+    const on = budgetLayout();
+    settings.apiSettings.autoSummaryEnabled = false;
+    const off = budgetLayout();
+    expect(off.timeTagReserved).toBe(0);
+    expect(off.state).toBeGreaterThan(on.state);
+    expect(off.state).toBe(Math.floor(6000 * 0.4));
+    expect(off.history).toBe(Math.floor(6000 * 0.6));
+  });
+  it('自定义时间指令超过上限时整段不发,也不占份额', () => {
+    settings.apiSettings.memoryBudgetTokens = 2000;
+    settings.apiSettings.autoSummaryEnabled = true;
+    settings.apiSettings.prompts.timeTag = '很长的自定义时间指令。'.repeat(200);
+    const { slots } = useChat([msg('普通正文。')]);
+    refreshInjection();
+    expect(slots.get('baibai_book_time_tag')).toBe('');
+    expect(budgetLayout().timeTagReserved).toBe(0);
   });
 });
 

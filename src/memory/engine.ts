@@ -1,23 +1,22 @@
 import { taskContextPrompt } from '@/memory/taskContext';
 import type { ChatMsg } from '@/api/client';
-import { mainApiAvailable, requestCompletion, requestViaMainApi } from '@/api/client';
+import { MAIN_API_TOKENS_SETTING, mainApiAvailable, requestCompletion, requestViaMainApi } from '@/api/client';
 import { ApiError, apiFailure, containsCompleteJson, describeFailure, isRetryable, looksLikeUnfinishedJson, partialReply, withContext } from '@/api/errors';
 import { apiSettings, engineActiveHere, getChannelForTask, normalizeBatchFullRecent, normalizeBatchMaxFloors } from '@/api/settings';
 import type { TaskType } from '@/api/settings';
 import type { STMessage, WorldInfoEntry } from '@/st/context';
 import { getContext, getCheckWorldInfo, getEjsTemplate, mainApiModelName, setMessageText } from '@/st/context';
 import { toast } from '@/st/toast';
-import { addSummary, classifyNpcPresence, deriveAfterDelta, deriveMemory, finalizeDelta, fmtVarOpsInline, getLeaf, invalidateSummaryAncestors, itemChangesOf, leafValid, makeLeafId, pruneBrokenComps, syncItemLogFromMessage } from './apply';
+import { addSummary, classifyNpcPresence, deriveAfterDelta, deriveMemory, finalizeDelta, fmtVarOpsInline, getLeaf, invalidateSummaryAncestors, itemChangesOf, leafValid, makeLeafId, pruneBrokenComps, relocateManualOps, syncItemLogFromMessage } from './apply';
 import { extractJsonObject } from './json';
 import { npcMentioned } from './npcLabel';
 import { planAutoEnrichment, readEnrichRecord, runAutoEnrichment, writeEnrichRecords, type EnrichRecordUpdate } from './npcEnrich';
-import { parseSummaryResponse, SummaryResponseError, type DroppedEvidence } from './summaryResponse';
+import { parseSummaryResponse, SummaryResponseError, describeDropped, type DroppedEvidence } from './summaryResponse';
 import { buildConditionPatchContext } from './conditionPatch';
 import { clearInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
 import { BATCH_SUMMARY_THINKING_CHECKLIST, buildBatchSummaryPrompt, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, isDeepSeekModel, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
 import { clampToTimeTags, cleanBody, explicitOpeningTime, hasStoryBody, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, latestStoryTime, parseTimeRange, storyTimeValue, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
-import type { ViewNode } from './select';
 import { memory, memoryWriteIssue, checkCompatibility, recomputeDerived, scheduleLeafFlush } from './store';
 import { legacyLeafIssue } from './compatibility';
 import type { LeafConflict, LeafExtra, MemSummary, NpcEnrichment, StoredDelta, SummaryDelta } from './types';
@@ -497,9 +496,15 @@ function importedHistoryCovers(floor: number): boolean {
   return floorInImportedRanges(floor, importedHistoryRanges());
 }
 
+/** 这一楼是否已由导入的旧总结覆盖(覆盖范围内的楼层不单独摘要,楼层面板据此不提供生成按钮)。 */
+export function floorCoveredByImport(floor: number): boolean {
+  return importedHistoryCovers(floor);
+}
+
 /**
  * 找出"待摘要"的 AI 楼层:AI 楼且没有有效叶子(无叶 / 陈旧)。由旧到新。
- * 新消息、regenerate 新 swipe、编辑过的楼,都因 leafValid=false 自然落入。
+ * 新消息、regenerate 新 swipe 因 leafValid=false 自然落入。编辑正文不使摘要失效,需手动重新摘要。
+ * 旧摘要未记录分页、当前又不在第一页的楼(无法确定归属)不算待摘要,只冻结该楼。
  */
 export function pendingAiFloors(chat: STMessage[]): number[] {
   if (getContext()?.chat === chat && memoryWriteIssue()) return [];
@@ -685,7 +690,7 @@ export async function handleGenerationIntercept(
     const text = [
       `【棱镜宝书】${BACKLOG_NOTICE_SENTINEL}`,
       `发生了什么：前面有楼层还没有摘要。为了让剧情连贯，要先把它们补上才能继续发消息。`,
-      `怎么做：点左下角魔法棒打开棱镜宝书，在「摘要」页的「未摘要楼层」里逐层补摘，或点「批量补摘」一次处理。`,
+      `怎么做：点左下角魔法棒打开棱镜宝书，在「摘要」页的「未摘要楼层」里点楼层号逐层补摘，或点上方的「补摘」按钮一次处理。只有状态栏、时间标签或思考内容、没有正文的楼层无法摘要，在同一处点「标为番外」跳过。`,
       `补摘失败：摘要页会写明原因（比如回复被截断、密钥不对），照提示调整，或换个 API 再试。`,
       `补摘完成后：关闭棱镜宝书窗口时，这条提示会自动删除，之后即可正常生成；它后面已有新消息时，请手动删除。这条提示不会发给正文模型。`
     ].join('{{newline}}');
@@ -746,19 +751,23 @@ export async function checkAutoSummary(): Promise<void> {
 }
 
 /**
- * 手动对单个楼层补摘(摘要页「未摘要楼层」列表逐楼点击)。
+ * 手动对单个楼层补摘(摘要页「未摘要楼层」列表逐楼点击、楼层面板「生成摘要」)。
  * 与自动触发解耦:不看 autoSummaryEnabled,只要总开关开着就执行;摘完跑收尾(隐藏+注入)。
+ * 返回 done=已生成;skipped=没有执行(有任务在进行、已有摘要、由导入的旧总结覆盖等);failed=执行了但没成功,原因在 lastError。
  */
-export async function summarizeFloor(floor: number): Promise<void> {
-  if (!engineActiveHere()) return;
-  if (busy) return;
+export async function summarizeFloor(floor: number): Promise<'done' | 'skipped' | 'failed'> {
+  if (!engineActiveHere()) return 'skipped';
+  if (busy) return 'skipped';
   const ctx = getContext();
-  if (!ctx) return;
+  if (!ctx) return 'skipped';
   const chat = ctx.chat ?? [];
-  if (importedHistoryCovers(floor)) return;
-  if (!isAiFloor(chat[floor]) || leafValid(chat[floor])) return;
+  if (importedHistoryCovers(floor)) return 'skipped';
+  if (!isAiFloor(chat[floor]) || leafValid(chat[floor])) return 'skipped';
+  engineState.lastError = '';
+  engineState.lastFailure = null;
   await runSummary(floor);
   await afterSummaryHideAndInject(chat);
+  return leafValid(chat[floor]) ? 'done' : 'failed';
 }
 
 /**
@@ -887,6 +896,8 @@ export async function setFloorOmit(floor: number, on: boolean): Promise<void> {
     const { bbs_omit: _omit, ...rest } = m.extra ?? {};
     m.extra = rest;
   }
+  // 标为番外后这楼的摘要不再参与重放:上面的手动修改移到之前最近一条有效摘要。
+  if (on) relocateManualOps(chat);
 
   // 标记随 chat 文件持久化;派生/注入/隐藏窗口按新口径重算。
   recomputeDerived();
@@ -1146,12 +1157,14 @@ export function resolveSender(task: TaskType): Sender | { error: string } {
 }
 
 /**
- * 给 API 失败补上「哪一楼/哪一步」和设置入口。主 API 拿不到结束原因,
- * 截断只能从半截 JSON 推断,建议改用可以单独设置输出上限的副 API 渠道。
+ * 给 API 失败补上「哪一楼/哪一步」和设置入口。主 API 拿不到结束原因,截断只能从半截 JSON 推断;
+ * 改法是调大「跟随主 API 时的最大回复」,或改用可以单独设置输出上限的副 API 渠道。
  */
 function failureFor(error: unknown, prefix: string, sender: Sender): unknown {
   if (sender.mainApi && error instanceof ApiError && error.kind === 'truncated') {
-    return apiFailure('truncated', `${prefix}：${error.title}`, '主 API 的服务商可能限制了单次输出长度；可以在设置 → 副 API 里给这个任务指派一个输出上限更高的渠道。', { detail: error.detail, partial: error.partial });
+    return apiFailure('truncated', `${prefix}：${error.title}`,
+      `可调大「${MAIN_API_TOKENS_SETTING}」（不能超过模型的单次输出上限；思考型模型的思考过程也计入输出），或在设置 → 副 API 里给这个任务指派输出上限更高的渠道。`,
+      { detail: error.detail, partial: error.partial });
   }
   return withContext(error, prefix, sender.settings);
 }
@@ -1222,6 +1235,8 @@ interface RunSummaryOptions {
   onPrepared?: (pending: PendingFloorSummary) => void;
   /** 回复结束后立即摘要:这层随后被重抽、续写或编辑时只放弃写入、不报错,新内容会另行摘要。 */
   quietIfSourceChanged?: boolean;
+  /** 重建记忆:替换叶子时不沿用 Horae 迁移来的状态(重建会按正文重新推算,沿用会重复累加) */
+  rebuild?: boolean;
 }
 
 /** 摘要期间聊天或这层正文变了(切聊天、重抽、续写、编辑),结果按旧内容写成,不能写入。 */
@@ -1242,8 +1257,10 @@ interface PendingFloorSummary {
   enriched: NpcEnrichment[];
   /** 提交时要写的补档记录(请求过的角色才有) */
   enrichRecords: EnrichRecordUpdate[];
-  /** 最后一次尝试中引文对不上、没有更新的角色位置或伤情(提交后提示) */
-  droppedEvidence: DroppedEvidence[];
+  /** 没有写入的更新:最后一次尝试中不合格而去掉的项、跳过的无效变量命令(提交后提示,并记在叶子上供楼层面板显示) */
+  dropped: DroppedEvidence[];
+  /** 重建记忆:不沿用迁移来的状态 */
+  rebuild: boolean;
   /** 聊天、来源正文、页码等没变才放行,否则抛错 */
   assertUnchanged: () => void;
 }
@@ -1326,11 +1343,16 @@ function buildLeafParts(
   return { text: llmString(delta.summary), delta: storedDelta, timeStart, timeEnd, conflicts };
 }
 
+/** 叶子上与 AI 结果分开保存的部分:页面上的手动修改、Horae 迁移得到的状态、没写入的内容。 */
+type LeafWithExtras = LeafExtra & { manualOps?: StoredDelta; migratedDelta?: StoredDelta; dropped?: DroppedEvidence[] };
+
 /**
  * 把一份 AI delta 固化成叶子并落到某 AI 楼(单楼与批量共用,保证两路径落叶口径一致)。
  *  - 时间:优先读该楼正文 <bbs_start>/<bbs_end> 标签(权威锚点);缺的那端用 AI 补的兜底。
  *  - plans.update/resolve 短序号 → 稳定 id:用传入的 stateBefore(本楼之前状态)的未了结计划顺序翻译。
  *  - 物品净变动写进正文 <bbs_items> 旁注(基准 = stateBefore.items)。
+ *  - 替换旧叶子时沿用旧叶子上单独保存的手动修改(manualOps)和迁移状态(migratedDelta),与补档结果同样处理;
+ *    重建记忆时不沿用迁移状态(重建按正文重新推算,沿用会重复累加)。
  * 不做 recompute/flush/注入——由调用方在合适时机统一收尾(批量每楼完成后刷新)。
  */
 function applyLeafForFloor(
@@ -1339,7 +1361,7 @@ function applyLeafForFloor(
   delta: SummaryDelta,
   stateBefore: ReturnType<typeof deriveMemory>,
   replaceLeaf?: LeafExtra,
-  enriched: NpcEnrichment[] = [],
+  extras: { enriched?: NpcEnrichment[]; dropped?: DroppedEvidence[]; rebuild?: boolean } = {},
 ): void {
   if (!chat[aiFloor]) {
     throw new Error(`摘要没有保存：楼层 #${aiFloor} 已经不在了（可能在请求期间被删除）。`);
@@ -1351,7 +1373,7 @@ function applyLeafForFloor(
   const storedDelta = parts.delta;
   const { timeStart, timeEnd } = parts;
 
-  const leaf: LeafExtra = {
+  const leaf: LeafWithExtras = {
     id: replaceLeaf?.id ?? makeLeafId(),
     text: parts.text,
     delta: storedDelta,
@@ -1363,7 +1385,11 @@ function applyLeafForFloor(
     v: 1,
   };
   if (parts.conflicts?.length) leaf.conflicts = parts.conflicts;
-  if (enriched.length) leaf.enriched = enriched;
+  if (extras.enriched?.length) leaf.enriched = extras.enriched;
+  const previous = replaceLeaf as LeafWithExtras | undefined;
+  if (previous?.manualOps && Object.keys(previous.manualOps).length) leaf.manualOps = previous.manualOps;
+  if (!extras.rebuild && previous?.migratedDelta && Object.keys(previous.migratedDelta).length) leaf.migratedDelta = previous.migratedDelta;
+  if (extras.dropped?.length) leaf.dropped = extras.dropped.map(d => ({ ...d }));
   if (replaceLeaf) invalidateSummaryAncestors(replaceLeaf.id);
   chat[aiFloor].extra = { ...(chat[aiFloor].extra ?? {}), bbs_leaf: leaf };
   // 叶子正文/摘要已变 → 召回读到的向量内容会变,立即失效召回缓存(防重生成/翻页复用旧召回)。
@@ -1382,6 +1408,23 @@ function applyLeafForFloor(
 }
 
 /**
+ * 清洗后没有故事正文的楼层(只有状态栏、时间标签、思考或旁注)不请求 AI,会一直待摘要。
+ * 不自动写空摘要:正文可能是被自定义剔除标签等规则清洗掉的,自动写空会把真有剧情的楼隐藏起来。
+ */
+export function noStoryBodyMessage(floors: number[]): string {
+  const list = floors.map(f => '#' + f).join('、');
+  const one = floors.length === 1;
+  return `楼层 ${list} 清洗后没有故事正文（只有状态栏、时间标签、思考或旁注），没有请求 AI，${one ? '这一楼' : '这些楼层'}会一直待摘要。`
+    + `处理方法：编辑${one ? '这层' : '这些楼层'}的正文；或在摘要页「未摘要楼层」中点「标为番外」跳过（也可在「设置 → 基本设置」启用楼层面板后，在该楼点番外键）；或删除${one ? '这一楼' : '这些楼层'}。`;
+}
+
+/** 这一楼清洗后是否还有故事正文(未摘要楼层列表据此给出「标为番外」)。 */
+export function floorHasStoryBody(floor: number): boolean {
+  const m = getContext()?.chat?.[floor];
+  return !!m && typeof m.mes === 'string' && hasStoryBody(m.mes);
+}
+
+/**
  * 单楼摘要的「纯工作」部分:发请求 + 解析 + 落叶 + 刷新派生/注入。
  * **不管理 busy / 不做守卫 / 不触发 checkResummary**——由调用方(runSummaryInner 或批量回退)负责。
  * 失败(请求报错 / JSON 无效)直接抛出,调用方决定如何处理。
@@ -1390,7 +1433,7 @@ async function summarizeFloorWork(
   chat: STMessage[],
   aiFloor: number,
   sender: Sender,
-  options: Pick<RunSummaryOptions, 'replaceLeaf' | 'onRequestStart' | 'initializeOpening' | 'onPrepared'> = {},
+  options: Pick<RunSummaryOptions, 'replaceLeaf' | 'onRequestStart' | 'initializeOpening' | 'onPrepared' | 'rebuild'> = {},
 ): Promise<void> {
   const ctx = getContext();
   if (!ctx) throw new Error('酒馆上下文还没准备好。');
@@ -1400,9 +1443,7 @@ async function summarizeFloorWork(
 
   const covered = options.replaceLeaf ? coveredBeforeFloor(chat, aiFloor) : coveredSet(chat);
   const targets = floorTargets(chat, aiFloor, covered);
-  if (!hasStoryBody(chat[aiFloor].mes)) {
-    throw new Error(`楼层 #${aiFloor} 没有可提取的故事正文（只有时间标签、思考或旁注），这次没有请求 AI。请先检查这层楼的内容。`);
-  }
+  if (!hasStoryBody(chat[aiFloor].mes)) throw new Error(noStoryBodyMessage([aiFloor]));
   if (options.initializeOpening) {
     const metadata = ctx.chatMetadata;
     const chatId = ctx.getCurrentChatId?.();
@@ -1499,13 +1540,16 @@ async function summarizeFloorWork(
   );
   assertUnchanged();
   options.onRequestStart?.();
-  // 最后一次尝试时,对不上正文的角色位置或伤情只去掉这几项、照常保存其余内容(见 parseSummaryResponse)
-  let droppedEvidence: DroppedEvidence[] = [];
+  // 最后一次尝试时,不合格的更新只去掉这几项、照常保存其余内容(见 parseSummaryResponse);无效的变量命令任何一次都只跳过
+  let dropped: DroppedEvidence[] = [];
+  let skipped: DroppedEvidence[] = [];
+  const openSecrets = stateBefore.secrets.filter(s => s.status === 'open');
   const delta = await sendAndParse(request => { assertUnchanged(); return sender.send(request); }, messages, (raw, finalAttempt) => {
     if (extractJsonObject(raw) === null) {
       const unfinished = unfinishedReply(raw);
       if (unfinished) throw unfinished;
     }
+    skipped = [];
     const d = parseSummaryResponse(raw, {
       requireStateChanges: builtin,
       sourceContent: content,
@@ -1513,8 +1557,10 @@ async function summarizeFloorWork(
       conditionContext: { ...stateBefore, content, strict: builtin },
       npcRoster: stateBefore.npcs.map(n => n.name),
       userName: ctx.name1,
-      finalize: value => finalizeDelta(value, openPlansOrdered, stateBefore.lifeDetails, stateBefore.secrets.filter(s => s.status === 'open')),
-      ...(finalAttempt ? { onDroppedEvidence: (dropped: DroppedEvidence[]) => { droppedEvidence = dropped; } } : {}),
+      finalize: value => finalizeDelta(value, openPlansOrdered, stateBefore.lifeDetails, openSecrets),
+      refCounts: { plans: openPlansOrdered.length, lifeDetails: stateBefore.lifeDetails.length, secrets: openSecrets.length },
+      onSkipped: list => { skipped = list; },
+      ...(finalAttempt ? { onDroppedEvidence: (list: DroppedEvidence[]) => { dropped = list; } } : {}),
     });
     if (initialStoryTime()) {
       // 只补缺失端点，不能把后续楼层的完整日期降为正文中的“夜晚”等时段。
@@ -1546,7 +1592,14 @@ async function summarizeFloorWork(
   // 到建档之前的原文里检索并发一个小请求;失败不影响本楼摘要,只在提交时记下状态。
   // 重新摘要(含先对比)只沿用原叶子的补档结果,不发新请求;设置里关闭时同样只沿用、不请求。
   const parts = buildLeafParts(chat, aiFloor, delta, stateBefore);
-  const after = deriveAfterDelta(stateBefore, parts.delta, { time: parts.timeEnd || parts.timeStart || '', floor: aiFloor });
+  // 替换旧叶子时,它单独保存的手动修改和迁移状态会沿用到新叶子(见 applyLeafForFloor),这里一并算进本楼之后的状态:
+  // 手动新增的角色才认得出,原来的补档结果不会因为「新结果里没有这个角色」而被丢掉。重建不沿用迁移状态。
+  const previous = options.replaceLeaf;
+  const after = deriveAfterDelta(stateBefore, parts.delta, {
+    time: parts.timeEnd || parts.timeStart || '', floor: aiFloor,
+    migratedDelta: options.rebuild ? undefined : previous?.migratedDelta,
+    manualOps: previous?.manualOps,
+  });
   const enrichPlan = planAutoEnrichment({
     chat, aiFloor, beforeIndex, before: stateBefore, after, floorText,
     replaceLeaf: options.replaceLeaf, charName: ctx.name2,
@@ -1563,7 +1616,8 @@ async function summarizeFloorWork(
     replaceLeaf: options.replaceLeaf,
     enriched: enrichment.entries,
     enrichRecords: enrichment.records,
-    droppedEvidence,
+    dropped: [...dropped, ...skipped],
+    rebuild: !!options.rebuild,
     assertUnchanged,
   };
   // 预览模式:交出结果就停,不落叶;用户选「用新的」后由 applyFloorPreview 提交。
@@ -1571,26 +1625,29 @@ async function summarizeFloorWork(
   commitFloorSummary(pending);
 }
 
-/** 摘要已保存、但有几项引文对不上正文而没有更新时的提示:说清楚哪些没更新、原因和改法。 */
-function droppedEvidenceNotice(floor: number, dropped: DroppedEvidence[]): string {
-  const userName = getContext()?.name1?.trim() || '主角';
-  const who = (d: DroppedEvidence) => d.name === 'protagonist' ? userName : d.name || '某个角色';
-  const located = [...new Set(dropped.filter(d => d.kind === 'location').map(who))];
-  const injured = [...new Set(dropped.filter(d => d.kind === 'condition').map(who))];
-  const parts = [located.length ? `${located.join('、')}的位置` : '', injured.length ? `${injured.join('、')}的伤情` : ''].filter(Boolean);
-  return `楼层 #${floor} 的摘要已保存，但${parts.join('和')}没有更新：模型给出的引文与本楼正文对不上，已保留原记录。需要时可在「角色」页手动修改。`;
+/**
+ * 摘要已保存、但有几项更新没有写入时的提示:哪几项、为什么、原记录不变,以及改法。
+ * 只有跳过的无效变量命令时,说明跳过了几条。
+ */
+export function droppedNotice(floor: number, dropped: DroppedEvidence[], userName = getContext()?.name1?.trim() || '主角'): string {
+  const items = dropped.map(d => { const { what, why } = describeDropped(d, userName); return `${what}（${why}）`; });
+  const shown = items.slice(0, 5).join('；') + (items.length > 5 ? `；另有 ${items.length - 5} 项` : '');
+  if (dropped.every(d => d.kind === 'vars')) {
+    return `楼层 #${floor} 的摘要已保存。${dropped.map(d => describeDropped(d, userName).why).join('；')}。`;
+  }
+  return `楼层 #${floor} 的摘要已保存，以下 ${items.length} 项更新没有写入，原记录保持不变：${shown}。需要时可在「角色」「物品」等页手动修改，或在楼层面板重新生成本楼摘要。`;
 }
 
 /** 落叶并刷新派生/注入/落盘/向量;提交前再核对一次聊天和这层正文没变。 */
 function commitFloorSummary(p: PendingFloorSummary): void {
   p.assertUnchanged();
-  applyLeafForFloor(p.chat, p.aiFloor, p.delta, p.stateBefore, p.replaceLeaf, p.enriched);
+  applyLeafForFloor(p.chat, p.aiFloor, p.delta, p.stateBefore, p.replaceLeaf, { enriched: p.enriched, dropped: p.dropped, rebuild: p.rebuild });
   engineState.lastRunAt = Date.now();
   // 补档记录随叶子一起提交:预览后选「保留现在的」时不写,之后仍可再补
   writeEnrichRecords(p.enrichRecords);
-  if (p.droppedEvidence.length) {
-    const notice = droppedEvidenceNotice(p.aiFloor, p.droppedEvidence);
-    console.log('[棱镜宝书]', notice, p.droppedEvidence);
+  if (p.dropped.length) {
+    const notice = droppedNotice(p.aiFloor, p.dropped);
+    console.log('[棱镜宝书]', notice, p.dropped);
     toast(notice, 'warning');
   }
 
@@ -1616,6 +1673,12 @@ async function runSummaryInner(aiFloor: number, options: RunSummaryOptions = {})
   if (!isAiFloor(chat[aiFloor])) { console.log('[棱镜宝书] runSummary 早退:非 AI 楼', aiFloor); return; }
   if (options.replaceLeaf && getLeaf(chat[aiFloor]) !== options.replaceLeaf) {
     engineState.lastError = `重新摘要没有进行：楼层 #${aiFloor} 的原摘要已经变了。`;
+    return;
+  }
+  // 旧摘要没有记录分页、这一楼又不在第一页:不能确定旧摘要属于哪一页,不摘要也不覆盖(翻回第一页即恢复)
+  if (!options.replaceLeaf && legacyLeafIssue(chat[aiFloor]?.extra?.bbs_leaf, chat[aiFloor])) {
+    engineState.lastError = `楼层 #${aiFloor} 的旧摘要没有记录分页，不能确定属于当前哪一页，这一页不摘要、不注入，也不覆盖旧摘要；翻回第一页即恢复。`;
+    engineState.lastFailure = null;
     return;
   }
   console.log('[棱镜宝书] runSummary 即将发请求,', sender.label);
@@ -1768,13 +1831,18 @@ async function batchBackfillWork(opts: BatchBackfillOpts): Promise<BatchBackfill
   const chat = ctx.chat ?? [];
 
   // 目标楼层:显式传入则过滤成「当前确实待摘的 AI 楼」(防陈旧),否则取全部待摘
+  // 重建跳过继承种子、导入历史覆盖的楼层,以及无法确定分页归属的旧摘要(不覆盖)
   const pending = new Set(opts.regenerate
-    ? chat.map((m, i) => isAiFloor(m) && !getLeaf(m)?.seed && !importedHistoryCovers(i) ? i : -1).filter(i => i >= 0)
+    ? chat.map((m, i) => isAiFloor(m) && !getLeaf(m)?.seed && !importedHistoryCovers(i) && !legacyLeafIssue(m?.extra?.bbs_leaf, m) ? i : -1).filter(i => i >= 0)
     : pendingAiFloors(chat));
-  const floors = [...new Set(opts.floors ?? [...pending])].filter(f => pending.has(f)).sort((a, b) => a - b);
+  const requested = [...new Set(opts.floors ?? [...pending])].filter(f => pending.has(f)).sort((a, b) => a - b);
+  // 清洗后没有故事正文的楼层不请求 AI:补摘时跳过并在结束后说明改法(重建时保留原摘要)
+  const bodyless = requested.filter(f => !hasStoryBody(chat[f].mes));
+  const floors = requested.filter(f => hasStoryBody(chat[f].mes));
   const total = floors.length;
   const queued = new Map(floors.map(f => [f, { message: chat[f], text: chat[f].mes, swipe: chat[f].swipe_id }]));
   if (total === 0) {
+    if (bodyless.length && !opts.regenerate) { engineState.lastError = noStoryBodyMessage(bodyless); engineState.lastFailure = null; }
     await afterSummaryHideAndInject(chat);
     return { done: 0, total: 0, cancelled: false };
   }
@@ -1786,6 +1854,7 @@ async function batchBackfillWork(opts: BatchBackfillOpts): Promise<BatchBackfill
   busy = true;
   engineState.running = true;
   engineState.lastError = '';
+  engineState.lastFailure = null;
   // 批量状态(模块级单例)→ UI 跨关窗重开可恢复进度/取消
   batchState.running = true;
   batchState.cancelRequested = false;
@@ -1803,8 +1872,20 @@ async function batchBackfillWork(opts: BatchBackfillOpts): Promise<BatchBackfill
   // 合并请求一次写入多层:每组写完就合并总结,后面请求的前情提要保持精简。
   // 总结失败就停下(原因已写入 lastError),免得后面的请求带着越积越长的摘要继续发。
   let consolidationFailed = false;
+  const queue: BatchStep[] = [...plan.steps];
+  // 逐楼摘要之间的总结偶尔失败(网络、服务商临时故障)、之后又合并成功时,清掉这条已过时的报错,
+  // 免得批量全部完成后摘要页仍显示「总结未完成」。暂停自动重发(截断等)的批次保留原因。
+  let resummaryError = '';
+  const clearStaleResummaryError = (): void => {
+    if (resummaryError && !resummaryHold.active && engineState.lastError === resummaryError) {
+      engineState.lastError = '';
+      engineState.lastFailure = null;
+    }
+    resummaryError = '';
+  };
   try {
-    for (const step of plan.steps) {
+    while (queue.length) {
+      const step = queue.shift()!;
       if (batchState.cancelRequested) { cancelled = true; break; }
       if (getContext()?.chat !== chat || getContext()?.getCurrentChatId?.() !== chatId) {
         throw new Error('聊天切换了，批量补摘已停止，请回到原来的聊天继续。');
@@ -1817,25 +1898,48 @@ async function batchBackfillWork(opts: BatchBackfillOpts): Promise<BatchBackfill
       }
       batchState.stage = step.lite ? 'lite' : 'full';
       if (step.lite) {
-        await summarizeLiteChunk(chat, step.floors, sender);
-        consolidationFailed = !(await consolidateAll());
+        // 一组合并摘要最终没写全时:先保存缺口之前的楼层;其余对半拆开重试,拆到一层改为逐层完整摘要,仍失败才停下。
+        // 回复被截断或上下文超长时直接对半拆。拆出的步骤紧接着处理,不在中间留下缺口。
+        let rest: number[];
+        try {
+          rest = await summarizeLiteChunk(chat, step.floors, sender);
+        } catch (error) {
+          if (!liteSplittable(error) || step.floors.length < 1) throw error;
+          console.log('[棱镜宝书] 合并摘要未保存,拆小重试:', step.floors, error instanceof Error ? error.message : error);
+          rest = step.floors;
+        }
+        const saved = step.floors.length - rest.length;
+        if (saved > 0) {
+          done += saved;
+          consolidationFailed = !(await consolidateAll());
+        }
+        if (rest.length && !consolidationFailed) {
+          // 对半拆开;拆到一层的改为逐层完整摘要
+          const half = Math.ceil(rest.length / 2);
+          const retry: BatchStep[] = (rest.length === 1 ? [rest] : [rest.slice(0, half), rest.slice(half)])
+            .map(group => ({ lite: group.length > 1, floors: group }));
+          queue.unshift(...retry);
+          batchState.steps += retry.length;
+        }
       } else {
         const f = step.floors[0];
         const replaceLeaf = opts.regenerate ? getLeaf(chat[f]) ?? undefined : undefined;
-        await summarizeFloorWork(chat, f, sender, { replaceLeaf });
+        await summarizeFloorWork(chat, f, sender, { replaceLeaf, rebuild: !!opts.regenerate });
+        done += 1;
+        // 每楼写完跑一轮总结(与平时自动摘要一致),逐楼请求带的前情不会越积越长。
+        // 重建时只合并覆盖楼层都早于下一个待重建楼层的根节点,免得合并后又被下一楼的重建作废。
+        const nextFloor = opts.regenerate ? queue[0]?.floors[0] : undefined;
+        const pass = await resummaryPass(opts.regenerate && nextFloor !== undefined ? { beforeFloor: nextFloor } : {});
+        if (pass.failed) resummaryError = engineState.lastError;
+        else if (pass.made) clearStaleResummaryError();
       }
-      done += step.floors.length;
       batchState.done = done;
       batchState.stepsDone++;
       batchState.lastDoneAt = Date.now();
       if (consolidationFailed) break;
     }
-    // 连锁触发总结(可能跨多层),失败写 lastError 不影响已落叶子。
-    // 合并请求写入的摘要多,把能合并的都合并完;逐层补摘维持原来的一轮。
-    if (!cancelled && !consolidationFailed) {
-      if (plan.liteSteps > 0) await consolidateAll();
-      else await checkResummary();
-    }
+    // 结束时把能合并的都合并完(可能跨多层);失败写 lastError,不影响已落的叶子。
+    if (!cancelled && !consolidationFailed && await consolidateAll()) clearStaleResummaryError();
   } catch (e) {
     recordFailure(e);
   } finally {
@@ -1845,38 +1949,30 @@ async function batchBackfillWork(opts: BatchBackfillOpts): Promise<BatchBackfill
     batchState.cancelRequested = false;
     batchState.stage = '';
   }
+  if (bodyless.length && !opts.regenerate && !engineState.lastError) {
+    engineState.lastError = noStoryBodyMessage(bodyless);
+    engineState.lastFailure = null;
+  }
   if (getContext()?.chat === chat) await afterSummaryHideAndInject(chat);
   return { done, total, cancelled };
 }
 
+/** 合并摘要失败后可以拆小重试的情况:回复未通过校验、被截断、上下文超长。密钥、额度、网络等拆小也不会成功。 */
+function liteSplittable(error: unknown): boolean {
+  return error instanceof SummaryResponseError || (error instanceof ApiError && (error.kind === 'truncated' || error.kind === 'context-length'));
+}
+
 /**
- * 连续检查总结,直到没有可合并的(checkResummary 每轮每层最多合并一组);用户点了取消就先停。
- * 失败或总结任务没有可用 API 时返回 false,原因留在 lastError。
+ * 连续检查总结,直到没有可合并的(每轮每层最多合并一组);用户点了取消就先停。
+ * 失败、总结任务没有可用 API,或这批节点的总结已因失败暂停自动重发时返回 false,原因留在 lastError。
  */
 async function consolidateAll(maxRounds = 100): Promise<boolean> {
-  const before = engineState.lastError;
   for (let i = 0; i < maxRounds && !batchState.cancelRequested; i++) {
-    const made = await checkResummary();
-    if (engineState.lastError !== before) return false;
+    const { made, failed } = await resummaryPass({ holdIsFailure: true });
+    if (failed) return false;
     if (!made) return true;
   }
   return true;
-}
-
-/** 合并摘要的前情提要上限(字):总结来不及合并时,也不让每次请求带上全部旧摘要。 */
-const LITE_HISTORY_MAX_CHARS = 12000;
-
-/** 取时间上最近的若干节点,总字数不超过上限(至少保留最近一条)。 */
-function recentHistory(nodes: ViewNode[], maxChars: number): ViewNode[] {
-  const picked: ViewNode[] = [];
-  let used = 0;
-  for (let i = nodes.length - 1; i >= 0; i--) {
-    const size = nodes[i].text.length;
-    if (picked.length && used + size > maxChars) break;
-    picked.unshift(nodes[i]);
-    used += size;
-  }
-  return picked;
 }
 
 /** 合并摘要里一层的结果。 */
@@ -1888,9 +1984,12 @@ interface LiteItem {
 
 /**
  * 解析合并摘要:根键 floors 为数组,材料中的每个楼层恰好一条非空 summary。
- * 格式问题抛 SummaryResponseError,由 sendAndParse 附上原因重试。
+ * 前几次尝试:任何格式问题抛 SummaryResponseError,由 sendAndParse 附上原因重试。
+ * 最后一次尝试(finalAttempt):材料里的楼层都写全了时,忽略材料以外的楼层号、同层重复的取第一条;
+ * 有漏写或空摘要的楼层时,只采用第一个缺口之前的连续楼层(不在中间留缺口),其余交给调用方拆小重试。
+ * 既有缺口、又出现材料以外的楼层号或同层重复时多半是编号整体错位,仍整组不保存,免得把摘要挂到错误的楼层上。
  */
-function parseLiteReply(raw: string, floors: number[]): Map<number, LiteItem> {
+function parseLiteReply(raw: string, floors: number[], finalAttempt = false): { items: Map<number, LiteItem>; rest: number[] } {
   const d = extractJsonObject<Record<string, unknown>>(raw);
   if (d === null) {
     const unfinished = unfinishedReply(raw);
@@ -1901,38 +2000,62 @@ function parseLiteReply(raw: string, floors: number[]): Map<number, LiteItem> {
   if (!Array.isArray(d.floors)) throw new SummaryResponseError('结果的根键 floors 必须是数组，每项包含 floor、summary、timeStart、timeEnd。');
   const want = new Set(floors);
   const out = new Map<number, LiteItem>();
+  const seen = new Set<number>();
+  let foreign = '';
+  let repeated = 0;
   for (const value of d.floors as unknown[]) {
     const item = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
-    if (!item) throw new SummaryResponseError('floors 中的每一项都必须是对象。');
+    if (!item) {
+      if (!finalAttempt) throw new SummaryResponseError('floors 中的每一项都必须是对象。');
+      foreign = foreign || '非对象条目';
+      continue;
+    }
     const label = llmScalar(item.floor);
     const match = label.match(/^(?:楼层)?\s*#?\s*(\d+)$/);
     const floor = match ? Number(match[1]) : NaN;
-    if (!want.has(floor)) throw new SummaryResponseError(`floors 中出现了材料以外的楼层「${label || '空'}」；只为材料中的楼层各写一条，floor 填楼层编号数字。`);
-    if (out.has(floor)) throw new SummaryResponseError(`楼层 #${floor} 写了不止一条；每层只写一条。`);
+    if (!want.has(floor)) {
+      if (!finalAttempt) throw new SummaryResponseError(`floors 中出现了材料以外的楼层「${label || '空'}」；只为材料中的楼层各写一条，floor 填楼层编号数字。`);
+      foreign = foreign || `「${label || '空'}」`;
+      continue;
+    }
+    if (seen.has(floor)) {
+      if (!finalAttempt) throw new SummaryResponseError(`楼层 #${floor} 写了不止一条；每层只写一条。`);
+      repeated = floor;
+      continue;
+    }
+    seen.add(floor);
     const summary = llmString(item.summary);
-    if (!summary) throw new SummaryResponseError(`楼层 #${floor} 的 summary 为空。`);
+    if (!summary) {
+      if (!finalAttempt) throw new SummaryResponseError(`楼层 #${floor} 的 summary 为空。`);
+      continue;
+    }
     out.set(floor, { summary, timeStart: storyTimeValue(llmScalar(item.timeStart)), timeEnd: storyTimeValue(llmScalar(item.timeEnd)) });
   }
   const missing = floors.filter(f => !out.has(f));
-  if (missing.length) throw new SummaryResponseError(`漏掉了楼层 ${missing.map(f => '#' + f).join('、')}；材料中的每个楼层都要写一条。`);
-  return out;
+  if (!missing.length) return { items: out, rest: [] };
+  const list = missing.map(f => '#' + f).join('、');
+  if (!finalAttempt) throw new SummaryResponseError(`漏掉了楼层 ${list}；材料中的每个楼层都要写一条。`);
+  const gaps = `漏掉了楼层 ${list}（或摘要为空）`;
+  if (foreign || repeated) {
+    throw new SummaryResponseError(`${gaps}，同时${foreign ? `出现了材料以外的楼层${foreign}` : `楼层 #${repeated} 写了不止一条`}，楼层编号可能整体错位，这一组没有保存。`);
+  }
+  const firstGap = floors.findIndex(f => !out.has(f));
+  return { items: new Map(floors.slice(0, firstGap).map(f => [f, out.get(f)!])), rest: floors.slice(firstGap) };
 }
 
 /**
  * 较早楼层的合并摘要:一次请求为相邻的若干层各写一条摘要和起止时间,不记录状态。
  * 每层落成普通叶子(标 lite),之后照常合并成总结;召回、楼层面板和单楼重新摘要都照常可用。
- * 失败直接抛出,这一组楼层保持待摘要。
+ * 返回没有写上的楼层(最后一次尝试只写全了一部分时,第一个缺口及之后的楼层);整组失败直接抛出,这一组楼层保持待摘要。
  */
-async function summarizeLiteChunk(chat: STMessage[], floors: number[], sender: Sender): Promise<void> {
+async function summarizeLiteChunk(chat: STMessage[], floors: number[], sender: Sender): Promise<number[]> {
   const ctx = getContext();
   if (!ctx) throw new Error('酒馆上下文还没准备好。');
   const label = floors.length > 1 ? `楼层 #${floors[0]}–#${floors[floors.length - 1]}` : `楼层 #${floors[0]}`;
   const covered = coveredSet(chat);
   const segments = floors.map(floor => {
     if (!chat[floor]) throw new Error(`楼层 #${floor} 已经不在了（可能在请求期间被删除）。`);
-    if (!hasStoryBody(chat[floor].mes)) {
-      throw new Error(`楼层 #${floor} 没有可提取的故事正文（只有时间标签、思考或旁注），这次没有请求 AI。请先检查这层楼的内容。`);
-    }
+    if (!hasStoryBody(chat[floor].mes)) throw new Error(noStoryBodyMessage([floor]));
     return { floor, targets: floorTargets(chat, floor, covered) };
   });
   const parts = segments.map(s => renderMessageParts(chat, s.targets, ctx.name1, ctx.name2));
@@ -1954,12 +2077,13 @@ async function summarizeLiteChunk(chat: STMessage[], floors: number[], sender: S
     }
   };
 
-  // 截止到这组楼层之前的时间与历史(不泄漏未来)
+  // 截止到这组楼层之前的时间与历史(不泄漏未来)。前情与逐层摘要同口径,不截断:
+  // 每组写完都会合并总结、总结失败时批量也会停下,前情不会无限增长;最早的高层总结和导入历史正是故事开端。
   const beforeIndex = segments[0].targets[0];
   const stateBefore = deriveMemory(chat, beforeIndex);
   const priorTime = latestStoryTime(chat.slice(0, beforeIndex)) || storyTimeValue(stateBefore.state.time);
   const fictionalOpening = !priorTime && !!initialStoryTime() && ctx.chatMetadata?.[INITIAL_TIME_ORIGIN_KEY] === 'fictional';
-  const history = renderHistoryNodes(recentHistory(selectHistoryNodesBefore(memory.summaries, chat, beforeIndex), LITE_HISTORY_MAX_CHARS));
+  const history = renderHistoryNodes(selectHistoryNodesBefore(memory.summaries, chat, beforeIndex));
   const prompt = buildBatchSummaryPrompt({ user: ctx.name1, char: ctx.name2, time: priorTime || initialStoryTime(), timeIsFictional: fictionalOpening, history, content }, { contentBoundary: sender.contentBoundary });
   const charCard = fetchCharCard();
   const persona = fetchUserPersona();
@@ -1976,16 +2100,16 @@ async function summarizeLiteChunk(chat: STMessage[], floors: number[], sender: S
     { role: 'assistant', content: RESUMMARY_THINKING_PREFILL },
   );
   assertUnchanged();
-  const items = await sendAndParse(request => { assertUnchanged(); return sender.send(request); }, messages, raw => {
-    const parsed = parseLiteReply(raw, floors);
-    console.log('[棱镜宝书] 合并摘要校验通过:', { floors, chars: floors.map(f => Array.from(parsed.get(f)!.summary).length) });
+  const items = await sendAndParse(request => { assertUnchanged(); return sender.send(request); }, messages, (raw, finalAttempt) => {
+    const parsed = parseLiteReply(raw, floors, finalAttempt);
+    console.log('[棱镜宝书] 合并摘要校验通过:', { floors: [...parsed.items.keys()], rest: parsed.rest, chars: [...parsed.items.values()].map(item => Array.from(item.summary).length) });
     return parsed;
   }).catch((error: unknown) => {
     if (error instanceof SummaryResponseError) {
       throw new SummaryResponseError(`${label} 合并摘要未保存（这些楼层仍待摘要）。${error.message}`);
     }
     const failure = failureFor(error, `${label} 合并摘要未完成`, sender);
-    // 输出被截断或上下文超长时,一次合并的楼层少一些也能解决
+    // 输出被截断或上下文超长时,一次合并的楼层少一些也能解决(批量补摘会自动对半拆开重试)
     if (failure instanceof ApiError && (failure.kind === 'truncated' || failure.kind === 'context-length')) {
       const base = failure.hint && !/[。！？!?]$/.test(failure.hint) ? failure.hint + '。' : failure.hint;
       const hint = base + '也可以在批量补摘的确认框中调小「每次合并的楼层数」。';
@@ -2000,7 +2124,8 @@ async function summarizeLiteChunk(chat: STMessage[], floors: number[], sender: S
   const createdAt = Date.now();
   let prev = priorTime;
   for (const floor of floors) {
-    const item = items.get(floor)!;
+    const item = items.items.get(floor);
+    if (!item) break; // 只写第一个缺口之前的连续楼层
     const tag = parseTimeRange(clampToTimeTags(chat[floor].mes));
     let timeStart = tag.start || item.timeStart;
     let timeEnd = tag.end || item.timeEnd;
@@ -2022,12 +2147,16 @@ async function summarizeLiteChunk(chat: STMessage[], floors: number[], sender: S
     };
     chat[floor].extra = { ...(chat[floor].extra ?? {}), bbs_leaf: leaf };
   }
-  engineState.lastRunAt = Date.now();
-  invalidateRecallCache();
-  recomputeDerived();
-  refreshInjection();
-  scheduleLeafFlush();
-  scheduleVectorIndex();
+  if (items.rest.length) console.log('[棱镜宝书] 合并摘要只写全了一部分,其余楼层拆小重试:', items.rest);
+  if (items.items.size) {
+    engineState.lastRunAt = Date.now();
+    invalidateRecallCache();
+    recomputeDerived();
+    refreshInjection();
+    scheduleLeafFlush();
+    scheduleVectorIndex();
+  }
+  return items.rest;
 }
 
 /**
@@ -2094,50 +2223,56 @@ interface RootView {
 }
 
 /**
- * 各总结节点覆盖的最早楼层:叶子取所在楼层,导入历史取起始楼层,总结取后代中的最小值。
+ * 各总结节点覆盖的楼层范围:叶子取所在楼层,导入历史取导入范围,总结取后代的最小与最大值。
  * 后代都找不到(例如只剩别的分页上的叶子)的节点不在结果里。
  */
-function summaryFloorStarts(chat: STMessage[]): Map<string, number> {
+function summaryFloorRanges(chat: STMessage[]): Map<string, [number, number]> {
   const leafFloor = new Map<string, number>();
   for (let i = 0; i < chat.length; i++) {
     if (chat[i]?.extra?.bbs_omit || !leafValid(chat[i])) continue;
     leafFloor.set((getLeaf(chat[i]) as LeafExtra).id, i);
   }
   const byId = new Map(memory.summaries.map(s => [s.id, s]));
-  const memo = new Map<string, number | undefined>();
-  const start = (id: string, seen: Set<string>): number | undefined => {
-    if (leafFloor.has(id)) return leafFloor.get(id);
+  const memo = new Map<string, [number, number] | undefined>();
+  const range = (id: string, seen: Set<string>): [number, number] | undefined => {
+    if (leafFloor.has(id)) { const f = leafFloor.get(id)!; return [f, f]; }
     if (memo.has(id)) return memo.get(id);
     const s = byId.get(id);
     if (!s || seen.has(id)) return undefined;
     seen.add(id);
-    let lo: number | undefined;
-    if (s.imported) lo = Math.max(0, Math.floor(s.importedFloorStart ?? 0));
-    else {
+    let out: [number, number] | undefined;
+    if (s.imported) {
+      const lo = Math.max(0, Math.floor(s.importedFloorStart ?? 0));
+      out = [lo, Math.max(lo, Math.floor(s.importedFloorEnd ?? lo))];
+    } else {
       for (const child of s.childIds) {
-        const v = start(child, seen);
-        if (v !== undefined && (lo === undefined || v < lo)) lo = v;
+        const v = range(child, seen);
+        if (!v) continue;
+        out = out ? [Math.min(out[0], v[0]), Math.max(out[1], v[1])] : v;
       }
     }
-    memo.set(id, lo);
-    return lo;
+    memo.set(id, out);
+    return out;
   };
-  const out = new Map<string, number>();
+  const out = new Map<string, [number, number]>();
   for (const s of memory.summaries) {
-    const v = start(s.id, new Set());
-    if (v !== undefined) out.set(s.id, v);
+    const v = range(s.id, new Set());
+    if (v) out.set(s.id, v);
   }
   return out;
 }
 
-/** 某层级「未被收纳的根节点」,按剧情先后升序。level0=叶子(扫 chat),level≥1=森林。 */
-function rootsAtLevel(level: number, chat: STMessage[]): RootView[] {
+/**
+ * 某层级「未被收纳的根节点」,按剧情先后升序。level0=叶子(扫 chat),level≥1=森林。
+ * beforeFloor:只取覆盖的楼层全部早于这一楼的根节点(重建时用,免得合并刚重建的摘要后又被下一楼的重建作废)。
+ */
+function rootsAtLevel(level: number, chat: STMessage[], beforeFloor = Number.POSITIVE_INFINITY): RootView[] {
   const collected = new Set<string>();
   for (const s of memory.summaries) for (const c of s.childIds) collected.add(c);
 
   if (level === 0) {
     const out: RootView[] = [];
-    for (let i = 0; i < chat.length; i++) {
+    for (let i = 0; i < chat.length && i < beforeFloor; i++) {
       if (chat[i]?.extra?.bbs_omit) continue; // 番外楼:不进森林压缩
       if (!leafValid(chat[i])) continue;
       const lf = getLeaf(chat[i]) as LeafExtra;
@@ -2148,10 +2283,11 @@ function rootsAtLevel(level: number, chat: STMessage[]): RootView[] {
   }
   // 按覆盖的楼层排(与摘要页、注入同口径),楼层找不到的排最后,同楼层再看生成时间。
   // 只按生成时间排时,在已有摘要之前补摘的旧楼层会生成得晚、被排到后面,合并出的上层总结就前后颠倒。
-  const starts = summaryFloorStarts(chat);
-  const floorOf = (s: MemSummary) => starts.get(s.id) ?? Number.POSITIVE_INFINITY;
+  const ranges = summaryFloorRanges(chat);
+  const floorOf = (s: MemSummary) => ranges.get(s.id)?.[0] ?? Number.POSITIVE_INFINITY;
   return memory.summaries
     .filter(s => s.level === level && !collected.has(s.id))
+    .filter(s => beforeFloor === Number.POSITIVE_INFINITY || (ranges.get(s.id)?.[1] ?? Number.POSITIVE_INFINITY) < beforeFloor)
     .sort((a, b) => (floorOf(a) - floorOf(b)) || a.createdAt - b.createdAt || a.id.localeCompare(b.id))
     .map(s => ({ id: s.id, text: llmString(s.text), createdAt: s.createdAt, timeStart: llmOptionalScalar(s.timeStart), timeEnd: llmOptionalScalar(s.timeEnd) }));
 }
@@ -2244,13 +2380,64 @@ function summaryRequestGuard(chat: STMessage[], sourceIds: string[]): () => void
   };
 }
 
-export async function checkResummary(): Promise<number> {
+/**
+ * 总结失败后暂停自动重发。回复被截断、上下文超长、参数被拒、内容被拦截这几类失败,用同一批节点再请求多半还会失败,
+ * 每写一楼都重发一次只会持续扣费。记下失败的批次(层级、节点 id)和当时的渠道、模型、最大输出,
+ * 在这批节点或这些设置变化之前不再自动重发;摘要页显示原因并提供「重试总结」(手动总结不受限制)。
+ * 网络、服务商临时故障等可重试的错误照常自动重试。只在内存里,切换聊天或刷新页面后清除。
+ */
+export const resummaryHold = reactive({
+  active: false,
+  chatId: '',
+  level: 0,
+  ids: [] as string[],
+  settingsKey: '',
+  /** 失败原因(与当时 lastError 相同) */
+  message: '',
+});
+const HOLD_KINDS = new Set(['truncated', 'context-length', 'bad-request', 'filtered']);
+
+/** 总结所用 API 的相关设置;变化后暂停的批次可以再自动尝试。 */
+function resummarySettingsKey(): string {
+  const channel = getChannelForTask('resummary');
+  if (channel) {
+    const { key: _key, ...rest } = channel;
+    return JSON.stringify(['channel', rest]);
+  }
+  return JSON.stringify(['main', mainApiModelName(getContext()), apiSettings.mainApiMaxTokens, apiSettings.mainApiPrefill]);
+}
+
+function clearResummaryHold(): void {
+  Object.assign(resummaryHold, { active: false, chatId: '', level: 0, ids: [], settingsKey: '', message: '' });
+}
+
+/** 这一批是否正处于暂停自动重发:同一聊天、同一层、同一批节点、设置也没变。不再对应时清除记录。 */
+function resummaryHeld(chatId: string, level: number, ids: string[]): boolean {
+  if (!resummaryHold.active) return false;
+  if (resummaryHold.chatId !== chatId || resummaryHold.settingsKey !== resummarySettingsKey()) { clearResummaryHold(); return false; }
+  return resummaryHold.level === level && resummaryHold.ids.length === ids.length && resummaryHold.ids.every((id, i) => id === ids[i]);
+}
+
+interface ResummaryOptions {
+  /** 手动触发(立即总结、重试总结):不受暂停记录限制 */
+  force?: boolean;
+  /** 只合并覆盖楼层都早于这一楼的根节点(重建时用) */
+  beforeFloor?: number;
+  /** 遇到暂停的批次时当作失败(批量补摘用:不带着越积越长的前情继续补摘) */
+  holdIsFailure?: boolean;
+}
+
+/**
+ * 检查各层是否攒够阈值,够了就合并成上层总结(可连锁多层)。返回生成条数,以及是否失败(原因在 lastError)。
+ */
+async function resummaryPass(options: ResummaryOptions = {}): Promise<{ made: number; failed: boolean }> {
   const issue = memoryWriteIssue();
-  if (issue) { engineState.lastError = issue; return 0; }
-  if (!engineActiveHere()) return 0;
+  if (issue) { engineState.lastError = issue; return { made: 0, failed: true }; }
+  if (!engineActiveHere()) return { made: 0, failed: false };
   const ctx = getContext();
-  if (!ctx) return 0;
+  if (!ctx) return { made: 0, failed: false };
   const chat = ctx.chat ?? [];
+  const chatId = ctx.getCurrentChatId?.() ?? '';
 
   let made = 0; // 本次连锁共生成的总结条数
 
@@ -2261,29 +2448,40 @@ export async function checkResummary(): Promise<number> {
     const threshold = thresholdForLevel(level);
     if (!threshold || threshold < 2) continue;
 
-    const roots = rootsAtLevel(level, chat);
+    const roots = rootsAtLevel(level, chat, options.beforeFloor);
     // 叶子层(L0→L1)保留最近 N 条不压:门槛抬到 阈值+保留数,但下面仍只压最旧的 阈值 条,
     // newest 的 N 条自然留作根、继续被逐条注入,避免「一次全压塌成 L1」的注入断崖。
     // 仅 level 0 生效(更高层已是压缩散文,再留无意义);keep=0 即退回旧行为。
     const keep = level === 0 ? Math.max(0, apiSettings.leafKeepRecent) : 0;
     if (roots.length < threshold + keep) continue;
 
+    const batch = roots.slice(0, threshold);
+    const ids = batch.map(n => n.id);
+    if (!options.force && resummaryHeld(chatId, level, ids)) {
+      // 同一批节点上次因截断等原因失败,设置也没变:不自动重发
+      if (options.holdIsFailure) {
+        engineState.lastError = resummaryHold.message;
+        engineState.lastFailure = null;
+        return { made, failed: true };
+      }
+      return { made, failed: false };
+    }
+
     const sender = resolveSender('resummary');
     if ('error' in sender) {
       engineState.lastError = sender.error;
       engineState.lastFailure = null;
-      return made;
+      return { made, failed: true };
     }
 
-    const batch = roots.slice(0, threshold);
     const { content, hints } = joinNodesForResummary(batch);
-    // 传**输出层级**(level+1):L1(普通总结,300-500字)/ L2+(二次总结,字数随输入动态)
+    // 传**输出层级**(level+1):L1(普通总结)/ L2+(二次总结,字数随输入动态)
     const prompt = buildResummaryPrompt({ user: ctx.name1, char: ctx.name2, content, level: level + 1 }, { contentBoundary: sender.contentBoundary });
     // 输出层级 level+1:为 1 是普通总结,≥2 是二次总结
     const what = level + 1 === 1 ? '总结' : '二次总结';
 
     try {
-      const assertSourcesUnchanged = summaryRequestGuard(chat, batch.map(n => n.id));
+      const assertSourcesUnchanged = summaryRequestGuard(chat, ids);
       const jb = taskContextPrompt();
       const messages: ChatMsg[] = [];
       if (jb) messages.push({ role: 'system', content: jb });
@@ -2308,21 +2506,31 @@ export async function checkResummary(): Promise<number> {
       addSummary({
         text: delta.summary.trim(),
         level: level + 1,
-        childIds: batch.map(s => s.id),
+        childIds: ids,
         auto: true,
         createdAt: newCreatedAt,
         timeStart,
         timeEnd,
       });
       made += 1;
+      if (resummaryHold.active && resummaryHold.level === level) clearResummaryHold();
       refreshInjection();
       // 不 break:继续外层 for,上一层可能也攒够了 → 连锁压更高层
     } catch (e) {
-      recordFailure(failureFor(e, `${what}未完成`, sender));
-      return made; // 本层失败则停止连锁,下次再试
+      const failure = failureFor(e, `${what}未完成`, sender);
+      recordFailure(failure);
+      if (failure instanceof ApiError && HOLD_KINDS.has(failure.kind)) {
+        Object.assign(resummaryHold, { active: true, chatId, level, ids, settingsKey: resummarySettingsKey(), message: engineState.lastError });
+      }
+      return { made, failed: true }; // 本层失败则停止连锁
     }
   }
-  return made;
+  return { made, failed: false };
+}
+
+/** 检查并合并总结(自动路径);返回新生成的总结条数。失败原因在 lastError。 */
+export async function checkResummary(options: ResummaryOptions = {}): Promise<number> {
+  return (await resummaryPass(options)).made;
 }
 
 /** 解析总结回复;拿不到 summary 时说清是截断、空回还是没按格式输出。 */
@@ -2497,9 +2705,9 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
 }
 
 /**
- * 手动「立即检测并总结」:供摘要页按钮调用。
- * 与自动路径同一套阈值/连锁逻辑(checkResummary),但带 busy 互斥,
- * 避免与正在跑的摘要/总结撞车。返回新生成的总结条数(0 = 未达阈值,什么都没做)。
+ * 手动「立即检测并总结」:供摘要页按钮(立即总结、重试总结)调用。
+ * 与自动路径同一套阈值/连锁逻辑,但带 busy 互斥,避免与正在跑的摘要/总结撞车;
+ * 手动触发不受「失败后暂停自动重发」限制。返回新生成的总结条数(0 = 未达阈值,什么都没做)。
  */
 export async function resummarizeNow(): Promise<number> {
   if (!engineActiveHere()) return 0;
@@ -2507,8 +2715,9 @@ export async function resummarizeNow(): Promise<number> {
   busy = true;
   engineState.running = true;
   engineState.lastError = '';
+  engineState.lastFailure = null;
   try {
-    return await checkResummary();
+    return (await resummaryPass({ force: true })).made;
   } finally {
     busy = false;
     engineState.running = false;
@@ -2528,7 +2737,16 @@ function reactToChatMutation(syncHidden = false): void {
   if (reactTimer) clearTimeout(reactTimer);
   reactTimer = setTimeout(() => {
     reactTimer = null;
-    pruneBrokenComps(); // 叶子失效 → 删包含它的整条祖先压缩链
+    // 叶子失效 → 删包含它的整条祖先压缩链;在酒馆里直接删楼时没有别的提示,这里说明作废了几条总结
+    const before = memory.summaries.map(s => ({ id: s.id, level: s.level }));
+    pruneBrokenComps();
+    const kept = new Set(memory.summaries.map(s => s.id));
+    const removed = before.filter(s => !kept.has(s.id));
+    if (removed.length) {
+      const levels = [...new Set(removed.map(s => s.level))].sort((a, b) => a - b)
+        .map(level => `L${level} ${removed.filter(s => s.level === level).length} 条`).join('、');
+      toast(`楼层删除后，包含其摘要的 ${removed.length} 条总结（${levels}）已作废；逐楼摘要保留，之后会按设置重新合并。`, 'info');
+    }
     recomputeDerived(); // 删叶/陈旧 → 物品/计划回退;UI(derivedMeta)更新
     if (syncHidden && engineActiveHere() && apiSettings.autoSummaryEnabled) {
       void syncWindowHiddenState(getContext()?.chat ?? [])
@@ -2600,6 +2818,15 @@ async function summarizeFinishedReply(chat: STMessage[]): Promise<void> {
 }
 
 /**
+ * 手动修改跟着有效摘要走:翻页后不再显示的回复、或 evictFloor 指定的即将被重新生成的那楼,
+ * 其摘要上的手动修改移到之前最近一条有效摘要;有改动时重算派生并落盘(注入由随后的刷新处理)。
+ */
+function moveManualOps(evictFloor?: number): void {
+  const chat = getContext()?.chat;
+  if (chat && relocateManualOps(chat, evictFloor)) { recomputeDerived(); scheduleLeafFlush(); }
+}
+
+/**
  * 绑定事件。摘要触发规则:**只确保「上一条已定稿 AI 消息」有摘要**(单楼增量,非全量)。
  * 进入聊天 / 翻到没摘要的页,都不再自动立刻补摘。
  *  - USER_MESSAGE_RENDERED:发新消息 → 摘「上一条 AI」(skipLastAi=false)。
@@ -2636,6 +2863,8 @@ export function bindEngine(): void {
       if (type === 'quiet' || type === 'impersonate' || type === 'continue') return; // 非真实新回复
       const chat = getContext()?.chat ?? [];
       const skipLastAi = shouldSkipLastAiForGeneration(chat, type);
+      // 重新生成会删掉末尾这条回复:它的摘要上若有手动修改，先移到之前最近一条有效摘要(翻页保留原页，由 MESSAGE_SWIPED 处理)。
+      if (type === 'regenerate' && skipLastAi) moveManualOps(chat.length - 1);
       console.log('[棱镜宝书] GENERATION_STARTED → 自动摘要, type =', type, '| skipLastAi =', skipLastAi);
       if (!skipLastAi && replyLeafNeedsRefresh()) void refreshEditedReplyLeaf().then(() => maybeSummarizePrevAi(false, false, true));
       else void maybeSummarizePrevAi(skipLastAi, false, !skipLastAi);
@@ -2681,7 +2910,7 @@ export function bindEngine(): void {
   }
 
   // 以下三事件只让数据/UI 跟随,不主动生成摘要。
-  if (et.MESSAGE_SWIPED) es.on(et.MESSAGE_SWIPED, () => { checkCompatibility(); reactToChatMutation(); });
+  if (et.MESSAGE_SWIPED) es.on(et.MESSAGE_SWIPED, () => { checkCompatibility(); moveManualOps(); reactToChatMutation(); });
   // 编辑消息:先把该楼正文里 <bbs_items> 旁注的改动反向同步回叶子 delta(用户手改物品),
   // 再走通用善后(清坏链/重算/刷新)。延迟一拍确保 ST 已把编辑写回 chat[messageId].mes。
   if (et.MESSAGE_EDITED) {
@@ -2705,6 +2934,7 @@ export function bindEngine(): void {
       // 记忆重载由 store 的 CHAT_CHANGED 监听负责;此处仅在其后刷新注入
       clearRecallInjection(); // 切聊天先抹掉上个聊天的召回残留(新聊天下次生成再重算)
       clearRecallDebug(); // 「上次召回」的面板和快捷回复按钮也只说当前聊天
+      clearResummaryHold(); // 总结的暂停记录只对当前聊天有效,切换聊天后清除(切回来时照常再试一次)
       setTimeout(() => {
         normalizeBacklogNotices(getContext()?.chat ?? []);
         refreshInjection();

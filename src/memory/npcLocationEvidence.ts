@@ -1,4 +1,4 @@
-import { createSourceEvidenceMatcher } from './sourceEvidence';
+import { createSourceEvidenceMatcher, type EvidenceDropReason } from './sourceEvidence';
 /** 只验证定位引文来源，不用关键词猜测角色实际位置。 */
 export const NPC_LOCATION_EVIDENCE_PROTOCOL = `【NPC 定位证据】
 - 本楼输出 npcs.add/update 的非空 location 时，同对象必须给 locationEvidence：从【本轮对话】连续照录能说明该角色本轮位置的短句，原文怎样称呼该角色就照原文，不必出现名册里的名字。不能引用旧名册、历史摘要、闪回或计划作为当前定位。
@@ -13,9 +13,15 @@ const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v ===
 /**
  * 校验 NPC 定位引文。默认任何一处不合格都抛错，由调用方带着原因重试。
  * 传入 onDrop（最后一次尝试仍不合格时）则只去掉对不上的定位、照常保存其余内容：
- * 不合格的 location 不记录，该角色保留原有位置记录；放错位置或多余的引文直接删除。onDrop 收到被去掉定位的角色名。
+ * 不合格的 location 不记录，该角色保留原有位置记录；放错位置或多余的引文直接删除。
+ * onDrop 收到被去掉定位的角色名、原因（缺原话、原话对不上、重复定位或缺名字）和该角色的对象。
  */
-export function validateNpcLocationEvidence(parsed: Record<string, unknown>, options: { strict: boolean; content?: string; sourceTexts?: readonly string[]; onDrop?: (name: string) => void }): void {
+export function validateNpcLocationEvidence(parsed: Record<string, unknown>, options: {
+  strict: boolean;
+  content?: string;
+  sourceTexts?: readonly string[];
+  onDrop?: (name: string, reason: EvidenceDropReason, entry: Record<string, unknown>) => void;
+}): void {
   const lenient = !!options.onDrop;
   const ops = record(parsed.npcs) ? parsed.npcs : {};
   const entries = ['add', 'update'].flatMap(op => Array.isArray(ops[op])
@@ -46,26 +52,26 @@ export function validateNpcLocationEvidence(parsed: Record<string, unknown>, opt
       throw new NpcLocationEvidenceError(message + '\n定位诊断：' + label + (correction ? '\n纠错要求：' + correction : ''));
     }
     // 宽松模式：去掉这个角色本楼的定位（位置记录保持原样），其余字段照常保存。
-    function dropLocation(notify = true): void {
+    function dropLocation(reason: EvidenceDropReason | null): void {
       const hadLocation = typeof entry.location === 'string' && !!entry.location.trim();
       delete entry.location;
       delete entry.locationEvidence;
-      if (notify && hadLocation) options.onDrop!(safeName);
+      if (reason && hadLocation) options.onDrop!(safeName, reason, entry);
     }
     const place = typeof entry.location === 'string' ? entry.location.trim() : '';
     if ('location' in entry && typeof entry.location !== 'string') {
-      if (lenient) { dropLocation(false); continue; }
+      if (lenient) { dropLocation(null); continue; }
       fail('NPC location 必须是字符串；去向不明用空字符串。');
     }
     if ('location' in entry || 'follow' in entry) {
       if (!name || located.has(name)) {
-        if (lenient) { dropLocation(); delete entry.follow; continue; }
+        if (lenient) { dropLocation('invalid'); delete entry.follow; continue; }
         fail('同一NPC每楼只能输出一次定位，须使用唯一非空 name。');
       }
       located.add(name);
     }
     if (entry.follow === true && 'location' in entry) {
-      if (lenient) { dropLocation(false); continue; }
+      if (lenient) { dropLocation(null); continue; }
       fail('follow:true 表示同行，请省略 location 和 locationEvidence。');
     }
     if (!place && provided) {
@@ -75,11 +81,11 @@ export function validateNpcLocationEvidence(parsed: Record<string, unknown>, opt
     if (place) {
       const quote = entry.locationEvidence;
       if (typeof quote !== 'string' || !quote.trim()) {
-        if (lenient) { dropLocation(); continue; }
+        if (lenient) { dropLocation('missing'); continue; }
         fail('NPC非空 location 必须附 locationEvidence 本楼连续原文。未同行或暂无消息不能重报旧地点，请省略定位更新。');
       }
       if (!matchesSource(quote)) {
-        if (lenient) { dropLocation(); continue; }
+        if (lenient) { dropLocation('mismatch'); continue; }
         fail('角色定位引文与本楼正文不匹配。', 'locationEvidence 必须连续照录【本轮对话】中的本楼原文（仅容忍排版空白、换行、成对强调标记以及全角半角、引号和省略号写法的差异），原文怎样称呼该角色就照原文；不得改写、拼接、删否定或引用旧历史/名册。请核对该角色并重写完整 JSON，无新定位才省略 location/locationEvidence。');
       }
     }

@@ -4,7 +4,7 @@ import { sourceHash } from '@/notes/source';
 import { validateOutlineContent } from './protocol';
 import { OUTLINE_LIMITS } from './limits';
 import { captureOutlineSource, sameOutlineChat, type OutlineSource } from './source';
-import { renderOutlineGuidance } from './injection';
+import { outlineOverflowMessage, outlineStageOverflows, renderOutlineGuidance } from './injection';
 import type { OutlineActive, OutlineContent, OutlineData, OutlineDraft } from './types';
 
 export const OUTLINE_DATA_KEY = 'prism_book_outline';
@@ -133,6 +133,9 @@ export async function activateOutlineDraft(expectedDraftId: string): Promise<voi
   const ctx = editable(), draft = outlineState.draft;
   if (!draft || draft.id !== expectedDraftId) throw new Error('待启用草稿已改变，请重新核对后确认。');
   if (!outlineSourceCurrent(draft)) throw new Error('草稿参考的历史正文已变化，请核对并重新保存草稿后再启用。');
+  // 逐个阶段检查注入长度，免得切换到后面的阶段时才发现超限（已确认的规划只能改推进条件）。
+  const overflow = outlineStageOverflows(draft.content);
+  if (overflow.length) throw new Error(outlineOverflowMessage(overflow));
   const next = snapshot(); next.active = { ...copy(draft), currentChapter: 0, enabled: true };
   renderOutlineGuidance(next.active);
   await persist(next, ctx);

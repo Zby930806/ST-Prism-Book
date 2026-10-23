@@ -17,7 +17,7 @@ import { toast } from '@/st/toast';
 import type { MemItem, MemScene } from '@/memory/types';
 import { computed, nextTick, ref, watch } from 'vue';
 
-// 场景是从叶子摘要重放出的派生数据,手动操作写入「最新一条有效叶子」;无有效叶子时无处挂载。
+// 场景是从叶子摘要重放出的派生数据,手动操作单独保存在「最新一条有效叶子」上;无有效叶子时无处挂载。
 const hasLeaf = computed(() => derivedMeta.hasLeaf);
 
 // 触屏判定:跳过弹窗自动聚焦(移动端自动聚焦会弹输入法挡界面),与摘要页一致。
@@ -466,7 +466,7 @@ function confirmTravel() {
       @confirm="confirmRemove"
       @cancel="removing = null"
     >
-      删除「{{ removing?.name }}」<template v-if="removeChildCount">及其下属的 {{ removeChildCount }} 个地点</template>？删除操作记录在最新一条摘要上，删除该楼层可恢复。
+      删除「{{ removing?.name }}」<template v-if="removeChildCount">及其下属的 {{ removeChildCount }} 个地点</template>？这项修改单独保存，重新摘要或重抽后仍然保留。
     </ConfirmDialog>
   </section>
 </template>

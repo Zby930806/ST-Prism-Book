@@ -20,7 +20,12 @@ afterEach(() => { vi.restoreAllMocks(); });
 describe('世界书设置', () => {
   it('默认最保守：只新增、不自动建议、跟随札记的 API；新条目沿用酒馆模板的位置和顺序', () => {
     expect(worldbookSettings).toMatchObject({ apiMode: 'notes', permission: 'create', auto: { enabled: false, interval: 10 }, newEntry: { position: 0, order: 100, depth: 4 } });
-    expect(worldbookSettings.read).toEqual({ maxFloors: 24, maxChars: 24000, entryChars: 6000, refChars: 4000 });
+    expect(worldbookSettings.read).toEqual({ maxFloors: 24, maxChars: 24000, entryChars: 6000, refChars: 4000, indexChars: 10000 });
+  });
+  it('目标书条目索引的字数上限可调（2000–40000）；旧设置没有这一项时按默认 10000', () => {
+    expect(normalizeWorldbookSettings({ apiMode: 'notes', channel: {}, read: { maxFloors: 24 } }).read.indexChars).toBe(10000);
+    expect(normalizeWorldbookSettings({ apiMode: 'notes', channel: {}, read: { indexChars: 500 } }).read.indexChars).toBe(2000);
+    expect(normalizeWorldbookSettings({ apiMode: 'notes', channel: {}, read: { indexChars: 99999 } }).read.indexChars).toBe(40000);
   });
 
   it('保存到扩展设置的新键，带版本号；数值越界时收回范围', () => {

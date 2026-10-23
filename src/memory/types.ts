@@ -30,7 +30,7 @@ export interface MemItem {
   name: string;
   /** 简述/备注 */
   desc?: string;
-  /** 数量;省略表示不计数 */
+  /** 数量。重放时新增缺数量按 1 计(内置模板要求明确给出数量);早期旧数据可能没有,累加时按 1 起算 */
   qty?: number;
   /** 是否随身(随角色移动);省略/true=随身,永远注入。false=存放某地,仅当前地点匹配才全量注入 */
   carried?: boolean;
@@ -372,6 +372,18 @@ export interface LeafExtra {
   conflicts?: LeafConflict[];
   /** 回看原文补档案的结果(可选;旧叶子没有)。重放时在 delta 之后只填空字段 */
   enriched?: NpcEnrichment[];
+  /**
+   * Horae 迁移得到的最终状态(物品、计划、时间、地点),单独保存,不并入 delta:
+   * 重新摘要该楼时沿用,不会被模型的新结果冲掉。计划等新增条目的 id 序号从 MIGRATED_ADD_BASE 起算(见 apply.ts)。
+   */
+  migratedDelta?: StoredDelta;
+  /**
+   * 页面上的手动修改(物品、角色、地点、计划悬念、变量、生活档案、信息差、主角档案、局势卡),单独保存,
+   * 不并入 delta:重新摘要或重抽替换叶子时沿用;叶子失效时移到它之前最近一条有效叶子(relocateManualOps)。
+   * 新增条目带显式稳定 id,移动后不变。旧叶子没有这个字段(旧的手动修改仍在 delta 里)。
+   * 重放顺序:delta → migratedDelta → enriched → manualOps。
+   */
+  manualOps?: StoredDelta;
   /** 叶子结构版本 */
   v: 1;
 }
@@ -465,10 +477,14 @@ export interface MemLifeDetail {
   /** 记录时的故事内时间 */
   createdTime?: string;
   createdAt: number;
+  /** 派生:最近一次新增、修改或沉降所在叶子的生成时刻;注入时同档条目按它从新到旧排(旧数据回退 createdAt) */
+  updatedAt?: number;
 }
 
 /** AI 侧新增生活细节(tier 由代码定为 active,置顶仅手动) */
 export interface LifeDetailAdd {
+  /** 仅手动新增条目带的显式稳定 id(叶子移动后不变);AI 输出经 finalizeDelta 剥离。 */
+  id?: string;
   /** user 为主角,其他值为角色名;旧格式省略仍按主角处理。 */
   subject?: string;
   text: string;
@@ -510,6 +526,8 @@ export interface MemSecret {
 
 /** AI 侧新增信息差 */
 export interface SecretAdd {
+  /** 仅手动新增条目带的显式稳定 id;AI 输出经 finalizeDelta 剥离。 */
+  id?: string;
   content: string;
   knownBy?: string[];
   unaware?: string[];
@@ -638,6 +656,8 @@ export interface NpcDelta extends NpcAffinity {
    * 清掉旧地点、不再视为在场;之后说明去向时再填新地点。
    */
   location?: string;
+  /** 改名前用过的名字(仅内部写入:带数据新建对话的种子叶子等);重放时并入角色的曾用名,模型输出经 finalizeDelta 剥离。 */
+  formerNames?: string[];
 }
 
 /**
@@ -820,7 +840,8 @@ export interface StoredDelta {
     remove?: string[];
   };
   plans?: {
-    add?: { kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string }[];
+    /** id 仅手动新增条目带(显式稳定 id,叶子移动后不变);其余按「叶子 id#序号」派生 */
+    add?: { kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string; id?: string }[];
     /** 更新已有未了结事项；AI 用短编号，固化后用稳定 id，不重建条目。 */
     update?: PlanUpdate[];
     /** 了结:稳定 plan id(带 outcome/reason);裸字符串兼容旧数据 */

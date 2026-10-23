@@ -6,7 +6,7 @@ import SegmentedControl from '@/components/SegmentedControl.vue';
 import { ui, THEMES, ORB_SHAPES, type NavPosition } from '@/state/ui';
 import { uploadOrbImage } from '@/st/upload';
 import { toast } from '@/st/toast';
-import { ref, useId } from 'vue';
+import { ref, useId, watch } from 'vue';
 
 const navOptions: { value: NavPosition; label: string }[] = [
   { value: 'auto', label: '自动' },
@@ -17,6 +17,9 @@ const navOptions: { value: NavPosition; label: string }[] = [
 /* —— 悬浮球自定义图标:选图 → 压缩上传到 ST 服务器 → 存路径串(跨设备同步) —— */
 const orbFileInput = ref<HTMLInputElement | null>(null);
 const orbUploading = ref(false);
+// 预览图加载失败(图片已被删除或路径来自别的酒馆)时显示默认小狐狸,并提示重新上传
+const orbPreviewFailed = ref(false);
+watch(() => ui.orbImage, () => { orbPreviewFailed.value = false; });
 function pickOrbImage() {
   orbFileInput.value?.click();
 }
@@ -127,8 +130,8 @@ const themeOptions = THEMES.map(t => ({ value: t.value, label: t.label, icon: t.
 
       <!-- 图标:仅开启时可配 -->
       <div v-if="ui.showOrb" class="bbs-orb-config">
-        <div class="bbs-orb-preview" :class="[`shape-${ui.orbShape}`, { 'has-image': !!ui.orbImage }]">
-          <img v-if="ui.orbImage" :src="ui.orbImage" alt="悬浮球图标预览" />
+        <div class="bbs-orb-preview" :class="[`shape-${ui.orbShape}`, { 'has-image': !!ui.orbImage && !orbPreviewFailed }]">
+          <img v-if="ui.orbImage && !orbPreviewFailed" :src="ui.orbImage" alt="悬浮球图标预览" @error="orbPreviewFailed = true" />
           <BrandMark v-else :size="ui.orbShape === 'bookmark' ? 30 : 32" class="bbs-orb-preview-mark" />
         </div>
         <div class="bbs-orb-config-actions">
@@ -139,6 +142,7 @@ const themeOptions = THEMES.map(t => ({ value: t.value, label: t.label, icon: t.
         </div>
         <input ref="orbFileInput" type="file" accept="image/*" hidden @change="onOrbFileChange" />
       </div>
+      <p v-if="ui.showOrb && ui.orbImage && orbPreviewFailed" class="bbs-callout is-warning" role="status">自定义图标加载失败（图片可能已被删除，或设置来自另一个酒馆），悬浮球改用默认的小狐狸。可重新上传图标，或点击「恢复默认」。</p>
       <p v-if="ui.showOrb" class="bbs-field-hint">支持普通图片和 GIF 动图（保留动画，不超过 2MB）。图标上传到酒馆服务器，可跨设备使用；未上传时使用默认的小狐狸图标。</p>
     </Collapsible>
   </Collapsible>

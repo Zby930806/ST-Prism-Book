@@ -17,11 +17,11 @@ import { getContext, getDoNewChat, setMessageText, type STMessage } from '@/st/c
 import { toast } from '@/st/toast';
 import { apiSettings } from '@/api/settings';
 import { deriveMemory, makeLeafId } from './apply';
-import { resolveKeepStart } from './engine';
+import { pendingAiFloors, resolveKeepStart } from './engine';
 import { refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
 import { latestStoryTime } from './timeTag';
 import { assertMemoryWritable, memoryWriteIssue, memory, recomputeDerived } from './store';
-import { inspectCompatibility } from './compatibility';
+import { inspectCompatibility, isRecord } from './compatibility';
 import { MEMORY_KEY, MEMORY_VERSION } from './types';
 import type { JsonValue, LeafExtra, MemSummary, StoredDelta } from './types';
 import { isBaiBaoKuAvailable, vecBundleCreate } from '@/api/baibaoku';
@@ -39,6 +39,8 @@ export interface CarryoverPlan {
   aiCount: number;
   /** 合并历史摘要字符数(0 = 无历史可摘) */
   recapLen: number;
+  /** 保留窗口之前还没有摘要的 AI 楼层数:这些楼层的剧情既不进合并摘要,也不搬到新对话 */
+  pendingBefore: number;
   /** 当前是否有可携带数据 */
   hasData: boolean;
 }
@@ -178,6 +180,8 @@ function encodeStateAsDelta(state: ReturnType<typeof deriveMemory>, leafId: stri
         location: n.location,
         locationStale: n.locationStale,
         lastKnownLocation: n.lastKnownLocation,
+        // 曾用名一并带走:无名角色标签查重、按旧称呼检索原文都靠它
+        ...(n.formerNames?.length ? { formerNames: [...n.formerNames] } : {}),
       })),
     };
   }
@@ -206,29 +210,64 @@ function encodeStateAsDelta(state: ReturnType<typeof deriveMemory>, leafId: stri
   return delta;
 }
 
+/** 窗口之前的条目改挂种子叶后的新旧 id 对照(生活档案、未结案信息差、未了结计划)。 */
+interface CarryIdMaps {
+  details: ReadonlyMap<string, string>;
+  secrets: ReadonlyMap<string, string>;
+  plans: ReadonlyMap<string, string>;
+}
+
+/** 把一份增量里对窗口前条目的引用改成种子叶上的新 id(就地修改;新增条目不动)。 */
+function remapCarriedRefs(d: unknown, ids: CarryIdMaps): void {
+  if (!d || typeof d !== 'object') return;
+  const delta = d as StoredDelta;
+  const life = delta.lifeDetails;
+  if (life) {
+    for (const update of life.update ?? []) update.id = ids.details.get(update.id) ?? update.id;
+    for (const key of ['archive', 'remove'] as const) {
+      if (life[key]) life[key] = life[key].map(id => ids.details.get(id) ?? id);
+    }
+  }
+  const secrets = delta.secrets;
+  if (secrets) {
+    for (const update of secrets.update ?? []) update.id = ids.secrets.get(update.id) ?? update.id;
+    for (const key of ['resolve', 'remove', 'reopen'] as const) {
+      if (secrets[key]) secrets[key] = secrets[key].map(id => ids.secrets.get(id) ?? id);
+    }
+  }
+  const plans = delta.plans;
+  if (plans) {
+    for (const update of plans.update ?? []) update.id = ids.plans.get(update.id) ?? update.id;
+    if (plans.resolve) plans.resolve = plans.resolve.map(r => (typeof r === 'string' ? ids.plans.get(r) ?? r : { ...r, id: ids.plans.get(r.id) ?? r.id }));
+    for (const key of ['remove', 'reopen'] as const) {
+      if (plans[key]) plans[key] = plans[key].map(id => ids.plans.get(id) ?? id);
+    }
+  }
+}
+
+/** 一条叶子上需要改写引用的各部分:模型结果、单独保存的手动修改和迁移状态。 */
+function remapCarriedLeaf(leaf: unknown, ids: CarryIdMaps): void {
+  if (!leaf || typeof leaf !== 'object') return;
+  const parts = leaf as { delta?: unknown; manualOps?: unknown; migratedDelta?: unknown };
+  remapCarriedRefs(parts.delta, ids);
+  remapCarriedRefs(parts.manualOps, ids);
+  remapCarriedRefs(parts.migratedDelta, ids);
+}
+
 /** 深拷贝一条要搬运的消息,取消隐藏、保留叶子。 */
-function sanitizeCarryMessage(m: STMessage, detailIds: ReadonlyMap<string, string>, secretIds: ReadonlyMap<string, string> = new Map()): STMessage {
+function sanitizeCarryMessage(m: STMessage, ids: CarryIdMaps): STMessage {
   const clone: STMessage = JSON.parse(JSON.stringify(m));
   clone.is_system = false;
   if (clone.extra && 'bbs_hidden' in clone.extra) {
     const { bbs_hidden: _h, ...rest } = clone.extra;
     clone.extra = rest;
   }
-  // 窗口前的生活条目已改挂种子叶:同步窗口内引用,否则纠正归属/修改/沉降/删除会失效。
-  const life = clone.extra?.bbs_leaf?.delta.lifeDetails;
-  if (life) {
-    for (const update of life.update ?? []) update.id = detailIds.get(update.id) ?? update.id;
-    for (const key of ['archive', 'remove'] as const) {
-      if (life[key]) life[key] = life[key].map(id => detailIds.get(id) ?? id);
-    }
-  }
-  // 信息差同理:窗口前的未结案条目已改挂种子叶
-  const secrets = clone.extra?.bbs_leaf?.delta.secrets;
-  if (secrets) {
-    for (const update of secrets.update ?? []) update.id = secretIds.get(update.id) ?? update.id;
-    for (const key of ['resolve', 'remove', 'reopen'] as const) {
-      if (secrets[key]) secrets[key] = secrets[key].map(id => secretIds.get(id) ?? id);
-    }
+  // 窗口前的生活档案、未结案信息差和未了结计划已改挂种子叶:同步窗口内引用(含单独保存的手动修改和其他分页上的叶子),
+  // 否则纠正归属、修改、沉降、结案、删除和在摘要页对计划的编辑都会失效。
+  remapCarriedLeaf(clone.extra?.bbs_leaf, ids);
+  const pages = (clone as unknown as Record<string, unknown>).swipe_info;
+  if (Array.isArray(pages)) {
+    for (const page of pages) if (isRecord(page) && isRecord(page.extra)) remapCarriedLeaf(page.extra.bbs_leaf, ids);
   }
   return clone;
 }
@@ -236,7 +275,7 @@ function sanitizeCarryMessage(m: STMessage, detailIds: ReadonlyMap<string, strin
 /** 计算携带计划(不产生副作用),供 UI 预览。 */
 export function computeCarryoverPlan(): CarryoverPlan {
   const blockedReason = memoryWriteIssue();
-  if (blockedReason) return { carryStart: 0, carryCount: 0, aiCount: 0, recapLen: 0, hasData: false, blockedReason };
+  if (blockedReason) return { carryStart: 0, carryCount: 0, aiCount: 0, recapLen: 0, pendingBefore: 0, hasData: false, blockedReason };
   const ctx = getContext();
   const chat = ctx?.chat ?? [];
   const carryStart = resolveKeepStart(chat);
@@ -259,6 +298,7 @@ export function computeCarryoverPlan(): CarryoverPlan {
     carryCount,
     aiCount,
     recapLen: recap.length,
+    pendingBefore: ctx?.getCurrentChatId?.() ? pendingAiFloors(chat).filter(f => f < carryStart).length : 0,
     hasData: chat.length > 0 && (carryCount > 0 || recap.length > 0 || deltaHasData(seedDelta)),
   };
 }
@@ -317,6 +357,9 @@ export async function createNewChatWithCarryover(): Promise<boolean> {
     const seedDelta = encodeStateAsDelta(stateBefore, seedLeafId);
     const detailIds = new Map(stateBefore.lifeDetails.map((d, i) => [d.id, `detail:${seedLeafId}#${i}`]));
     const secretIds = new Map(stateBefore.secrets.filter(s => s.status === 'open').map((s, i) => [s.id, `secret:${seedLeafId}#${i}`]));
+    // 未了结计划同样改挂种子叶(序号与 encodeStateAsDelta 的 plans.add 一致)
+    const planIds = new Map(stateBefore.plans.filter(p => p.status === 'open').map((p, i) => [p.id, `plan:${seedLeafId}#${i}`]));
+    const carryIds: CarryIdMaps = { details: detailIds, secrets: secretIds, plans: planIds };
 
     // 合并历史摘要(窗口之前的剧情) = 种子叶子 text
     const mergedSummary = renderHistoryNodes(selectHistoryNodesBefore(memory.summaries, sourceChat, carryStart));
@@ -330,7 +373,7 @@ export async function createNewChatWithCarryover(): Promise<boolean> {
       const m = sourceChat[i];
       if (!m) continue;
       if (m.is_system && m.extra?.type) continue; // 原生系统楼不搬
-      carryMessages.push(sanitizeCarryMessage(m, detailIds, secretIds));
+      carryMessages.push(sanitizeCarryMessage(m, carryIds));
     }
 
     if (!mergedSummary && !carryMessages.length && !deltaHasData(seedDelta)) {

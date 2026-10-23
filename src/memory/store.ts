@@ -1,8 +1,9 @@
 import { apiSettings, currentCharKey } from '@/api/settings';
 import { getContext, type STMessage } from '@/st/context';
+import { toast } from '@/st/toast';
 import { reactive } from 'vue';
-import { convertedForest, inspectCompatibility, isRecord, legacyLeafIssue, type CompatibilityReport } from './compatibility';
-import { deriveMemory, getLeaf, leafValid } from './apply';
+import { convertedForest, inspectCompatibility, isRecord, legacyLeafStructureIssue, type CompatibilityReport } from './compatibility';
+import { deriveMemory, getLeaf, leafValid, relocateManualOps } from './apply';
 import { isAiFloor, pendingAiFloors } from './engine';
 import { initialStoryTime, latestStoryTime } from './timeTag';
 import type { BaibaiMemory, LeafExtra, MemSummary, VarTemplate, VarTier } from './types';
@@ -16,7 +17,7 @@ import { createEmptyMemory, MEMORY_KEY, MEMORY_VERSION, normalizeTemplate } from
 export const memory = reactive<BaibaiMemory>(createEmptyMemory());
 
 export const compatibilityState = reactive<CompatibilityReport & { converting: boolean }>({
-  mode: 'ready', leaves: 0, summaries: 0, issues: [], conversion: [], converting: false,
+  mode: 'ready', leaves: 0, summaries: 0, issues: [], conversion: [], repairable: [], frozenFloors: [], converting: false,
 });
 let checkedChat: STMessage[] | undefined;
 let checkedMetadata: unknown;
@@ -37,21 +38,44 @@ export function memoryWriteIssue(): string {
   const raw = (ctx?.chatMetadata as Record<string, unknown> | undefined)?.[MEMORY_KEY];
   if (checkedChat !== ctx?.chat || checkedMetadata !== ctx?.chatMetadata || checkedChatId !== ctx?.getCurrentChatId?.() || checkedRaw !== raw) checkCompatibility();
   if (compatibilityState.converting) return '正在本地转换旧记忆，请稍候。';
-  // 宿主翻页/编辑会原地改消息，引用缓存不能代表分页归属仍成立。
-  // 这里只复查叶子；不能在合法删楼事务清理祖先前把暂时孤儿的树误判为损坏。
-  if (compatibilityState.mode === 'ready' && ctx?.chat?.some(m => legacyLeafIssue(m?.extra?.bbs_leaf, m))) checkCompatibility();
+  // 宿主翻页/编辑会原地改消息，引用缓存不能代表叶子结构仍成立。
+  // 这里只复查叶子结构；不能在合法删楼事务清理祖先前把暂时孤儿的树误判为损坏。
+  // 未记分页的旧摘要翻到非第一页只冻结那一楼,不在这里重新判定整段聊天。
+  if (compatibilityState.mode === 'ready' && ctx?.chat?.some(m => legacyLeafStructureIssue(m?.extra?.bbs_leaf))) checkCompatibility();
   if (compatibilityState.mode === 'ready') return '';
-  return compatibilityState.mode === 'convert'
-    ? '检测到旧版记忆，请在摘要页确认本地转换；不需要重新摘要，也不会调用模型。'
-    : '旧记忆保护中：' + compatibilityState.issues.join('；') + '。请先备份并核对，勿全量重建。';
+  if (compatibilityState.mode === 'convert') return '检测到旧版记忆，请在摘要页确认本地转换；不需要重新摘要，也不会调用模型。';
+  if (compatibilityState.repairable.length) {
+    return `旧记忆保护中：${compatibilityState.repairable.length} 条总结引用了当前聊天里不存在的楼层（多为删除楼层后残留）。`
+      + '请先用酒馆的「管理聊天文件」导出聊天备份，再在摘要页的只读保护说明中点「清理残缺的总结」；逐楼摘要会保留。';
+  }
+  return '旧记忆保护中：' + compatibilityState.issues.join('；') + '。请先备份并核对，勿全量重建。';
 }
 export function assertMemoryWritable(): void {
   const issue = memoryWriteIssue();
   if (issue) throw new Error(issue);
 }
 
-/** 用户确认后才转换；备份旧元数据，保持原摘要/ID/状态/未知字段，不请求模型。 */
-export async function convertLegacyMemory(): Promise<void> {
+/** 旧格式备份所在的元数据键:转换前写入,转换成功后保留。 */
+export const LEGACY_BACKUP_KEY = 'prism_book_legacy_backup';
+
+/** 已有一份与当前旧记录不同的旧格式备份:不覆盖,等用户导出核对后确认替换。 */
+export class LegacyBackupConflictError extends Error {}
+
+function sortedJson(value: unknown): string {
+  const sort = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sort);
+    if (isRecord(v)) return Object.fromEntries(Object.keys(v).sort().filter(k => v[k] !== undefined).map(k => [k, sort(v[k])]));
+    return v;
+  };
+  return JSON.stringify(sort(value));
+}
+
+/**
+ * 用户确认后才转换；备份旧元数据，保持原摘要/ID/状态/未知字段，不请求模型。
+ * 上次转换没保存成功留下的备份:与当前旧记录逐项相同时直接重试(不重写备份);不同时拒绝,
+ * 用户导出核对后选择替换(replaceBackup)才用当前旧记录覆盖那份备份再转换。
+ */
+export async function convertLegacyMemory(options: { replaceBackup?: boolean } = {}): Promise<void> {
   const ctx = getContext();
   if (!ctx || !ctx.getCurrentChatId?.()) throw new Error('请先打开聊天');
   if (compatibilityState.converting) throw new Error('转换已在进行');
@@ -67,17 +91,23 @@ export async function convertLegacyMemory(): Promise<void> {
   };
   const requireSameChat = () => { if (!stillHere()) throw new Error('转换期间已切换聊天，停止后续保存；请返回原聊天核对备份。'); };
   const raw = meta[MEMORY_KEY] as Record<string, unknown>;
-  const backupKey = 'prism_book_legacy_backup';
-  if (meta[backupKey] !== undefined) throw new Error('已有旧格式备份，先核对上次转换结果；不会覆盖备份');
+  const backupKey = LEGACY_BACKUP_KEY;
+  const existingBackup = meta[backupKey];
+  const reuseBackup = existingBackup !== undefined && sortedJson(existingBackup) === sortedJson(raw);
+  if (existingBackup !== undefined && !reuseBackup && !options.replaceBackup) {
+    throw new LegacyBackupConflictError('已有一份与当前旧记录不同的旧格式备份（多为上次转换留下的），为避免覆盖没有转换。请先用酒馆的「管理聊天文件」导出聊天核对，确认不再需要那份备份后，在摘要页选择「替换旧备份并转换」。');
+  }
   const original = JSON.parse(JSON.stringify(raw));
   const plan: CompatibilityReport['conversion'] = JSON.parse(JSON.stringify(compatibilityState.conversion));
   const operations = plan.map(op => ({ message: ctx.chat[op.floor], extra: ctx.chat[op.floor].extra, leaf: JSON.parse(JSON.stringify(op.leaf)) as LeafExtra }));
   compatibilityState.converting = true;
   try {
-    meta[backupKey] = original;
-    // 先将旧格式备份单独落盘，失败则不动任何叶子。
-    await ctx.saveMetadata();
-    requireSameChat();
+    if (!reuseBackup) {
+      meta[backupKey] = original;
+      // 先将旧格式备份单独落盘，失败则不动任何叶子。
+      await ctx.saveMetadata();
+      requireSameChat();
+    }
     for (const op of operations) op.message.extra = { ...op.extra, bbs_leaf: op.leaf };
     meta[MEMORY_KEY] = { ...raw, version: MEMORY_VERSION, summaries: convertedForest(raw) };
     // 一次完整聊天保存先持久化叶子和备份，然后等待元数据保存；不使用不受等待的防抖迁移。
@@ -88,12 +118,54 @@ export async function convertLegacyMemory(): Promise<void> {
   } catch (error) {
     for (const op of operations) op.message.extra = op.extra;
     meta[MEMORY_KEY] = raw;
-    // 备份保留，避免未知磁盘状态下重试覆盖；原元数据从未丢弃。
-    throw new Error('转换保存未确认成功，已恢复内存中的原记录并保留备份。请先导出聊天核对，不要重建。' + String(error));
+    // 备份保留；它与当前旧记录相同，重新载入聊天后可以直接重试。
+    throw new Error('转换保存未确认成功，已恢复内存中的原记录并保留备份。可重新载入聊天后在摘要页重试转换；仍失败时先导出聊天核对，不要重建。' + String(error));
   } finally {
     compatibilityState.converting = false;
     if (stillHere()) loadMemory();
   }
+}
+
+/** 本聊天是否为酒馆的分支或检查点:元数据带 main_chat,消息只复制到分支点,总结却整份复制过来。 */
+function isBranchChat(meta: Record<string, unknown> | undefined): boolean {
+  return typeof meta?.main_chat === 'string' && !!meta.main_chat.trim();
+}
+
+/** 从当前聊天的元数据里删掉兼容检查认定可以清理的残缺总结;返回删掉的条数。不保存、不重载。 */
+function pruneRepairableSummaries(): number {
+  const ctx = getContext();
+  const meta = ctx?.chatMetadata as Record<string, unknown> | undefined;
+  const raw = meta?.[MEMORY_KEY];
+  const ids = new Set(compatibilityState.repairable);
+  if (!meta || !ids.size || compatibilityState.mode !== 'protected' || !isRecord(raw) || !Array.isArray(raw.summaries)) return 0;
+  const summaries = raw.summaries.filter(s => !(isRecord(s) && typeof s.id === 'string' && ids.has(s.id)));
+  const removed = raw.summaries.length - summaries.length;
+  if (removed) meta[MEMORY_KEY] = { ...raw, summaries };
+  return removed;
+}
+
+/**
+ * 清理引用了缺失楼层的残缺总结链(连同其上层),只改本聊天的元数据;逐楼摘要和其余总结保留,之后按设置重新合并。
+ * 只在兼容检查认定除缺失引用外结构都正常时执行(版本未知、重复 ID、循环引用、层级倒置不处理)。返回删除的条数。
+ */
+export async function repairBrokenSummaries(): Promise<number> {
+  const ctx = getContext();
+  if (!ctx?.getCurrentChatId?.()) throw new Error('请先打开聊天');
+  if (compatibilityState.converting) throw new Error('正在本地转换旧记忆，请稍候。');
+  checkCompatibility();
+  const meta = ctx.chatMetadata as Record<string, unknown>;
+  const before = meta[MEMORY_KEY];
+  const removed = pruneRepairableSummaries();
+  if (!removed) return 0;
+  try {
+    if (typeof ctx.saveMetadata === 'function') await ctx.saveMetadata();
+    else ctx.saveMetadataDebounced?.();
+  } catch (error) {
+    if (getContext()?.chatMetadata === meta) meta[MEMORY_KEY] = before;
+    throw new Error('清理后的记录没有保存成功，已恢复原记录。请稍后重试。' + String(error));
+  }
+  if (getContext()?.chatMetadata === meta) loadMemory();
+  return removed;
 }
 
 
@@ -294,11 +366,23 @@ function loadVarTemplates(rawChatTemplate: unknown): Record<VarTier, VarTemplate
   };
 }
 
-/** 从当前聊天载入森林 + 三层变量模板 + 重算派生(必要时迁移) */
+/**
+ * 从当前聊天载入森林 + 三层变量模板 + 重算派生(必要时迁移)。
+ * 酒馆的分支和检查点会整份复制原聊天的总结,消息却只保留到分支点:只因此有总结引用了不存在的楼层、
+ * 其余结构都正常时,载入时清理掉这些残缺的总结链(只改这个分支自己的元数据),并提示清理了几条。
+ */
 export function loadMemory() {
   checkCompatibility();
   const ctx = getContext();
   const meta = ctx?.chatMetadata as Record<string, unknown> | undefined;
+  let repaired = 0;
+  if (compatibilityState.mode === 'protected' && compatibilityState.repairable.length && isBranchChat(meta) && !compatibilityState.converting) {
+    repaired = pruneRepairableSummaries();
+    if (repaired) {
+      ctx?.saveMetadataDebounced?.();
+      checkCompatibility();
+    }
+  }
   const raw = meta?.[MEMORY_KEY];
   const data = isRecord(raw) ? raw : undefined;
   const templates = loadVarTemplates(data?.varsTemplate);
@@ -306,6 +390,9 @@ export function loadMemory() {
   assignForest(memory, compatibilityState.mode === 'ready' && Array.isArray(data?.summaries)
     ? data.summaries as MemSummary[] : [], templates);
   recomputeDerived();
+  if (repaired) {
+    toast(`这个分支（或检查点）复制了原聊天的全部总结，其中 ${repaired} 条总结包含分支点之后的楼层，已从本分支删除；逐楼摘要保留，之后会按设置重新合并。原聊天不受影响。`, 'info');
+  }
 }
 
 /**
@@ -341,7 +428,15 @@ export function bindChatLifecycle() {
   ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED, () => {
     flushLeavesNow();
     loadMemory();
+    relocateStaleManualOps();
   });
   // 首次载入
   loadMemory();
+  relocateStaleManualOps();
+}
+
+/** 载入后:插件没在运行时发生的翻页或重抽,会把手动修改留在失效的摘要上,移到之前最近一条有效摘要。 */
+function relocateStaleManualOps(): void {
+  const chat = getContext()?.chat;
+  if (chat && relocateManualOps(chat)) { recomputeDerived(); scheduleLeafFlush(); }
 }

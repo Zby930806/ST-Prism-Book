@@ -26,7 +26,12 @@ describe('v0.18 内容边界（不代表模型语义通过）', () => {
   });
 
   it('未成年人与成年人两段保持同一口径', () => {
-    expect(p.RULE_CONTENT_BOUNDARY).toContain('年龄不明按未成年处理,不按外表或设定推断为成年');
+    // 有任何未成年特征就按未成年处理,外表或设定不能抵消;只有明确为成年人才按成年人处理;判断不了时不写性内容细节
+    expect(p.RULE_CONTENT_BOUNDARY).toContain('当事人有任何未成年特征(年龄、年级或学生身份、儿童体态描写等),或剧情按未成年处理时,一律按未成年处理');
+    expect(p.RULE_CONTENT_BOUNDARY).toContain('外表成熟或「设定上已成年」不能抵消');
+    expect(p.RULE_CONTENT_BOUNDARY).toContain('只有正文或设定明确为成年人且没有未成年特征时,才按成年人处理');
+    expect(p.RULE_CONTENT_BOUNDARY).toContain('年龄无法判断:不写性内容细节,只记录关系变化等必要事实');
+    expect(p.RULE_CONTENT_BOUNDARY).not.toContain('年龄不明按未成年处理');
     expect(p.RULE_CONTENT_BOUNDARY).toContain('成年角色之间的亲密或性内容属于允许的范围');
     expect(p.RULE_CONTENT_BOUNDARY).toContain('按正文实际写到的程度如实记录');
     // 各层用同一段文字，不再出现「摘要只写关系变化、总结写细节」两种标准

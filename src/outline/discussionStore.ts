@@ -5,6 +5,17 @@ import { captureOutlineSource, outlineInputUnchanged, sameOutlineChat, type Outl
 /** at：发送或收到的时间（毫秒时间戳）。prism.15 起记录；更早的讨论没有这一项。 */
 export type DiscussionMessage = { role: 'user' | 'assistant'; content: string; at?: number };
 export const DISCUSSION_DATA_KEY = 'prism_book_outline_discussion';
+/** 讨论的容量上限（按 JS 字符计）：每次提问、每条回答、保存的轮数和总字数。 */
+export const DISCUSSION_LIMITS = Object.freeze({ question: 4000, answer: 8000, rounds: 12, total: 48000 });
+/**
+ * 发送前的余量：已有字数、本轮问题最多还能写多长（预留一条最长回答的空间），以及是否已满轮。
+ * 这样回答回来时一定存得下，不会生成后才因总字数超限被拒。
+ */
+export function discussionRoom(list: DiscussionMessage[]): { used: number; question: number; full: boolean } {
+  const used = list.reduce((sum, message) => sum + message.content.length, 0);
+  const L = DISCUSSION_LIMITS;
+  return { used, full: list.length >= L.rounds * 2, question: Math.max(0, Math.min(L.question, L.total - used - L.answer)) };
+}
 export const discussionState = reactive<{
   messages: DiscussionMessage[]; revision: number; saving: boolean; issue: string;
 }>({ messages: [], revision: 0, saving: false, issue: '' });
@@ -185,9 +196,18 @@ export async function appendDiscussionTurn(
     timed ? { role: 'assistant', content: answer, at: times!.answer } : { role: 'assistant', content: answer },
   );
   const total = next.reduce((sum, message) => sum + message.content.length, 0);
-  // 存储不是请求上下文窗口：超限必须由用户决定清空，不能静默淘汰旧问答。
-  if (next.length > 24) throw new DiscussionError('讨论最多保存12轮（24条消息），请先确认清空讨论后再继续；已有记录未改动。');
-  if (total > 48000) throw new DiscussionError('讨论总内容不能超过48000字，请缩短本轮内容或先确认清空讨论；已有记录未改动。');
+  // 存储不是请求上下文窗口：超限必须由用户决定删除最早的一轮或清空，不能静默淘汰旧问答。
+  if (next.length > 24) throw new DiscussionError('讨论最多保存12轮（24条消息）。请先删除最早的一轮或确认清空讨论，再继续；已有记录未改动。');
+  if (total > 48000) throw new DiscussionError('讨论总内容不能超过48000字。请缩短本轮内容，或先删除最早的一轮、确认清空讨论；已有记录未改动。');
+  await persist({ version: dataVersion(next), messages: next }, ctx);
+}
+
+/** 删除最早的一轮问答，其余记录不变；仅由 UI 明确确认后调用。 */
+export async function removeOldestDiscussionTurn(expectedRevision: number): Promise<void> {
+  const ctx = editable();
+  if (discussionState.revision !== expectedRevision) throw new DiscussionError('讨论版本已变化，请重新载入后操作。');
+  if (messages.length < 2) throw new DiscussionError('没有可以删除的讨论。');
+  const next = copyMessages(messages).slice(2);
   await persist({ version: dataVersion(next), messages: next }, ctx);
 }
 

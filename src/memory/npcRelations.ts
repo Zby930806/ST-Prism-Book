@@ -132,9 +132,13 @@ export const NPC_AFFINITY_FIELDS = (['affinityInner', 'affinityOuter'] as const)
   ],
 }));
 
-/** 拒绝百分制、小数、字符串和布尔值,不能把非法值截断成某个真实档位。 */
+/**
+ * 拒绝百分制、小数、越界值和布尔值,不能把非法值截断成某个真实档位。
+ * 模型常把档位写成带引号的数字:只接受完整写成 -2 到 2 的整数字符串(可带正负号和首尾空白),其余字符串一律拒绝。
+ */
 export function cleanNpcAffinityLevel(value: unknown): NpcAffinityLevel | null | undefined {
   if (value === null) return null;
+  if (typeof value === 'string') return /^\s*[+-]?[0-2]\s*$/.test(value) ? (Number(value.trim()) + 0) as NpcAffinityLevel : undefined;
   return typeof value === 'number' && Number.isInteger(value) && value >= -2 && value <= 2
     ? value as NpcAffinityLevel : undefined;
 }

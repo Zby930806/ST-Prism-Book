@@ -59,12 +59,16 @@ getInjectedHistory() 在受阻时返回空 text、relativeText 和 nodes；{{bbs
 
 ## 等待接口就绪
 
-插件加载顺序不固定。推荐先检查全局对象，未就绪时再监听事件：
+插件加载顺序不固定。全局对象 `globalThis.STBaiBaiBook` 先挂上，`/bbs-get` 斜杠命令和宏随后注册；注册完成后 `api.ready` 变为 `true`，并发出 `st-baibai-book:ready` 事件。
+
+只调用 JavaScript 读取方法时，见到全局对象即可使用。需要根据 `capabilities` 判断斜杠命令或宏是否可用时，应等 `ready` 为 `true` 再读，注册完成前 `slashCommand`、`macros`、`parameterizedMacros` 都是 `false`：
 
 ```js
 function useBaiBaiBook(callback) {
-  if (globalThis.STBaiBaiBook) {
-    callback(globalThis.STBaiBaiBook);
+  const api = globalThis.STBaiBaiBook;
+  // 更早的版本没有 ready 字段：见到全局对象就回调（与旧写法相同）
+  if (api && (api.ready || !('ready' in api))) {
+    callback(api);
     return;
   }
 
@@ -76,6 +80,8 @@ function useBaiBaiBook(callback) {
 }
 ```
 
+`ready` 是增量字段，更早的版本没有。上面的写法在没有这个字段时见到全局对象就回调，不会一直等待已经发出过的就绪事件；这时 `capabilities` 可能还没有更新，需要时再按需检查。
+
 接口就绪后可检查能力：
 
 ```js
@@ -83,6 +89,7 @@ const api = globalThis.STBaiBaiBook;
 
 console.log(api.apiVersion);     // 1
 console.log(api.pluginVersion);  // 棱镜宝书插件版本
+console.log(api.ready);          // 斜杠命令和宏是否已注册完成
 console.log(api.capabilities);
 ```
 
@@ -91,6 +98,7 @@ console.log(api.capabilities);
 ```js
 {
   globalApi: true,
+  sharedApiChannels: true,
   slashCommand: true,
   macros: true,
   parameterizedMacros: true,
@@ -98,7 +106,9 @@ console.log(api.capabilities);
 }
 ```
 
-若宿主版本不支持某个注册入口，对应字段会是 `false`。旧宏引擎支持固定无参数宏，但不支持参数化宏，因此通常是 `macros: true`、`parameterizedMacros: false`。
+- `globalApi`、`events`：始终为 `true`。
+- `sharedApiChannels`：始终为 `true`，表示副 API 渠道保存在与柏宝绘等同源插件共用的 `extension_settings.baibai_api_channels` 中。
+- `slashCommand`、`macros`、`parameterizedMacros`：取决于酒馆版本，注册成功后才为 `true`。若宿主版本不支持某个注册入口，对应字段会是 `false`。旧宏引擎支持固定无参数宏，但不支持参数化宏，因此通常是 `macros: true`、`parameterizedMacros: false`。
 
 ## JavaScript API
 
@@ -232,9 +242,11 @@ console.log(injectedHistory.nodes);
 console.log(injectedHistory.coverage);
 ```
 
-`getInjectedHistory()` 与棱镜宝书正常记忆注入共用同一套节点选择规则：只返回正文已经隐藏、已离开滑动窗口的有效摘要，并使用当前最新故事时间生成相对时间。`relativeText` 是宏和正常注入使用的历史正文；`text` 是相同节点的纯绝对时间版本。
+`getInjectedHistory()` 与棱镜宝书正常记忆注入共用同一套节点选择规则：只返回正文已经隐藏、已离开滑动窗口的有效摘要，并使用当前最新故事时间生成相对时间。`relativeText` 是带相对时间的历史正文；`text` 是相同节点的纯绝对时间版本。
 
-返回值不包含棱镜宝书内部注入槽使用的外围提示语，只包含历史剧情正文。
+它不受「记忆注入预算」影响，始终返回全部选中的节点。用户在「设置 → 注入设置」填写了预算、历史放不下时，正常注入会省略一部分总结并附上省略提示（覆盖故事开头的最高层总结优先保留，其余从新到旧连续保留），这时 `getInjectedHistory()` 和 `{{bbsInjectedHistory}}` 返回的内容会多于实际注入的内容。预算为 0（默认，不限制）时两者一致。
+
+返回值不包含棱镜宝书内部注入槽使用的外围提示语和预算省略提示，只包含历史剧情正文。
 
 ### 读取单楼
 
@@ -289,7 +301,7 @@ snapshot, history, injectedHistory, floor, context
 - `var` 需要 `path`。
 - `floor`、`context` 需要 `floor`。
 - `history` 使用 `before`；也接受 `floor` 作为截止点别名。
-- `injectedHistory` 无需额外参数，使用正常记忆注入的滑动窗口过滤规则。
+- `injectedHistory` 无需额外参数，使用正常记忆注入的滑动窗口过滤规则，不受记忆注入预算影响（见上文）。
 - 其余状态资源可选 `floor` 和 `at`。
 
 ## 变更通知
@@ -370,7 +382,7 @@ window.addEventListener('st-baibai-book:changed', event => {
 
 - `json`：默认；始终输出合法紧凑 JSON，缺失变量为 `null`。
 - `raw`：字符串/数字/布尔值不带 JSON 引号；对象和数组仍输出紧凑 JSON。
-- `text`：普通历史返回绝对时间正文；注入口径历史返回与正常注入相同的相对时间正文；单楼返回摘要（无摘要则返回清洗后的正文）；楼层上下文返回“此前历史 + 本楼摘要”。
+- `text`：普通历史返回绝对时间正文；注入口径历史返回与正常注入选用相同节点的相对时间正文（不受记忆注入预算影响）；单楼返回摘要（无摘要则返回清洗后的正文）；楼层上下文返回“此前历史 + 本楼摘要”。
 
 ## ST 宏
 
@@ -381,7 +393,7 @@ window.addEventListener('st-baibai-book:changed', event => {
 {{bbsState}}      当前时间/地点状态，紧凑 JSON
 {{bbsSnapshot}}   当前完整快照，紧凑 JSON
 {{bbsHistory}}    当前全部压缩历史，带相对时间的纯文本
-{{bbsInjectedHistory}} 与正常记忆注入相同，跳过滑动窗口内摘要
+{{bbsInjectedHistory}} 正常记忆注入选用的历史，跳过滑动窗口内摘要，不受注入预算影响
 ```
 
 ### 新宏引擎支持参数
@@ -397,7 +409,7 @@ window.addEventListener('st-baibai-book:changed', event => {
 
 `{{bbsHistory}}` 和 `{{bbsHistory::42}}` 返回 `getHistory(...).relativeText`。后者只包含 `mesid < 42` 的剧情，并以第 42 楼之前的最新故事时间计算“昨天”“三天前”和周几等标记。
 
-`{{bbsInjectedHistory}}` 返回 `getInjectedHistory().relativeText`，与正常记忆注入使用相同的节点选择和相对时间规则，因此会自动跳过滑动窗口内仍发送全文的摘要。
+`{{bbsInjectedHistory}}` 返回 `getInjectedHistory().relativeText`，与正常记忆注入使用相同的节点选择和相对时间规则，因此会自动跳过滑动窗口内仍发送全文的摘要。它不经过记忆注入预算的裁剪：填写了预算、历史放不下时，返回的内容多于插件实际注入的内容。
 
 宏中的字符串值原样返回；数字和布尔值转为字符串；对象和数组使用紧凑 JSON；`null`、不存在的变量或查询错误返回空字符串。
 

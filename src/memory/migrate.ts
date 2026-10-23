@@ -4,17 +4,18 @@
  * 关键事实:Horae 与棱镜宝书共用**同一批聊天文件的同一批消息对象**——Horae 把数据挂在
  * `chat[i].horae_meta`,棱镜宝书挂在 `chat[i].extra.bbs_leaf`,两者并存于同一条 msg 上。
  * 所以迁移直接读「当前打开聊天」的 `ctx.chat[i].horae_meta` 产出棱镜宝书数据,不跨文件。
- * 范式照搬 carryover.ts:读源 → 造叶子(挂 extra)+ 森林(写 metadata)+ 把最终状态编码成种子 delta。
+ * 范式照搬 carryover.ts:读源 → 造叶子(挂 extra)+ 森林(写 metadata)+ 把最终状态单独存在叶子上。
  *
  * 模型映射(详见 memory 里的 horae-migration-feature):
- *  - 每个有叙事的 AI 楼 → 一片叶子;text = 该楼非摘要 events 的 summary 拼接。
+ *  - 每个有叙事的 AI 楼 → 一片叶子;text = 该楼非摘要 events 的 summary 拼接。没有 events 的 AI 楼迁移后是待摘要楼层。
  *  - Horae 时间是**时间点**(每层一个),棱镜宝书是**时间段**:叶子 timeEnd = 本层时间点,
  *    timeStart = 上一已知时间点(段的左界);缺失则沿用上一已知值(carry-forward)。
  *  - Horae autoSummaries(带 range/depth、嵌套 mergedSummaries)→ 棱镜宝书森林 comp 节点:
- *    递归 flatten,depth→level,childIds 由「直接子条目 + 范围内未被子条目覆盖的叶子」重建。
- *  - 物品/计划是 Horae 的**逐层快照**(非增量),按楼序折叠出最终态,整包作为 add-delta 挂到
- *    最后一片叶子(避免逐层重放重复累加)。
- *  - 弃掉棱镜宝书没有的:affection / npcs / costumes / mood / relationships / RPG / customTables。
+ *    递归 flatten,depth→level,先处理子条目再处理父条目,childIds 只收已保留的子条目与范围内未被子条目覆盖的叶子;
+ *    整棵子树都没有叶子的条目存为导入历史(保住总结文字,覆盖的楼层不再算待摘要)。
+ *  - 物品/计划是 Horae 的**逐层快照**(非增量),按楼序折叠出最终态,整包存在最后一片叶子的 migratedDelta 上
+ *    (不并入 delta:重新摘要这一楼时 delta 换成新结果,迁移来的状态仍保留;重建记忆时按正文重新推算后替换)。
+ *  - 角色、好感、着装、关系等暂不迁移:Horae 的这些字段格式尚未核对,映射之前不转换(心情、RPG、自定义表格同样不迁移)。
  */
 
 import { getContext, type STMessage } from '@/st/context';
@@ -131,6 +132,8 @@ export interface MigrationPlan {
   hasData: boolean;
   /** 有叙事可建叶子的 AI 楼数 */
   leafFloors: number;
+  /** 没有 Horae 记录、迁移后仍待摘要的 AI 楼数(补齐之前会拦截生成) */
+  pendingFloors: number;
   /** 可迁移的总结(压缩节点)数 */
   summaryCount: number;
   /** 最终库存物品数 */
@@ -226,31 +229,150 @@ function flattenHoraeSummaries(
   return out;
 }
 
+/** 各 AI 楼的「时间点」:本层没有时沿用上一已知值(carry-forward)。 */
+function horaeFloorTimes(chat: STMessage[], aiFloors: number[]): Map<number, string> {
+  const floorTime = new Map<number, string>();
+  let lastKnown = '';
+  for (const idx of aiFloors) {
+    const t = combineTime(horaeMeta(chat[idx])?.timestamp);
+    if (t) lastKnown = t;
+    floorTime.set(idx, lastKnown);
+  }
+  return floorTime;
+}
+
+/**
+ * Horae autoSummaries → 棱镜宝书森林节点。先处理子条目再处理父条目(flat 中父条目在前,倒序即后序),
+ * childIds 只收已保留的子条目和范围内未被子条目覆盖的叶子,不留悬空引用。
+ * 整棵子树都没有叶子的条目存为导入历史:保住总结文字,覆盖的楼层也不再算待摘要;没有有效范围的空条目跳过。
+ */
+function buildHoraeForest(
+  chat: STMessage[],
+  flat: Array<{ entry: HoraeSummaryEntry; parentId: string | null }>,
+  leafIdByFloor: Map<number, string>,
+  floorTime: Map<number, string>,
+): MemSummary[] {
+  const childEntriesByParent = new Map<string, HoraeSummaryEntry[]>();
+  for (const { entry, parentId } of flat) {
+    if (!parentId) continue;
+    const list = childEntriesByParent.get(parentId) ?? [];
+    list.push(entry);
+    childEntriesByParent.set(parentId, list);
+  }
+  const base = Date.now();
+  const kept = new Map<string, MemSummary>();
+  for (let k = flat.length - 1; k >= 0; k--) {
+    const { entry } = flat[k];
+    const id = String(entry.id);
+    if (kept.has(id)) continue;
+    const level = normalizeDepth(entry.depth);
+    const childEntries = childEntriesByParent.get(id) ?? [];
+    const childRanges = childEntries.map(c => c.range).filter(Boolean) as [number, number][];
+    // childIds:① 已保留的直接子条目 id(下层 comp 或导入历史);② 本范围内、未被任何子条目范围覆盖的叶子 id。
+    const childIds: string[] = childEntries.map(c => String(c.id)).filter(cid => kept.has(cid));
+    const range = entry.range;
+    if (range) {
+      for (let i = range[0]; i <= range[1]; i++) {
+        const leafId = leafIdByFloor.get(i);
+        if (!leafId) continue;
+        if (childRanges.some(([a, b]) => i >= a && i <= b)) continue; // 已属某子条目
+        childIds.push(leafId);
+      }
+    }
+    const text = (entry.summaryText ?? '').trim();
+    const common = { id, text, level, createdAt: base + k, auto: entry.auto !== false };
+    if (childIds.length) {
+      // 时间段:范围内首尾叶子的起止
+      const { start, end } = rangeTimeSpan(range, floorTime, leafIdByFloor);
+      kept.set(id, { ...common, timeStart: start || undefined, timeEnd: end || undefined, childIds });
+      continue;
+    }
+    const validRange = !!range && Number.isInteger(range[0]) && Number.isInteger(range[1]) && range[0] >= 0 && range[0] <= range[1] && range[1] < chat.length;
+    if (!validRange || !text) continue; // 空壳且范围不明:跳过
+    const { start, end } = floorSpanTime(range!, floorTime);
+    kept.set(id, { ...common, timeStart: start || undefined, timeEnd: end || undefined, childIds: [], imported: true, importedFloorStart: range![0], importedFloorEnd: range![1] });
+  }
+  // 输出保持 flat 的原有次序(父条目在前)
+  return flat.map(({ entry }) => kept.get(String(entry.id))).filter((s): s is MemSummary => !!s);
+}
+
+/** 导入历史(范围内没有叶子)的时间段:取范围内 AI 楼已知时间点的首尾。 */
+function floorSpanTime(range: [number, number], floorTime: Map<number, string>): { start: string; end: string } {
+  let start = '';
+  let end = '';
+  for (let i = range[0]; i <= range[1]; i++) {
+    const t = floorTime.get(i) || '';
+    if (t && !start) start = t;
+    if (t) end = t;
+  }
+  return { start, end };
+}
+
+/** 导入历史覆盖的楼层(迁移后不再算待摘要)。 */
+function importedFloors(summaries: MemSummary[]): Set<number> {
+  const out = new Set<number>();
+  for (const s of summaries) {
+    if (!s.imported) continue;
+    for (let i = s.importedFloorStart ?? 0; i <= (s.importedFloorEnd ?? -1); i++) out.add(i);
+  }
+  return out;
+}
+
+/** 聊天里是否有 Horae 的旧数据。 */
+export function hasHoraeData(chat: STMessage[]): boolean {
+  return chat.some(m => !!horaeMeta(m));
+}
+
+/**
+ * 早先版本的迁移把最终物品、计划写在最后一片叶子的 delta 里(现在单独存在 migratedDelta),这类叶子无法可靠识别。
+ * 只在「聊天有 Horae 数据、这一楼正是迁移时承载最终状态的那一楼、叶子正文仍是 Horae 的叙事、delta 带物品或计划新增」时
+ * 判为可能,返回该楼层,供重新摘要前提示;否则返回 -1。
+ */
+export function legacyMigrationSeedFloor(chat: STMessage[]): number {
+  if (!hasHoraeData(chat)) return -1;
+  let floor = -1;
+  for (let i = chat.length - 1; i >= 0 && floor < 0; i--) if (isAiFloor(chat[i]) && narrativeOf(horaeMeta(chat[i]))) floor = i;
+  for (let i = chat.length - 1; i >= 0 && floor < 0; i--) if (isAiFloor(chat[i])) floor = i;
+  if (floor < 0) return -1;
+  const leaf = chat[floor]?.extra?.bbs_leaf as (LeafExtra & { migratedDelta?: StoredDelta }) | undefined;
+  if (!leaf || leaf.migratedDelta) return -1;
+  if ((typeof leaf.text === 'string' ? leaf.text.trim() : '') !== narrativeOf(horaeMeta(chat[floor]))) return -1;
+  const delta = leaf.delta ?? {};
+  return delta.items?.add?.length || delta.plans?.add?.length ? floor : -1;
+}
+
 /** 计算迁移计划(只读,不产生副作用),供 UI 预览与按钮启停。 */
 export function computeMigrationPlan(): MigrationPlan {
   const blockedReason = memoryWriteIssue();
-  if (blockedReason) return { hasData: false, leafFloors: 0, summaryCount: 0, itemCount: 0, planCount: 0, willOverwrite: false, blockedReason };
+  if (blockedReason) return { hasData: false, leafFloors: 0, pendingFloors: 0, summaryCount: 0, itemCount: 0, planCount: 0, willOverwrite: false, blockedReason };
   const ctx = getContext();
   const chat = ctx?.getCurrentChatId?.() ? ctx?.chat ?? [] : [];
 
-  let leafFloors = 0;
-  for (let i = 0; i < chat.length; i++) {
-    if (!isAiFloor(chat[i])) continue;
-    if (narrativeOf(horaeMeta(chat[i]))) leafFloors++;
-  }
+  const aiFloors: number[] = [];
+  for (let i = 0; i < chat.length; i++) if (isAiFloor(chat[i])) aiFloors.push(i);
+  // 按迁移的口径模拟建叶子(只用占位 id),算出迁移后仍待摘要的楼层
+  const leafIdByFloor = new Map<number, string>();
+  for (const i of aiFloors) if (narrativeOf(horaeMeta(chat[i]))) leafIdByFloor.set(i, 'preview-' + i);
+  const leafFloors = leafIdByFloor.size;
 
   const tops = (chat[0] && horaeMeta(chat[0])?.autoSummaries) || [];
-  const summaryCount = flattenHoraeSummaries(tops).length;
+  const flat = flattenHoraeSummaries(tops);
+  const summaryCount = flat.length;
 
   const items = foldFinalItems(chat);
   const plans = foldOpenPlans(chat);
 
   const hasData =
     leafFloors > 0 || summaryCount > 0 || items.length > 0 || !!plans?.add?.length;
+  // 没有任何叙事、只有状态时,迁移会在最后一个 AI 楼挂一片空摘要承载状态
+  if (hasData && !leafFloors && aiFloors.length) leafIdByFloor.set(aiFloors[aiFloors.length - 1], 'preview-seed');
+  const covered = importedFloors(buildHoraeForest(chat, flat, leafIdByFloor, horaeFloorTimes(chat, aiFloors)));
+  const pendingFloors = hasData ? aiFloors.filter(i => !leafIdByFloor.has(i) && !covered.has(i)).length : 0;
 
   return {
     hasData,
     leafFloors,
+    pendingFloors,
     summaryCount,
     itemCount: items.length,
     planCount: plans?.add?.length ?? 0,
@@ -314,13 +436,7 @@ export async function runHoraeMigration(): Promise<boolean> {
     for (let i = 0; i < chat.length; i++) if (isAiFloor(chat[i])) aiFloors.push(i);
 
     // 先算每个 AI 楼的「时间点」(carry-forward:本层无则沿用上一已知)
-    const floorTime = new Map<number, string>();
-    let lastKnown = '';
-    for (const idx of aiFloors) {
-      const t = combineTime(horaeMeta(chat[idx])?.timestamp);
-      if (t) lastKnown = t;
-      floorTime.set(idx, lastKnown);
-    }
+    const floorTime = horaeFloorTimes(chat, aiFloors);
 
     // 楼 idx → 新建叶子 id(供森林 childIds 引用);仅有叙事的楼建叶子。
     const leafIdByFloor = new Map<number, string>();
@@ -350,7 +466,8 @@ export async function runHoraeMigration(): Promise<boolean> {
       if (end) prevTime = end;
     }
 
-    // ===== 2. 把最终状态(物品/计划/时间/地点)编码成种子 delta,挂到最后一片叶子 =====
+    // ===== 2. 把最终状态(物品/计划/时间/地点)单独存在最后一片叶子的 migratedDelta 上 =====
+    // 不并入 delta:重新摘要这一楼时 delta 换成新结果,迁移来的状态仍保留(重放时在 delta 之后施加)。
     // 若没有任何叙事叶子但有状态,造一条空文本叶子挂到最后一个 AI 楼承载它。
     const items = foldFinalItems(chat);
     const plans = foldOpenPlans(chat);
@@ -374,62 +491,18 @@ export async function runHoraeMigration(): Promise<boolean> {
     }
 
     if (lastLeafFloor >= 0) {
-      const seedLeaf = chat[lastLeafFloor].extra!.bbs_leaf as LeafExtra;
-      const delta: StoredDelta = seedLeaf.delta ?? (seedLeaf.delta = {});
-      if (items.length) delta.items = { add: items };
-      if (plans) delta.plans = plans;
-      if (finalState.time) delta.time = finalState.time;
-      if (finalState.location) delta.location = finalState.location;
+      const seedLeaf = chat[lastLeafFloor].extra!.bbs_leaf as LeafExtra & { migratedDelta?: StoredDelta };
+      const migrated: StoredDelta = {};
+      if (items.length) migrated.items = { add: items };
+      if (plans) migrated.plans = plans;
+      if (finalState.time) migrated.time = finalState.time;
+      if (finalState.location) migrated.location = finalState.location;
+      if (Object.keys(migrated).length) seedLeaf.migratedDelta = migrated;
     }
 
-    // ===== 3. 重建森林(autoSummaries → comp 节点) =====
+    // ===== 3. 重建森林(autoSummaries → comp 节点;整棵子树没有叶子的存为导入历史) =====
     const tops = (chat[0] && horaeMeta(chat[0])?.autoSummaries) || [];
-    const flat = flattenHoraeSummaries(tops);
-
-    // 子条目集合:供「直接覆盖范围内、未被子条目覆盖的叶子」计算 childIds。
-    const childEntriesByParent = new Map<string, HoraeSummaryEntry[]>();
-    for (const { entry, parentId } of flat) {
-      if (parentId) {
-        const arr = childEntriesByParent.get(parentId) ?? [];
-        arr.push(entry);
-        childEntriesByParent.set(parentId, arr);
-      }
-    }
-
-    const newSummaries: MemSummary[] = [];
-    let order = 0;
-    for (const { entry } of flat) {
-      const id = String(entry.id);
-      const level = normalizeDepth(entry.depth);
-      const childEntries = childEntriesByParent.get(id) ?? [];
-      const childRanges = childEntries.map(c => c.range).filter(Boolean) as [number, number][];
-
-      // childIds:① 直接子条目 id(下层 comp);② 本范围内、未被任何子条目范围覆盖的叶子 id。
-      const childIds: string[] = childEntries.map(c => String(c.id));
-      const range = entry.range;
-      if (range) {
-        for (let i = range[0]; i <= range[1]; i++) {
-          const leafId = leafIdByFloor.get(i);
-          if (!leafId) continue;
-          if (childRanges.some(([a, b]) => i >= a && i <= b)) continue; // 已属某子条目
-          childIds.push(leafId);
-        }
-      }
-      if (!childIds.length) continue; // 空壳节点(范围内叶子全没了)跳过
-
-      // 时间段:范围内首尾叶子的起止
-      const { start, end } = rangeTimeSpan(range, floorTime, leafIdByFloor);
-      newSummaries.push({
-        id,
-        text: (entry.summaryText ?? '').trim(),
-        level,
-        createdAt: Date.now() + order++,
-        auto: entry.auto !== false,
-        timeStart: start || undefined,
-        timeEnd: end || undefined,
-        childIds,
-      });
-    }
+    const newSummaries = buildHoraeForest(chat, flattenHoraeSummaries(tops), leafIdByFloor, floorTime);
 
     // 完整候选通过检查后才一次同步安装；保存分步等待，不声称磁盘原子性。
     const oldRaw = meta[MEMORY_KEY];
@@ -481,9 +554,12 @@ export async function runHoraeMigration(): Promise<boolean> {
     await syncHiddenNow();
     requireSource();
 
+    const covered = importedFloors(newSummaries);
+    const pendingAfter = aiFloors.filter(i => !leafIdByFloor.has(i) && !covered.has(i)).length;
     toast(
-      `迁移完成:叶子 ${leafIdByFloor.size} 片 / 总结 ${newSummaries.length} 条 / 物品 ${items.length} / 计划 ${plans?.add?.length ?? 0}`,
-      'success',
+      `迁移完成：摘要 ${leafIdByFloor.size} 层，总结 ${newSummaries.length} 条，物品 ${items.length} 个，计划悬念 ${plans?.add?.length ?? 0} 条。`
+        + (pendingAfter ? `另有 ${pendingAfter} 层没有 Horae 记录，需要在摘要页补摘，补齐之前会拦截生成。` : ''),
+      pendingAfter ? 'warning' : 'success',
     );
     return true;
   } catch (e) {

@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ApiChannel } from './settings';
+import { nextTick } from 'vue';
+import { apiSettings, MAIN_API_MAX_TOKENS_DEFAULT, type ApiChannel } from './settings';
 import * as context from '@/st/context';
 import type { STContext } from '@/st/context';
-import { ApiError, requestCompletion, requestViaMainApi, testChannel } from './client';
+import {
+  ApiError, mainApiResponseLength, mainApiTokenState, requestCompletion, requestViaMainApi, resetMainApiTokenFallback, testChannel,
+} from './client';
+import { isRetryable } from './errors';
 
 const channel: ApiChannel = {
   id: 'err-test', name: '测试渠道', url: 'https://example.invalid/v1', key: 'k',
@@ -177,14 +181,81 @@ describe('连接测试与主 API', () => {
     expect(JSON.parse(fetchMock.mock.calls[1][1]!.body as string).reverse_proxy).toBe('https://relay.example');
   });
 
-  it('主 API 抛出 [object Object] 时不展示无意义的原文，引导看酒馆报错', async () => {
-    generateRaw.mockRejectedValueOnce(new Error('[object Object]'));
+  it('主 API 抛出 [object Object] 时不展示无意义的原文，引导看酒馆报错，并写明插件临时设的最大回复', async () => {
+    generateRaw.mockRejectedValue(new Error('[object Object]'));
     const error = await failure(requestViaMainApi(messages));
     expect(error).toMatchObject({ kind: 'upstream', title: '主 API 请求失败', detail: '' });
     expect(error.hint).toContain('酒馆弹出的报错');
+    expect(error.hint).toContain('插件请求时会把主 API 的最大回复临时设为 32000 tokens，失败后改为 8192 重试，仍然失败');
+    expect(error.hint).toContain('设置 → 摘要设置 → 跟随主 API 时的最大回复');
+    // 已经换成 8192 重试过，调用方不再整套重发
+    expect(isRetryable(error)).toBe(false);
+    generateRaw.mockReset();
     generateRaw.mockRejectedValueOnce(new Error('No message generated'));
     expect((await failure(requestViaMainApi(messages))).kind).toBe('empty');
     generateRaw.mockResolvedValueOnce('   ');
     expect((await failure(requestViaMainApi(messages))).title).toBe('主 API 返回了空内容');
+  });
+});
+
+describe('跟随主 API 时的最大回复与预填充', () => {
+  const withPrefill = [...messages, { role: 'assistant' as const, content: '<thinking>' }];
+  const sentLengths = () => generateRaw.mock.calls.map(call => call[0].responseLength);
+  afterEach(async () => {
+    apiSettings.mainApiMaxTokens = MAIN_API_MAX_TOKENS_DEFAULT;
+    apiSettings.mainApiPrefill = true;
+    await nextTick();
+    resetMainApiTokenFallback();
+  });
+
+  it('默认把主 API 的最大回复临时设为 32000，不再是 65535', async () => {
+    generateRaw.mockResolvedValue('{"summary":"好"}');
+    await expect(requestViaMainApi(messages)).resolves.toBe('{"summary":"好"}');
+    expect(sentLengths()).toEqual([32000]);
+  });
+
+  it('首次失败时改用 8192 重试一次；成功后本次会话直接用 8192，修改设置后恢复按设置值请求', async () => {
+    generateRaw.mockRejectedValueOnce(new Error('Got response status 500')).mockResolvedValue('完成');
+    await expect(requestViaMainApi(messages)).resolves.toBe('完成');
+    expect(sentLengths()).toEqual([32000, 8192]);
+    expect(mainApiTokenState.fallback).toBe(8192);
+    expect(mainApiResponseLength()).toBe(8192);
+
+    generateRaw.mockClear();
+    await requestViaMainApi(messages);
+    expect(sentLengths()).toEqual([8192]);
+
+    apiSettings.mainApiMaxTokens = 16000;
+    await nextTick();
+    expect(mainApiTokenState.fallback).toBe(0);
+    generateRaw.mockClear();
+    await requestViaMainApi(messages);
+    expect(sentLengths()).toEqual([16000]);
+  });
+
+  it('设置值不大于 8192 时不再重试；酒馆转来 400 时按「服务商拒绝了请求」处理', async () => {
+    apiSettings.mainApiMaxTokens = 4096;
+    await nextTick();
+    generateRaw.mockRejectedValue(new Error('Got response status 400'));
+    const error = await failure(requestViaMainApi(messages));
+    expect(sentLengths()).toEqual([4096]);
+    expect(error).toMatchObject({ kind: 'bad-request', title: '主 API 请求失败', detail: 'Got response status 400' });
+    expect(error.hint).toContain('临时设为 4096 tokens');
+    expect(error.hint).not.toContain('重试');
+  });
+
+  it('取消与空回复不改用 8192 重试', async () => {
+    generateRaw.mockRejectedValueOnce(new Error('Request aborted by user'));
+    expect((await failure(requestViaMainApi(messages))).title).toBe('主 API 请求被中止');
+    expect(sentLengths()).toEqual([32000]);
+  });
+
+  it('预填充默认保留；关闭「跟随主 API 时发送预填充」后去掉末尾的 assistant 消息', async () => {
+    generateRaw.mockResolvedValue('完成');
+    await requestViaMainApi(withPrefill);
+    expect(generateRaw.mock.calls[0][0].prompt).toEqual(withPrefill);
+    apiSettings.mainApiPrefill = false;
+    await requestViaMainApi(withPrefill);
+    expect(generateRaw.mock.calls[1][0].prompt).toEqual(messages);
   });
 });

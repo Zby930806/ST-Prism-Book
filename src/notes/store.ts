@@ -3,7 +3,7 @@ import { getContext } from '@/st/context';
 import type { STContext } from '@/st/context';
 import type { NotesData, NoteRecord, NoteDecision } from './types';
 import { extractAftertalk, parseQuestions } from './protocol';
-import { sourceHash, sameChat } from './source';
+import { sourceHash, sameChat, floorHash } from './source';
 export const NOTES_DATA_KEY = 'prism_book_notes';
 export const notesState = reactive<{ records: NoteRecord[]; decisions: NoteDecision[]; issue: string; revision: number }>({ records: [], decisions: [], issue: '', revision: 0 });
 let loadedChat: STContext['chat'] | undefined, loadedId: string | undefined, protectedData = false, saving = false;
@@ -14,7 +14,7 @@ function validData(v: any): v is NotesData {
   if (!v || v.version !== 1 || !Array.isArray(v.records) || !Array.isArray(v.decisions)) return false;
   const ids = new Set<string>();
   for (const r of v.records) {
-    if (!r || !str(r.id) || ids.has(r.id) || !Number.isFinite(r.createdAt) || !Number.isInteger(r.floor) || r.floor<0 || !Number.isInteger(r.swipe) || r.swipe<0 || !str(r.sourceHash) || !str(r.text) || !Array.isArray(r.questions)) return false;
+    if (!r || !str(r.id) || ids.has(r.id) || !Number.isFinite(r.createdAt) || !Number.isInteger(r.floor) || r.floor<0 || !Number.isInteger(r.swipe) || r.swipe<0 || !str(r.sourceHash) || (r.floorHash!==undefined && !str(r.floorHash)) || !str(r.text) || !Array.isArray(r.questions)) return false;
     ids.add(r.id); const qs = new Set<string>();
     for (const q of r.questions) { if (!q || !str(q.id) || qs.has(q.id) || !str(q.label) || !str(q.prompt) || !str(q.proposal)) return false; qs.add(q.id); }
   }
@@ -61,18 +61,37 @@ async function persist(next: NotesData, ctx: STContext): Promise<void> {
   } finally { saving=false; }
 }
 function snapshot(): NotesData { return { version:1, records:clone(notesState.records), decisions:clone(notesState.decisions) }; }
+/**
+ * 札记依据的正文是否还在：新记录只核对札记所在楼本身（页码＋正文），更早楼层的改动、原生隐藏和改名不算；
+ * 旧记录没有 floorHash，仍按从第 0 楼起的整段指纹核对。
+ */
 export function recordSourceIsCurrent(record: NoteRecord): boolean {
   const ctx=getContext(); if (!ctx || ctx.chat!==loadedChat || ctx.getCurrentChatId()!==loadedId) return false;
   const m=ctx.chat[record.floor];
-  return !!m && !m.is_user && (!m.is_system || !!m.extra?.bbs_hidden) && (m.swipe_id??0)===record.swipe && sourceHash(ctx,record.floor)===record.sourceHash;
+  if (!m || m.is_user || (m.swipe_id??0)!==record.swipe) return false;
+  if (record.floorHash) return floorHash(m)===record.floorHash;
+  return (!m.is_system || !!m.extra?.bbs_hidden) && sourceHash(ctx,record.floor)===record.sourceHash;
+}
+/** 两份札记是否针对同一段正文（同一楼、同一页、正文相同）。 */
+export function sameNoteSource(a: Pick<NoteRecord,'floor'|'swipe'|'sourceHash'|'floorHash'>, b: Pick<NoteRecord,'floor'|'swipe'|'sourceHash'|'floorHash'>): boolean {
+  return a.floor===b.floor && a.swipe===b.swipe && (a.floorHash && b.floorHash ? a.floorHash===b.floorHash : a.sourceHash===b.sourceHash);
 }
 export function recordIsCurrent(record: NoteRecord): boolean {
   if (!recordSourceIsCurrent(record)) return false;
   const i=notesState.records.findIndex(r=>r.id===record.id);
-  return i>=0 && !notesState.records.slice(i+1).some(r=>r.floor===record.floor && r.swipe===record.swipe && r.sourceHash===record.sourceHash);
+  return i>=0 && !notesState.records.slice(i+1).some(r=>sameNoteSource(r,record));
 }
+/**
+ * 仍要落实的安排（待兑现、进行中）。已确认的安排与札记来源解绑：札记所在楼被改写、重抽或删除后照常注入，
+ * 页面在安排上标出「依据的正文已改动」，由用户决定是否取消。
+ */
 export function activeDecisions(): NoteDecision[] {
-  return notesState.decisions.filter(d => ['pending','in_progress'].includes(d.status) && notesState.records.some(r=>r.id===d.noteId && recordSourceIsCurrent(r)));
+  return notesState.decisions.filter(d => d.status==='pending' || d.status==='in_progress');
+}
+/** 安排依据的札记所在楼是否已改动（改写、重抽或删除）。 */
+export function decisionSourceChanged(decision: NoteDecision): boolean {
+  const record=notesState.records.find(r=>r.id===decision.noteId);
+  return !record || !recordSourceIsCurrent(record);
 }
 export async function addNote(record: NoteRecord): Promise<void> {
   const ctx=context(); if (!recordSourceIsCurrent(record)) throw new Error('正文已经变化，这份札记没有保存。');
@@ -93,7 +112,7 @@ export const rejectQuestion = (noteId: string, questionId: string) => decide(not
 export async function setDecisionStatus(id: string, status: 'pending'|'in_progress'|'completed'|'cancelled'): Promise<void> {
   const ctx=context(), next=snapshot(), d=next.decisions.find(x=>x.id===id);
   if (!d || !['pending','in_progress','completed','cancelled'].includes(status)) throw new Error('找不到这条安排，或者状态不对。');
-  if (['pending','in_progress'].includes(status) && !next.records.some(r=>r.id===d.noteId && recordSourceIsCurrent(r))) throw new Error('这条安排对应的正文已变化，不能再启用。');
+  // 依据的正文改动后也可以重新启用：安排是用户确认的写作方向，是否继续由用户决定。
   d.status=status; await persist(next,ctx);
 }
 /** 删除一份札记，连同由它确认的全部安排（安排必须对应存在的札记与问题，见 validData）。 */
@@ -111,9 +130,9 @@ export async function importLegacyNotes(): Promise<number> {
     const m=ctx.chat[floor]; if (m.is_user || (m.is_system && !m.extra?.bbs_hidden) || m.extra?.bbs_internal_notice) continue;
     for (const text of extractAftertalk(m.mes)) {
       if (text.length>80000) continue;
-      const hash=sourceHash(ctx,floor), swipe=m.swipe_id??0;
-      if (next.records.some(r=>r.floor===floor && r.swipe===swipe && r.sourceHash===hash && r.text===text)) continue;
-      next.records.push({id:crypto.randomUUID(),createdAt:Date.now(),floor,swipe,sourceHash:hash,text,questions:parseQuestions(text)}); count++;
+      const hash=sourceHash(ctx,floor), swipe=m.swipe_id??0, fh=floorHash(m);
+      if (next.records.some(r=>r.floor===floor && r.swipe===swipe && (r.floorHash ? r.floorHash===fh : r.sourceHash===hash) && r.text===text)) continue;
+      next.records.push({id:crypto.randomUUID(),createdAt:Date.now(),floor,swipe,sourceHash:hash,floorHash:fh,text,questions:parseQuestions(text)}); count++;
     }
   }
   if (count) await persist(next,ctx); return count;

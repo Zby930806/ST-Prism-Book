@@ -13,7 +13,7 @@ import * as vectorStore from './store';
 import * as embed from './embed';
 import { RECALL_DONE_OVER_BUDGET, recallDebug } from './debug';
 import { recallStatusText } from './recallView';
-import { buildRecallText, runVectorRecall } from './recall';
+import { buildRecallText, RECALL_BRIEFING_END, runVectorRecall } from './recall';
 
 const { apiSettings } = settings;
 const saved = JSON.stringify(apiSettings);
@@ -64,15 +64,23 @@ describe('召回内容放进预算', () => {
     const r = buildRecallText([hit('甲', { rerankScore: 0.95, mesFull: '原文。'.repeat(800), document: '摘要。'.repeat(800) })], cfg(), 'test', '');
     expect(r.text).toBe('');
     expect([...r.cut]).toEqual(['甲']);
-    apiSettings.memoryBudgetTokens = 2000; // 召回份额连说明文字都放不下
+  });
+
+  it('召回块换用短结束语后，预算填最低值 2000 时短摘要也能注入，长摘要仍按预算省略', () => {
+    apiSettings.memoryBudgetTokens = 2000;
     const small = buildRecallText([hit('乙')], cfg(), 'test', '');
-    expect(small.text).toBe('');
-    expect([...small.cut]).toEqual(['乙']);
+    expect(small.text).toContain('乙的摘要。');
+    expect(small.text).toContain(RECALL_BRIEFING_END);
+    expect(small.text).not.toContain('〔私密简报结束〕');
+    expect(estimateTokens(small.text)).toBeLessThanOrEqual(slotBudget('recall'));
+    const long = buildRecallText([hit('丙', { document: '丙的旧事。'.repeat(200) })], cfg(), 'test', '');
+    expect(long.text).toBe('');
+    expect([...long.cut]).toEqual(['丙']);
   });
 });
 
 describe('召回流程里的预算结果', () => {
-  function setup(results: VecHit[]) {
+  function setup(results: VecHit[], rerank: 'ok' | 'fail' = 'ok') {
     const slots = new Map<string, string>();
     const chat: STMessage[] = [{ name: '主角', is_user: true, is_system: false, mes: '还记得那个约定吗？' }];
     const ctx = { chat, chatMetadata: {}, name1: '主角', name2: '角色', getCurrentChatId: () => 'budget',
@@ -87,11 +95,12 @@ describe('召回流程里的预算结果', () => {
     vi.spyOn(scope, 'currentBundleHashes').mockReturnValue(['bundle']);
     vi.spyOn(scope, 'currentChatScope').mockReturnValue('test');
     vi.spyOn(scope, 'currentChatId').mockReturnValue('budget');
-    vi.spyOn(vectorIndex, 'ensureRecallIndex').mockResolvedValue(undefined);
+    vi.spyOn(vectorIndex, 'ensureRecallIndex').mockResolvedValue({});
     vi.spyOn(rewrite, 'rewriteQuery').mockResolvedValue({ intent: '约定', queries: ['约定'] });
     vi.spyOn(embed, 'embedTexts').mockResolvedValue([new Float32Array([1, 0])]);
     vi.spyOn(embed, 'encodeFloat32Base64').mockReturnValue('AA');
-    vi.spyOn(embed, 'rerankDocuments').mockRejectedValue(new Error('测试:未配重排'));
+    if (rerank === 'ok') vi.spyOn(embed, 'rerankDocuments').mockResolvedValue(results.map((_, index) => ({ index, score: 0.95 })));
+    else vi.spyOn(embed, 'rerankDocuments').mockRejectedValue(new Error('测试:未配重排'));
     vi.spyOn(vectorStore, 'vecSearch').mockResolvedValue({ results });
     return slots;
   }
@@ -102,7 +111,7 @@ describe('召回流程里的预算结果', () => {
     expect(slots.get('baibai_book_vector_recall')).toBe('');
     expect(recallDebug.status).toBe(RECALL_DONE_OVER_BUDGET);
     expect(recallDebug.rerank.map(h => h.tier)).toEqual(['cut']);
-    expect(recallStatusText(recallDebug)).toBe('召回完成，达到阈值的 1 段超出召回预算，本次未注入。可在「设置 → 注入设置」中调高「记忆注入预算」。');
+    expect(recallStatusText(recallDebug)).toBe('召回完成，达到阈值的 1 段超出召回预算，本次未注入。可在「设置 → 注入设置」中调高「记忆注入预算」，或填 0 不限制。');
   });
 
   it('原文放不下改发摘要：第 4 步标为摘要并注明原文超出预算', async () => {
@@ -111,5 +120,16 @@ describe('召回流程里的预算结果', () => {
     expect(slots.get('baibai_book_vector_recall')).toContain('先前约定周五还书。');
     expect(recallDebug.status).toBe('召回完成');
     expect(recallDebug.rerank[0]).toMatchObject({ tier: 'brief', downgraded: true });
+  });
+
+  it('没有重排时不发原文，只按相似度发摘要，并写明原因', async () => {
+    const slots = setup([{ leafId: 'old', scope: 'test', similarity: 0.99, queryIndex: 0, document: '先前约定周五还书。', mesFull: '那天他们约定周五还书。', storyTime: null, msgIndex: 0 }], 'fail');
+    await runVectorRecall();
+    const text = slots.get('baibai_book_vector_recall') ?? '';
+    expect(text).toContain('先前约定周五还书。');
+    expect(text).not.toContain('那天他们约定');
+    expect(recallDebug.rerank[0]).toMatchObject({ tier: 'brief', reranked: false });
+    expect(recallDebug.rerankIssue).toContain('重排失败');
+    expect(recallStatusText(recallDebug)).toBe('召回 1 段，已注入本次生成。重排失败，已按 embedding 相似度分档，只发送摘要。原因：测试:未配重排。');
   });
 });

@@ -115,8 +115,12 @@ export const ui = reactive<UiState>({
   orbSize: apiSettings.ui.orbSize,
 });
 
-// settings 跨设备同步值就绪后,把主题/导航回灌进 ui(覆盖 import 阶段的默认)
-onSettingsReady(() => {
+/**
+ * 把设置里的界面偏好（apiSettings.ui）回灌进 ui，覆盖 import 阶段的默认值。
+ * 载入设置时调用一次；导入设置备份会整体替换 apiSettings.ui，此时再调用一次，
+ * 否则主题、按钮、悬浮球当场不变，之后改任意一项界面设置还会把旧值整组写回去。
+ */
+export function syncUiFromSettings(): void {
   ui.theme = validTheme(apiSettings.ui.theme);
   ui.navPosition = validNav(apiSettings.ui.navPosition);
   ui.navTapClose = apiSettings.ui.navTapClose;
@@ -129,7 +133,13 @@ onSettingsReady(() => {
   ui.orbShape = validOrbShape(apiSettings.ui.orbShape);
   ui.orbOpacity = apiSettings.ui.orbOpacity;
   ui.orbSize = apiSettings.ui.orbSize;
-});
+}
+
+// settings 跨设备同步值就绪后,把主题/导航回灌进 ui(覆盖 import 阶段的默认)
+onSettingsReady(syncUiFromSettings);
+// apiSettings.ui 被整体替换(导入设置备份)时重新回灌。不加 deep:下面的 watch 只改它的字段,不会触发这里;
+// 回灌时值与 apiSettings.ui 相同,反向写回也不会再改变什么,两个 watch 不会互相循环。
+watch(() => apiSettings.ui, syncUiFromSettings);
 
 // ui 改变 → 写回 apiSettings.ui(由 settings 的 watch 防抖落盘、跨设备同步);activePage 仍存本机。
 watch(

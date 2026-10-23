@@ -9,6 +9,7 @@ import IconButton from '@/components/IconButton.vue';
 import { fetchModels } from '@/api/client';
 import { describeFailure } from '@/api/errors';
 import { apiSettings, resolveVectorModel } from '@/api/settings';
+import { normalizeEndpointRetries, normalizeEndpointTimeout, normalizeQueryRewriteMaxTokens } from '@/memory/vector/params';
 import { ref, useId } from 'vue';
 import ModelCombo from '../ModelCombo.vue';
 import { TONE_CLASS, type Notice } from '../notice';
@@ -26,6 +27,28 @@ const loadingModels = ref(false);
 const modelMsg = ref<Notice | null>(null);
 const bodyId = useId();
 
+/* 超时、重试与最大输出:输入框清空或越界时,失焦(或回车)后回填合法值,与请求时的规整规则相同 */
+function onTimeoutChange(): void {
+  const ep = apiSettings.vector[props.role];
+  ep.timeoutSec = normalizeEndpointTimeout(ep.timeoutSec, props.role);
+}
+function onRetriesChange(): void {
+  const ep = apiSettings.vector[props.role];
+  ep.retries = normalizeEndpointRetries(ep.retries, props.role);
+}
+function onMaxTokensChange(): void {
+  apiSettings.vector.queryRewriteMaxTokens = normalizeQueryRewriteMaxTokens(apiSettings.vector.queryRewriteMaxTokens);
+}
+
+/**
+ * 拉取到的列表是服务商的全部模型,没有按类型区分,第一项常常不是本角色需要的模型。
+ * Embedding 只在列表里有名字含 embed 的模型时自动选它;Rerank 和 Query 重写只填充下拉选项,不自动选择。
+ */
+function autoPickModel(role: VectorRole, list: string[]): string {
+  if (role !== 'embedding') return '';
+  return list.find(name => /embed/i.test(name)) ?? '';
+}
+
 async function pullModels() {
   const role = props.role;
   // 解析回落后的地址/密钥:rerank/query 留空时自动用 Embedding 的去拉(模型仍写回本角色)
@@ -42,11 +65,12 @@ async function pullModels() {
   loadingModels.value = true;
   modelMsg.value = null;
   try {
-    const list = await fetchModels({ url: ep.url, key: ep.key, timeoutSec: ep.timeoutSec });
+    const list = await fetchModels({ url: ep.url, key: ep.key, timeoutSec: normalizeEndpointTimeout(ep.timeoutSec, role) });
     models.value = list;
-    if (list.length && !apiSettings.vector[role].model) apiSettings.vector[role].model = list[0];
+    const picked = !apiSettings.vector[role].model ? autoPickModel(role, list) : '';
+    if (picked) apiSettings.vector[role].model = picked;
     modelMsg.value = list.length
-      ? { tone: 'ok', text: `已获取 ${list.length} 个模型，可在模型输入框中选择。` }
+      ? { tone: 'ok', text: picked ? `已获取 ${list.length} 个模型，已选择「${picked}」，可在模型输入框中更换。` : `已获取 ${list.length} 个模型，可在模型输入框中选择。` }
       : { tone: 'warn', text: '接口未返回模型列表，可直接填写模型名。' };
   } catch (e) {
     modelMsg.value = { tone: 'error', text: `拉取模型列表失败：${describeFailure(e, '请检查 API 地址、网络或超时设置后重试').message}` };
@@ -78,7 +102,8 @@ async function pullModels() {
     <div :id="bodyId" class="bbs-vec-ep-outer" :inert="!open" :aria-hidden="!open">
       <div class="bbs-vec-ep-inner">
         <div class="bbs-vec-ep-body">
-          <p v-if="role !== 'embedding'" class="bbs-field-hint">地址和密钥留空时使用 Embedding 的设置；模型需单独填写。</p>
+          <p v-if="role !== 'embedding'" class="bbs-field-hint">地址和密钥留空时使用 Embedding 的设置；另填了其他服务器的地址时，密钥也要单独填写（不会把 Embedding 的密钥发到别的服务器）。模型需单独填写。</p>
+          <p v-if="role === 'rerank'" class="bbs-field-hint">模型已预填。服务商不支持重排（如没有 /rerank 接口）时请清空模型，召回改按 embedding 相似度排序，只发送摘要。</p>
 
           <label class="bbs-modal-field">
             <span class="bbs-modal-label">API 地址</span>
@@ -97,7 +122,7 @@ async function pullModels() {
                 v-model="apiSettings.vector[role].key"
                 class="bbs-input"
                 :type="showKey ? 'text' : 'password'"
-                :placeholder="role === 'embedding' ? 'API 密钥' : '留空 = 复用 Embedding 的密钥'"
+                :placeholder="role === 'embedding' ? 'API 密钥' : '留空 = 复用 Embedding 的密钥（限同一服务器）'"
                 :disabled="!apiSettings.vector.enabled"
               />
               <IconButton
@@ -141,6 +166,7 @@ async function pullModels() {
                 type="number"
                 min="1"
                 :disabled="!apiSettings.vector.enabled"
+                @change="onTimeoutChange"
               />
             </label>
             <label class="bbs-vec-io-item">
@@ -151,6 +177,7 @@ async function pullModels() {
                 type="number"
                 min="0"
                 :disabled="!apiSettings.vector.enabled"
+                @change="onRetriesChange"
               />
             </label>
             <label v-if="role === 'queryRewrite'" class="bbs-vec-io-item">
@@ -161,15 +188,17 @@ async function pullModels() {
                 type="number"
                 min="256"
                 :disabled="!apiSettings.vector.enabled"
+                @change="onMaxTokensChange"
               />
             </label>
           </div>
+          <p v-if="role === 'queryRewrite'" class="bbs-field-hint bbs-vec-io-hint">超时后不再重试，服务商出错或限流时按「失败重试次数」重试。思考过程也计入输出上限，设得太小会得到空回复。</p>
 
           <!-- 破限:仅 Query 重写(三角色里只有它生成文本)。 -->
           <SettingRow
             v-if="role === 'queryRewrite'"
             label="附加任务说明"
-            hint="沿用「提示词」中的任务说明模式；任务说明禁用或自定义内容为空时不附加。检索重写的输出较短，无需设置较大的输出上限。"
+            hint="沿用「提示词」中的任务说明模式；任务说明禁用或自定义内容为空时不附加。"
           >
             <input
               v-model="apiSettings.vector.queryRewriteJailbreak"
@@ -275,9 +304,14 @@ async function pullModels() {
   width: 100%;
   text-align: left;
 }
-/* 破限开关紧跟在超时/token 那栏之后:多留一点上间距,与上一栏拉开(只命中此处,不动通用 switch-row) */
-.bbs-vec-io + :deep(.bbs-switch-row) {
+/* 破限开关紧跟在超时/token 那栏(或其下的说明)之后:多留一点上间距,与上一栏拉开(只命中此处,不动通用 switch-row) */
+.bbs-vec-io + :deep(.bbs-switch-row),
+.bbs-vec-io-hint + :deep(.bbs-switch-row) {
   margin-top: 6px;
+}
+/* 最大输出下方的说明:与输入栏留出间距 */
+.bbs-vec-io-hint {
+  margin-top: 8px;
 }
 .prism-endpoint-heading { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .prism-endpoint-model { color: var(--bbs-ink-muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }

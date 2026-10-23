@@ -35,6 +35,18 @@ describe('v0.10 共享事实边界与冲突消除', () => {
     expect(p.QUERY_REWRITE_SYSTEM).not.toContain(p.RULE_SPATIAL_EVIDENCE);
     expect(p.QUERY_REWRITE_SYSTEM).not.toContain('摘要末尾');
   });
+  it('检索重写写明输出的用途:Q 与逐楼摘要比相似度,INTENT 覆盖每条 Q;摘要有损时仍查细节,只输出纯文本行', () => {
+    for (const rule of ['每条 Q 与这些摘要比对相似度', 'INTENT 用来判断取回的每一段旧剧情与需求是否相关',
+      '只一句带过、而当前剧情需要细节的旧事,正是要查的内容', 'INTENT 先写需要回忆什么,覆盖每条 Q 的要点',
+      '每条只查一件事', '只输出纯文本行', '不输出解释、序号、Markdown 标记或续写']) expect(p.QUERY_REWRITE_SYSTEM).toContain(rule);
+    // 示例不再带对打分无用的元叙述
+    expect(p.QUERY_REWRITE_SYSTEM).not.toContain('当前窗口没有约定内容');
+    expect(p.QUERY_REWRITE_TAIL.startsWith('以上是最近对话。')).toBe(true);
+    expect(p.QUERY_REWRITE_TAIL).toContain('覆盖每条 Q 的要点');
+    expect(p.QUERY_REWRITE_TAIL).toContain('不用 Markdown 标记');
+    // 未接入设置页的宏说明已删除
+    expect(p).not.toHaveProperty('QUERY_REWRITE_MACROS');
+  });
   it('地点建档不再允许以短期现场状态凑描述', () => {
     for (const rule of ['临时现场状态即使加了日期也不作为地点特征入档', '空间结构、用途或稳定特征',
       '无稳定要点则不新建', '关键历史事件须确已发生并改变地点意义']) expect(p.RULE_SCENES).toContain(rule);

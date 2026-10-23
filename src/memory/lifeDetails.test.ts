@@ -211,6 +211,26 @@ describe('每条生活细节都有明确主语', () => {
     details[1].tier = 'pinned';
     expect(selectLifeDetailsForInjection(details, '下雨了', '')).toEqual([details[1]]);
   });
+  it('置顶最多 5 条始终发送;其余补到合计 6 条(至少 3 条):关键词命中的按更新时间从新到旧优先,无关键词的长期条目补空位', () => {
+    const item = (id: string, patch: Partial<MemLifeDetail>): MemLifeDetail => ({ id, subject: 'user', text: id, topics: [], anchors: [], tier: 'active', createdAt: 1, ...patch });
+    const pinned = Array.from({ length: 6 }, (_, i) => item('p' + i, { tier: 'pinned' }));
+    const old = item('旧的无关键词', { createdAt: 1 });
+    const hitOld = item('旧命中', { anchors: ['茶'], createdAt: 2 });
+    const hitNew = item('新命中', { anchors: ['茶'], createdAt: 3, updatedAt: 9 });
+    const miss = item('未命中', { anchors: ['酒'], createdAt: 4 });
+    const archived = item('沉降命中', { tier: 'archive', topics: ['茶'], createdAt: 5 });
+    const longNew = item('新的无关键词', { createdAt: 8 });
+    const picked = selectLifeDetailsForInjection([old, hitOld, ...pinned, hitNew, miss, archived, longNew], '想喝茶', '');
+    expect(picked.slice(0, 5).map(d => d.id)).toEqual(['p0', 'p1', 'p2', 'p3', 'p4']);
+    // 先存下的无关键词条目不再占住名额
+    expect(picked.slice(5).map(d => d.id)).toEqual(['新命中', '沉降命中', '旧命中']);
+    expect(selectLifeDetailsForInjection([old, longNew, hitOld], '想喝茶', '').map(d => d.id)).toEqual(['旧命中', '新的无关键词', '旧的无关键词']);
+    // 没有置顶时其余条目最多 6 条;置顶 2 条时其余最多 4 条
+    const many = Array.from({ length: 8 }, (_, i) => item('长期' + i, { createdAt: 10 + i }));
+    expect(selectLifeDetailsForInjection(many, '', '')).toHaveLength(6);
+    expect(selectLifeDetailsForInjection([...pinned.slice(0, 2), ...many], '', '')).toHaveLength(6);
+    expect(selectLifeDetailsForInjection([...pinned.slice(0, 2), ...many], '', '').slice(2).map(d => d.id)).toEqual(['长期7', '长期6', '长期5', '长期4']);
+  });
 });
 
 describe('实际摘要与跨对话继承', () => {

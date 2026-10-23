@@ -131,9 +131,14 @@ export interface ValidationInput {
   permission: WorldbookPermission;
   /** 本次读取的楼层范围，依据楼层只保留范围内的。 */
   range: { from: number; to: number };
+  /** 本次全文完整发送（没有截断）的条目 uid；给出时，只有这些条目可以整段改写。 */
+  fullUids?: ReadonlySet<number>;
   newId?: () => string;
 }
 export interface ValidationResult { suggestions: Suggestion[]; dropped: DroppedAction[] }
+/** 存储校验的上限：每条调整说明的字数、每批丢弃记录的条数（与 store.ts 的校验一致）。 */
+export const WARNING_MAX = 200;
+export const DROPPED_MAX = 50;
 
 const isPlain = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const own = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
@@ -260,6 +265,8 @@ export function validateActions(value: unknown, input: ValidationInput): Validat
         if (text === find) drop('替换前后的文字相同。');
         suggestions.push({ ...common, find, content: text });
       } else if (kind === 'rewrite') {
+        // 只给模型看过开头或截断后内容的条目，整段改写会丢掉没看到的部分
+        if (input.fullUids && !input.fullUids.has(uid!)) drop('这个条目只发送了开头或截断后的内容，不能整段改写，请改用 append 或 replace。');
         const next = readText(raw.content, 'content', 1, L.rewrite);
         if (next === content.trim()) drop('改写后的内容与原文相同。');
         suggestions.push({ ...common, content: next });
@@ -273,6 +280,12 @@ export function validateActions(value: unknown, input: ValidationInput): Validat
       dropped.push({ label: clip(label, 120), reason: clip(error.message, 300) });
     }
   });
+  // 存储校验要求每条调整说明不超过 200 字、丢弃记录不超过 50 条：这里先整理好，免得整批建议因此存不下
+  for (const s of suggestions) s.warnings = s.warnings.slice(0, 20).map(w => clip(w, WARNING_MAX));
+  if (dropped.length > DROPPED_MAX) {
+    const extra = dropped.length - (DROPPED_MAX - 1);
+    dropped.splice(DROPPED_MAX - 1, dropped.length, { label: '其余动作', reason: '另有 ' + extra + ' 条超出单次上限，已丢弃。' });
+  }
   return { suggestions, dropped };
 }
 

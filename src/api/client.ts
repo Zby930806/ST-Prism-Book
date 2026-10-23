@@ -1,10 +1,15 @@
-import { getContext } from '@/st/context';
-import type { ApiChannel } from './settings';
+import { getContext, type STContext } from '@/st/context';
+import { reactive, watch } from 'vue';
+import {
+  apiSettings, MAIN_API_FALLBACK_TOKENS, normalizeChannelMaxTokens, normalizeChannelTemperature, normalizeMainApiMaxTokens,
+  type ApiChannel,
+} from './settings';
 import {
   ApiError, apiFailure, classifyHttpFailure, describeFailure, emptyReply, filteredReply, finishKind, interruptedReply,
   invalidResponse, networkFailure, parseUpstreamError, sanitizeDetail, statusFromText, timeoutFailure,
-  truncatedReply, type ReplyMeta,
+  truncatedReply, type ReplyMeta, type TimeoutInfo,
 } from './errors';
+import { normalizeApiUrl as normalizeUrl } from './url';
 
 export { ApiError } from './errors';
 
@@ -18,24 +23,12 @@ export { ApiError } from './errors';
 
 const GENERATE_URL = '/api/backends/chat-completions/generate';
 const DEFAULT_TIMEOUT_SEC = 180;
+/** 流式请求的总上限:超时设置的 3 倍,至少这么多秒(超时设置在流式请求里按空闲时长计算)。 */
+const STREAM_TOTAL_MIN_SEC = 600;
 
 export interface ChatMsg {
   role: 'system' | 'user' | 'assistant';
   content: string;
-}
-
-/**
- * 规范化 OpenAI 兼容 base url:
- * - 用户填完整 /chat/completions 时只去掉端点后缀;
- * - 纯域名自动补 /v1;
- * - 已带路径的地址原样保留,避免破坏 /v2/coding 等自定义路由。
- */
-function normalizeUrl(url: string): string {
-  const u = url.trim().replace(/\/+$/, '');
-  if (!u) return u;
-  if (/\/chat\/completions$/i.test(u)) return u.replace(/\/chat\/completions$/i, '');
-  if (/^https?:\/\/[^/?#]+$/i.test(u)) return `${u}/v1`;
-  return u;
 }
 
 /** 测试渠道时备用的 /v1 形式。只在首个地址明确返回 404/405 时才会尝试。 */
@@ -55,34 +48,65 @@ function validTimeoutSec(value: unknown): number {
     : DEFAULT_TIMEOUT_SEC;
 }
 
+/** 交给请求任务的超时控制。 */
+interface TimeoutControl {
+  signal: AbortSignal;
+  /** 流式请求每读到一段数据(含 SSE 注释、心跳和思考增量)调用一次:重新计算空闲时长。非流式请求为空操作。 */
+  touch: () => void;
+  /** 流式请求已收到的正文;超时时放进错误的 partial。 */
+  partial: string;
+}
+
 /**
- * 给完整请求生命周期套超时:不仅覆盖 fetch 建连,也覆盖非流式 JSON 读取和流式 SSE 读取。
- * 外部 signal 仍可提前取消;只有本定时器触发时才转换成明确的超时报错。
+ * 给请求套超时。外部 signal 仍可提前取消;只有本函数的定时器触发时才转换成明确的超时报错。
+ * - 非流式(默认):超时覆盖整次请求,包括 fetch 建连和读取 JSON。
+ * - 流式(idle=true):超时按「多久没有收到数据」计算,每次 touch() 重新计时,正常吐字的长回复不会被切断;
+ *   另设总上限(超时的 3 倍,至少 600 秒),防止服务商一直只发心跳。超时时把已收到的正文放进 partial。
  */
 async function withTimeout<T>(
   timeoutSec: number,
   externalSignal: AbortSignal | undefined,
   label: string,
-  task: (signal: AbortSignal) => Promise<T>,
+  task: (control: TimeoutControl) => Promise<T>,
+  idle = false,
 ): Promise<T> {
   const ctrl = new AbortController();
-  let timedOut = false;
+  // 定时器在回调里改写状态,放在对象里,免得类型收窄把它当成一直为 null
+  const state: { timedOut: NonNullable<TimeoutInfo['mode']> | null; received: boolean } = { timedOut: null, received: false };
   const onExternalAbort = () => ctrl.abort();
   if (externalSignal?.aborted) onExternalAbort();
   else externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
 
-  const timer = setTimeout(() => {
-    timedOut = true;
+  const fire = (mode: NonNullable<TimeoutInfo['mode']>) => () => {
+    state.timedOut = mode;
     ctrl.abort();
-  }, Math.max(1000, timeoutSec * 1000));
+  };
+  const waitMs = Math.max(1000, timeoutSec * 1000);
+  let timer = setTimeout(fire(idle ? 'idle' : 'total'), waitMs);
+  const totalSec = idle ? Math.max(timeoutSec * 3, STREAM_TOTAL_MIN_SEC) : 0;
+  const totalTimer = idle ? setTimeout(fire('stream-total'), totalSec * 1000) : undefined;
+  const control: TimeoutControl = {
+    signal: ctrl.signal,
+    touch: () => {
+      if (!idle || state.timedOut) return;
+      state.received = true;
+      clearTimeout(timer);
+      timer = setTimeout(fire('idle'), waitMs);
+    },
+    partial: '',
+  };
 
   try {
-    return await task(ctrl.signal);
+    return await task(control);
   } catch (e) {
-    if (timedOut) throw timeoutFailure(label, timeoutSec);
+    const mode = state.timedOut;
+    if (mode) {
+      throw timeoutFailure(label, mode === 'stream-total' ? totalSec : timeoutSec, { mode, received: state.received, partial: control.partial });
+    }
     throw e;
   } finally {
     clearTimeout(timer);
+    if (totalTimer) clearTimeout(totalTimer);
     externalSignal?.removeEventListener('abort', onExternalAbort);
   }
 }
@@ -154,8 +178,9 @@ export function buildRequestBody(
   const common = {
     model: channel.model,
     messages,
-    temperature: channel.temperature ?? 1.0,
-    max_tokens: channel.maxTokens ?? 65535,
+    // 渠道弹窗里清空温度或最大输出时会存成空串;只发有效数值,非法时用默认值(1.0、65535)
+    temperature: normalizeChannelTemperature(channel.temperature),
+    max_tokens: normalizeChannelMaxTokens(channel.maxTokens),
     stream,
     // 不用工具:见函数头注释,防第三方 fetch 拦截器把摘要改写成工具调用
     tool_choice: 'none',
@@ -191,7 +216,7 @@ export function buildRequestBody(
 
 /** 本次请求实际发送的最大输出;被「排除参数」去掉时由服务商自行决定。 */
 function sentMaxTokens(channel: ApiChannel): number | undefined {
-  return (channel.excludeParams ?? []).some(p => p.trim() === 'max_tokens') ? undefined : channel.maxTokens ?? 65535;
+  return (channel.excludeParams ?? []).some(p => p.trim() === 'max_tokens') ? undefined : normalizeChannelMaxTokens(channel.maxTokens);
 }
 
 async function requestCompletionAtUrl(
@@ -207,7 +232,7 @@ async function requestCompletionAtUrl(
   }
 
   const stream = channel.stream ?? false;
-  // 预填充开关(默认开):关闭时丢掉末尾那条 assistant 预填充消息。
+  // 预填充开关(渠道默认关;值为 false 时丢掉末尾那条 assistant 预填充消息)。
   // 摘要/批量请求会在末尾追加一条 assistant 预填充引导思维链;对不支持预填充(不续写)的端点
   // 形同浪费、个别端点还要求「最后一条须为 user」。关掉只是不发它,思维链引导仍由 system 清单承担。
   const outMessages =
@@ -218,7 +243,9 @@ async function requestCompletionAtUrl(
   const maxTokens = sentMaxTokens(channel);
 
   const timeoutSec = validTimeoutSec(channel.timeoutSec);
-  return withTimeout(timeoutSec, opts.signal, 'API 请求', async signal => {
+  // 流式请求按空闲时长计时(见 withTimeout),非流式按整次请求计时
+  return withTimeout(timeoutSec, opts.signal, 'API 请求', async control => {
+    const { signal } = control;
     const resp = await fetchHost(GENERATE_URL, {
       method: 'POST',
       headers: ctx.getRequestHeaders(),
@@ -233,7 +260,8 @@ async function requestCompletionAtUrl(
 
     // 流式:按 SSE 增量拼接;非流式:直接解析 JSON。
     if (stream) {
-      const reply = await readSseContent(resp, signal, opts.onDelta);
+      control.touch(); // 服务商已开始响应
+      const reply = await readSseContent(resp, signal, opts.onDelta, control);
       return finishReply(reply.text, { ...reply.meta, maxTokens });
     }
 
@@ -247,7 +275,7 @@ async function requestCompletionAtUrl(
     if (data?.error) throw envelopeFailure(data);
     const reply = parseCompletion(data);
     return finishReply(reply.text, { ...reply.meta, maxTokens });
-  });
+  }, stream);
 }
 
 /**
@@ -304,11 +332,13 @@ function parseCompletion(data: any): { text: string; meta: ReplyMeta } {
  * 读取 SSE 流(text/event-stream),拼接 delta.content,同时记下结束原因。
  * ST 的 generate 端点在 stream=true 时透传上游 SSE:每行 `data: {json}`,以 `data: [DONE]` 结束。
  * 有的中转无视 stream 直接回整段 JSON,或把错误写成普通 JSON;没有任何 data 行时按整体 JSON 处理。
+ * progress:每读到一段数据就通知超时控制重新计时,并记下已拼好的正文(超时时作为 partial)。
  */
 async function readSseContent(
   resp: Response,
   signal: AbortSignal,
   onDelta?: (text: string) => void,
+  progress?: Pick<TimeoutControl, 'touch' | 'partial'>,
 ): Promise<{ text: string; meta: ReplyMeta }> {
   const reader = resp.body?.getReader();
   if (!reader) {
@@ -363,6 +393,7 @@ async function readSseContent(
     if (tokens !== undefined) meta.outputTokens = tokens;
     if (delta.length > 0) {
       out += delta;
+      if (progress) progress.partial = out;
       onDelta?.(out);
       signal.throwIfAborted();
     }
@@ -395,6 +426,8 @@ async function readSseContent(
         if (buf) readLine(buf);
         return finish();
       }
+      // 收到任何数据(正文、思考增量、SSE 注释或心跳)都说明连接还活着,重新计算空闲时长
+      if (value?.length) progress?.touch();
       buf += decoder.decode(value, { stream: true });
       // 按行解析,保留最后一段不完整的行到下次。
       const lines = buf.split('\n');
@@ -412,8 +445,28 @@ async function readSseContent(
 
 /* ============ 跟随主 API(主界面当前在用的 API 设置) ============ */
 
-/** 摘要/总结跟随主 API 时的响应上限:够装下思维链 + JSON,避免被主 API 默认 max tokens 截断。 */
-const MAIN_API_RESPONSE_LENGTH = 65535;
+/** 「跟随主 API 时的最大回复」在界面上的位置(报错里指向它)。 */
+export const MAIN_API_TOKENS_SETTING = '设置 → 摘要设置 → 跟随主 API 时的最大回复';
+
+/**
+ * 跟随主 API 时的最大回复:酒馆的 generateRaw 会把它原样作为 max_tokens 发给服务商,
+ * 超过模型输出上限的值会被直接拒绝。首次失败且设置值大于 8192 时改用 8192 重试一次;
+ * 重试成功后,本次会话之后的请求直接用 8192(fallback),修改这项设置后清除、重新按设置值请求。
+ */
+export const mainApiTokenState = reactive({ fallback: 0 });
+watch(() => apiSettings.mainApiMaxTokens, () => { mainApiTokenState.fallback = 0; });
+
+/** 跟随主 API 时这次请求实际使用的最大回复。 */
+export function mainApiResponseLength(): number {
+  const configured = normalizeMainApiMaxTokens(apiSettings.mainApiMaxTokens);
+  const fallback = mainApiTokenState.fallback;
+  return fallback > 0 && fallback < configured ? fallback : configured;
+}
+
+/** 仅供测试:清除本次会话记住的 8192。 */
+export function resetMainApiTokenFallback(): void {
+  mainApiTokenState.fallback = 0;
+}
 
 /**
  * 是否具备「跟随主 API」的条件:ST 暴露了 generateRaw(稳定 API)即可。
@@ -423,10 +476,57 @@ export function mainApiAvailable(): boolean {
   return typeof getContext()?.generateRaw === 'function';
 }
 
+/** generateRaw 抛出的请求失败(不含取消和空回复);raw 是酒馆给的原话。 */
+class MainApiRejected extends Error {
+  constructor(readonly raw: string, readonly kind: 'upstream' | 'bad-request') {
+    super(raw);
+  }
+}
+
+/** 酒馆原话里能看出服务商拒绝了请求(400/422,或提到最大输出)时算 bad-request,其余算 upstream。 */
+function mainApiRejectKind(raw: string): 'upstream' | 'bad-request' {
+  const status = Number(/\bstatus(?:\s*code)?\s*[:=]?\s*(\d{3})\b/i.exec(raw)?.[1]);
+  if (status === 400 || status === 422) return 'bad-request';
+  return classifyHttpFailure({ body: raw }).kind === 'bad-request' ? 'bad-request' : 'upstream';
+}
+
+async function generateViaMainApi(ctx: STContext, prompt: ChatMsg[], tokens: number): Promise<string> {
+  let content: string | undefined;
+  try {
+    content = (await ctx.generateRaw!({ prompt, responseLength: tokens }))?.trim();
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') throw e;
+    // 酒馆的 generateRaw 有时抛 Error(对象),message 只剩 [object Object];真实原因在酒馆自己的报错弹窗里。
+    const raw = e instanceof Error ? e.message : parseUpstreamError(e).message;
+    if (/no message generated/i.test(raw)) {
+      throw apiFailure('empty', '主 API 没有返回内容', '可能被内容审核拦截或输出为空；可以重试，或在设置 → 副 API 里给这个任务单独指派渠道。');
+    }
+    if (/cancel|abort/i.test(raw)) throw apiFailure('unknown', '主 API 请求被中止', '正文生成被停止时会一并中止，重新发起即可。');
+    throw new MainApiRejected(raw, mainApiRejectKind(raw));
+  }
+  if (!content) throw apiFailure('empty', '主 API 返回了空内容', '可以重试，或在设置 → 副 API 里给这个任务单独指派渠道。');
+  return content;
+}
+
+/** 主 API 请求失败的说明:写明插件临时设的最大回复是多少、在哪里调整。 */
+function mainApiFailure(e: MainApiRejected, tokens: number, retriedFrom?: number): ApiError {
+  const sent = retriedFrom
+    ? `插件请求时会把主 API 的最大回复临时设为 ${retriedFrom} tokens，失败后改为 ${tokens} 重试，仍然失败。`
+    : `插件请求时会把主 API 的最大回复临时设为 ${tokens} tokens。`;
+  return apiFailure(e.kind, '主 API 请求失败',
+    `${sent}具体原因请看酒馆弹出的报错提示；模型的单次输出上限较低时，可在「${MAIN_API_TOKENS_SETTING}」中调小，也可以在设置 → 副 API 里给这个任务单独指派渠道。`,
+    {
+      detail: e.raw && e.raw !== '[object Object]' ? sanitizeDetail(e.raw) : '',
+      // 已经换成 8192 重试过一次,不再由调用方整套重发
+      retryable: retriedFrom ? false : undefined,
+    });
+}
+
 /**
  * 用「当前主 API」(主界面正在用的聊天补全/文本补全设置)发一次补全。
  * 走 ST 的 generateRaw:只发我们给的这几条消息,不带聊天历史/角色卡;无需连接档。
  * quiet 类型内部强制非流式,返回清洗后的整段文本;失败抛 ApiError。
+ * 最大回复用「跟随主 API 时的最大回复」(默认 32000);关闭「跟随主 API 时发送预填充」时去掉末尾的 assistant 消息。
  *
  * ⚠️ 这条路径的请求体由 ST 构造,带不上 `tool_choice: 'none'`,第三方 fetch 拦截器
  * (如防截断脚本)仍可能改写它。摘要/重摘要尽量指派副 API 渠道,走 buildRequestBody 那条路。
@@ -436,23 +536,30 @@ export async function requestViaMainApi(messages: ChatMsg[], _opts: RequestOptio
   if (typeof ctx?.generateRaw !== 'function') {
     throw apiFailure('config', '当前酒馆版本不支持「跟随主 API」', '请在设置 → 副 API 里给这个任务指派一个渠道。');
   }
-  let content: string | undefined;
+  const prompt = apiSettings.mainApiPrefill === false && messages[messages.length - 1]?.role === 'assistant'
+    ? messages.slice(0, -1)
+    : messages;
+  const configured = normalizeMainApiMaxTokens(apiSettings.mainApiMaxTokens);
+  const tokens = mainApiResponseLength();
   try {
-    content = (await ctx.generateRaw({ prompt: messages, responseLength: MAIN_API_RESPONSE_LENGTH }))?.trim();
+    return await generateViaMainApi(ctx, prompt, tokens);
   } catch (e) {
-    if (e instanceof DOMException && e.name === 'AbortError') throw e;
-    // 酒馆的 generateRaw 有时抛 Error(对象),message 只剩 [object Object];真实原因在酒馆自己的报错弹窗里。
-    const raw = e instanceof Error ? e.message : parseUpstreamError(e).message;
-    if (/no message generated/i.test(raw)) {
-      throw apiFailure('empty', '主 API 没有返回内容', '可能被内容审核拦截或输出为空；可以重试，或在设置 → 副 API 里给这个任务单独指派渠道。');
+    if (!(e instanceof MainApiRejected)) throw e;
+    if (tokens <= MAIN_API_FALLBACK_TOKENS) throw mainApiFailure(e, tokens);
+    // 很多模型的单次输出上限低于设置值,服务商会直接拒绝;酒馆通常只转来状态码或 [object Object],
+    // 无法从原话判断,所以首次失败时一律改用 8192 再试一次。
+    console.warn(`[棱镜宝书] 跟随主 API 的请求失败(最大回复 ${tokens}),改用 ${MAIN_API_FALLBACK_TOKENS} 重试:`, e.raw);
+    let content: string;
+    try {
+      content = await generateViaMainApi(ctx, prompt, MAIN_API_FALLBACK_TOKENS);
+    } catch (retryError) {
+      if (retryError instanceof MainApiRejected) throw mainApiFailure(retryError, MAIN_API_FALLBACK_TOKENS, tokens);
+      throw retryError;
     }
-    if (/cancel|abort/i.test(raw)) throw apiFailure('unknown', '主 API 请求被中止', '正文生成被停止时会一并中止，重新发起即可。');
-    throw apiFailure('upstream', '主 API 请求失败', '具体原因请看酒馆弹出的报错提示；也可以在设置 → 副 API 里给这个任务单独指派渠道。', {
-      detail: raw && raw !== '[object Object]' ? sanitizeDetail(raw) : '',
-    });
+    // 重试成功:本次会话之后直接用 8192(请求期间设置被改过就不记)
+    if (normalizeMainApiMaxTokens(apiSettings.mainApiMaxTokens) === configured) mainApiTokenState.fallback = MAIN_API_FALLBACK_TOKENS;
+    return content;
   }
-  if (!content) throw apiFailure('empty', '主 API 返回了空内容', '可以重试，或在设置 → 副 API 里给这个任务单独指派渠道。');
-  return content;
 }
 
 const TEST_PROMPT: ChatMsg[] = [{ role: 'user', content: '回复"ok"两个字符即可。' }];
@@ -531,7 +638,7 @@ export async function fetchModels(
   };
 
   const timeoutSec = validTimeoutSec(channel.timeoutSec);
-  return withTimeout(timeoutSec, opts.signal, '拉取模型', async signal => {
+  return withTimeout(timeoutSec, opts.signal, '拉取模型', async ({ signal }) => {
     const resp = await fetchHost(STATUS_URL, {
       method: 'POST',
       headers: ctx.getRequestHeaders(),

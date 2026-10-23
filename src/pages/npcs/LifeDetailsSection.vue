@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /**
- * 生活小档案：主角与主要角色的偏好、习惯、近况。三个投放层：置顶常驻、时效/长期按相关性浮现、沉降仅关键词触发。
+ * 生活小档案：主角与主要角色的偏好、习惯、近况。三个投放层：置顶常驻、时效/长期按关键词浮现、沉降仅关键词触发。
  * 列表顺序为置顶 → 时效/长期 → 沉降，层级差异由条目样式表达（置顶左缘警告色、沉降虚线）。
  * 置顶、沉降是开关按钮（aria-pressed），名称固定，按下样式表示已开启。
  * 折叠状态是本机视图偏好，存 localStorage（bbs.ui.lifeCollapsed.v1），默认展开。
+ * 发送说明与注入时的选择一致（memory/select.ts）：置顶最多 5 条；其余每轮补到合计 6 条（至少 3 条），
+ * 先取关键词出现在最近正文中的，再用没有关键词的长期条目补足。是否发送看注入设置（见 sendScope.ts）。
  */
-import { apiSettings } from '@/api/settings';
 import BbsSelect from '@/components/BbsSelect.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import IconButton from '@/components/IconButton.vue';
@@ -19,8 +20,11 @@ import { computed, ref } from 'vue';
 import NpcEntry from './NpcEntry.vue';
 import NpcFoldSection from './NpcFoldSection.vue';
 import { labelSnippet, loadCollapsed, persistCollapsed } from './npcView';
+import { blockLocalNote } from './sendScope';
 
 const props = defineProps<{ protagonistName: string; hasLeaf: boolean }>();
+const localNote = computed(() => blockLocalNote('lifeDetails'));
+const SEND_NOTE = '置顶条目（最多 5 条）始终发送；其余条目每轮补到合计 6 条（置顶多时至少再发 3 条），先发关键词出现在最近正文中的，再用没有关键词的长期条目补足；已过时效的不发送，沉降条目只在出现关键词时发送。';
 
 const lifeGroups = computed(() => {
   const pinned: MemLifeDetail[] = [];
@@ -102,9 +106,9 @@ function saveEdit() {
     :count="memory.lifeDetails.length"
     :foldable="foldable"
     :collapsed="collapsed"
-    :warning="apiSettings.summaryOnlyMode ? '仅供棱镜宝书记录，不发送给主对话 AI' : undefined"
+    :warning="localNote"
     empty-hint="摘要记录主角与主要角色明确提到的偏好、习惯和近况。"
-    :note="apiSettings.summaryOnlyMode ? undefined : '置顶条目始终发送；时效与长期条目按相关性发送；沉降条目仅在出现关键词时发送。'"
+    :note="localNote ? undefined : SEND_NOTE"
     @toggle="toggleFold"
   >
     <template #actions>
@@ -158,7 +162,7 @@ function saveEdit() {
     @confirm="confirmRemove"
     @cancel="removing = null"
   >
-    删除「{{ removing ? labelSnippet(removing.text, 24) : '' }}」？删除操作记录在最新一条摘要上，删除该楼层可恢复。
+    删除「{{ removing ? labelSnippet(removing.text, 24) : '' }}」？这项修改单独保存，重新摘要或重抽后仍然保留。
   </ConfirmDialog>
 
   <ModalShell :open="!!editing" :title="editing?.id ? '编辑生活细节' : '添加生活细节'" @close="cancelEdit">

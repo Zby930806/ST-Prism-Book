@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 排除角色：名单中的角色名（含重名卡）的聊天里，记忆系统所有功能都不生效。
+ * 排除角色：名单中的角色名（含重名卡）的单角色聊天里，记忆系统所有功能都不生效；群聊不按名单排除。
  * 按「名字」排除，所以同名卡是一批一起排除。角色名只在弹窗打开时取并去重，关闭后不再持有。
  */
 import Collapsible from '@/components/Collapsible.vue';
@@ -34,7 +34,8 @@ function toggleExcluded(name: string) {
 
 <template>
   <Collapsible class="prism-settings-card" title="排除角色" :open="false">
-    <p class="bbs-field-hint">名单中的角色（含同名角色卡）在聊天中不使用棱镜宝书：不摘要、不隐藏、不注入、不拦截。适用于工具类、不需要记忆的角色。</p>
+    <p class="bbs-field-hint">名单中的角色（含同名角色卡）在聊天中不使用棱镜宝书：不摘要、不注入、不拦截，也不再隐藏新的楼层。群聊不受排除名单影响。适用于工具类、不需要记忆的角色。</p>
+    <p class="bbs-field-hint">加入名单前已由棱镜宝书隐藏的旧楼层仍保持隐藏，正文模型看不到它们的原文和摘要；打开这个角色的聊天后，可在设置页顶部恢复显示。</p>
     <div class="bbs-channel-bar">
       <span class="bbs-field-label">
         已排除 {{ apiSettings.excludedChars.length }} 个

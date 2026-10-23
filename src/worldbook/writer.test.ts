@@ -139,11 +139,14 @@ describe('写入', () => {
     expect(suggestionConflict(batch.suggestions[0], stored())).toContain('uid 0');
   });
 
-  it('依据的楼层被重抽后建议失效，不能应用', async () => {
+  it('依据的楼层被重抽后批次失效：默认不应用，说明可「仍然应用」或重新读取；核对后仍然应用可以写入', async () => {
     const batch = await seed([suggestion({ kind: 'create', title: '码头', keys: ['码头'], content: '码头说明。' })]);
     tavern.ctx.chat[1] = message('重抽后的另一段正文。');
-    await expect(applySuggestions(batch.id, [batch.suggestions[0].id])).rejects.toThrow('已失效');
+    await expect(applySuggestions(batch.id, [batch.suggestions[0].id])).rejects.toThrow('仍然应用');
     expect(tavern.ctx.saveWorldInfo).not.toHaveBeenCalled();
+    const out = await applySuggestions(batch.id, [batch.suggestions[0].id], { allowStale: true });
+    expect(out.applied).toEqual([batch.suggestions[0].id]);
+    expect(stored().entries['1']).toMatchObject({ comment: '码头', content: '码头说明。' });
   });
 
   it('目标世界书被删除或改名时说明原因和改法', async () => {

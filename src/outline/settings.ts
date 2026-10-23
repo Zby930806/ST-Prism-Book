@@ -6,11 +6,15 @@ import type { OutlineSettings } from './types';
 
 export const OUTLINE_SETTINGS_KEY = 'prism_book_outline_settings';
 export const outlineSettingsIssue = ref('');
+/** 规划专用 API 的默认最大输出。规划的输出最长，思考型模型的思考也算在里面；与札记、世界书一致。 */
+export const OUTLINE_DEFAULT_MAX_TOKENS = 8000;
+/** 旧版保存设置时没有记下默认值，那时的默认是 6000。 */
+const LEGACY_DEFAULT_MAX_TOKENS = 6000;
 const defaults = (): OutlineSettings => ({
   apiMode: 'notes',
   channel: {
     id: 'prism-outline-independent', name: '独立大纲 API', url: '', key: '', model: '',
-    temperature: 0.7, maxTokens: 6000, timeoutSec: 180, stream: true,
+    temperature: 0.7, maxTokens: OUTLINE_DEFAULT_MAX_TOKENS, timeoutSec: 180, stream: true,
     prefill: false, excludeParams: [], reasoningEffort: '',
   },
   progressCheck: { auto: false, interval: 3, autoAdvance: false },
@@ -39,7 +43,7 @@ function normalize(value: OutlineSettings | Record<string, unknown>): OutlineSet
       key: typeof c.key === 'string' ? c.key : '',
       model: typeof c.model === 'string' ? c.model.trim() : '',
       temperature: bounded(c.temperature, 0.7, 0, 2),
-      maxTokens: Math.floor(bounded(c.maxTokens, 6000, 256, 65535)),
+      maxTokens: Math.floor(bounded(c.maxTokens, OUTLINE_DEFAULT_MAX_TOKENS, 256, 65535)),
       timeoutSec: Math.floor(bounded(c.timeoutSec, 180, 10, 600)),
       stream: c.stream !== false, prefill: c.prefill === true,
       excludeParams: Array.isArray(c.excludeParams) ? c.excludeParams.filter((p): p is string => typeof p === 'string') : [],
@@ -72,6 +76,9 @@ export function hydrateOutlineSettings(): void {
     return;
   }
   committed = normalize(raw);
+  // 保存时就是当时的默认值，说明用户没改过：跟着用现在的默认（与札记的做法一致）。改过的值原样保留。
+  const savedDefault = typeof raw.defaultMaxTokens === 'number' ? raw.defaultMaxTokens : LEGACY_DEFAULT_MAX_TOKENS;
+  if (record(raw.channel) && raw.channel.maxTokens === savedDefault) committed.channel.maxTokens = OUTLINE_DEFAULT_MAX_TOKENS;
   Object.assign(outlineSettings, copy(committed));
 }
 
@@ -85,7 +92,7 @@ export function saveOutlineSettings(): void {
   const hadKey = Object.prototype.hasOwnProperty.call(settings, OUTLINE_SETTINGS_KEY);
   const next = normalize(outlineSettings);
   try {
-    settings[OUTLINE_SETTINGS_KEY] = { version: 1, ...copy(next) };
+    settings[OUTLINE_SETTINGS_KEY] = { version: 1, defaultMaxTokens: OUTLINE_DEFAULT_MAX_TOKENS, ...copy(next) };
     ctx.saveSettingsDebounced();
   } catch {
     if (hadKey) settings[OUTLINE_SETTINGS_KEY] = previous;
@@ -97,6 +104,16 @@ export function saveOutlineSettings(): void {
   committed = copy(next);
   Object.assign(outlineSettings, copy(next));
   outlineSettingsIssue.value = '';
+}
+
+/**
+ * 报错时说明去哪里改规划用的 API。复用札记的 API 时指向札记页；专用 API 在摘要页「创作规划」里，
+ * 外层折叠行有已确认规划时叫「修改或重新生成规划」，没有时叫「生成规划草稿」。
+ */
+export function outlineApiPath(hasActive = false): string {
+  return outlineSettings.apiMode === 'notes'
+    ? '札记 → 独立 API 设置（规划目前使用札记的 API）'
+    : `摘要 → 创作规划 → ${hasActive ? '修改或重新生成规划' : '生成规划草稿'} → 规划 API 设置`;
 }
 
 /** 仅借用札记渠道配置，不要求札记启用，也绝不借用正文/摘要渠道。 */

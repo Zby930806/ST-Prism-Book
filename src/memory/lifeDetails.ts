@@ -5,10 +5,12 @@ type LifeDetailAdd = NonNullable<LifeDetailsDelta['add']>[number];
 type LifeDetailUpdate = NonNullable<LifeDetailsDelta['update']>[number];
 
 export interface MergeLifeDetailsOptions {
-  /** 当前目标叶子 id，用于识别该叶子 add 数组生成的稳定 id。 */
+  /** 当前目标叶子 id，用于识别该叶子 add 数组按序号生成的稳定 id(带显式 id 的手动条目不需要)。 */
   leafId?: string;
-  /** 重放到目标叶子之前的生活档案，用于恢复更早叶子中被本叶删除的同文案条目。 */
+  /** 重放到目标之前的生活档案，用于恢复更早叶子中被本次删除的同文案条目。 */
   existingDetails?: MemLifeDetail[];
+  /** 目标是叶子的手动修改(manualOps):新增条目带显式 id,删除后重加时按 id 对应同批新增。 */
+  explicitIds?: boolean;
 }
 
 export function normalizeLifeDetailText(text: string): string {
@@ -39,9 +41,14 @@ function upsertUpdate(out: LifeDetailsDelta, update: LifeDetailUpdate): void {
   else updates.push(update);
 }
 
-function sameLeafAddIndex(id: string, leafId?: string): number | null {
-  if (!leafId) return null;
-  const prefix = `detail:${leafId}#`;
+function sameLeafAddIndex(out: LifeDetailsDelta, id: string, options: MergeLifeDetailsOptions): number | null {
+  // 手动修改的新增带显式 id:直接在本增量的新增里按 id 找
+  if (options.explicitIds) {
+    const explicit = out.add?.findIndex(add => add.id === id) ?? -1;
+    return explicit >= 0 ? explicit : null;
+  }
+  if (!options.leafId) return null;
+  const prefix = `detail:${options.leafId}#`;
   if (!id.startsWith(prefix)) return null;
   const index = Number(id.slice(prefix.length));
   return Number.isInteger(index) && index >= 0 ? index : null;
@@ -52,7 +59,7 @@ function effectiveRemovedDetail(
   id: string,
   options: MergeLifeDetailsOptions,
 ): LifeDetailAdd | undefined {
-  const sameLeafIndex = sameLeafAddIndex(id, options.leafId);
+  const sameLeafIndex = sameLeafAddIndex(out, id, options);
   const base = sameLeafIndex === null
     ? options.existingDetails?.find(detail => detail.id === id)
     : out.add?.[sameLeafIndex];
@@ -76,10 +83,15 @@ function reviveRemovedDetail(
   out.archive = out.archive?.filter(existing => existing !== id);
   if (!out.archive?.length) delete out.archive;
 
-  const sameLeafIndex = sameLeafAddIndex(id, options.leafId);
+  const sameLeafIndex = sameLeafAddIndex(out, id, options);
   if (sameLeafIndex !== null && out.add?.[sameLeafIndex]) {
-    // 原条目由本叶 add 产生：原位替换，稳定 id 与后续 add 序号都不变。
-    out.add[sameLeafIndex] = add;
+    // 原条目由本增量的新增产生：原位替换，稳定 id 与后续 add 序号都不变(手动条目沿用原来的显式 id)。
+    if (options.explicitIds) {
+      const { id: _incomingId, ...rest } = add;
+      out.add[sameLeafIndex] = { ...rest, id: out.add[sameLeafIndex].id };
+    } else {
+      out.add[sameLeafIndex] = add;
+    }
     if (out.update) {
       out.update = out.update.filter(existing => existing.id !== id);
       if (!out.update.length) delete out.update;
@@ -100,8 +112,9 @@ function reviveRemovedDetail(
 }
 
 /**
- * 把一段生活小档案手动操作合并进叶子 delta。
- * update 按 id 压成 last-write-wins；add 不做裁剪，因为条目稳定 id 依赖 add 数组序号。
+ * 把一段生活小档案手动操作合并进目标增量(叶子的 manualOps;旧版直接写进 delta)。
+ * update 按 id 压成 last-write-wins；add 不做裁剪，因为条目稳定 id 依赖 add 数组序号(或条目自带的显式 id)。
+ * 删除后重加同一人物的同一句,复活原条目:本增量里的新增按显式 id 或叶子序号原位恢复,更早的条目用完整补丁恢复。
  */
 export function mergeLifeDetailsOp(
   target: StoredDelta,

@@ -2,6 +2,7 @@ import { watch, type WatchStopHandle } from 'vue';
 import { recallDebug } from '@/memory/vector/debug';
 import { recallButtonLabel } from '@/memory/vector/recallView';
 import { ensureButtonHolder, removeOwnBarIfEmpty } from '@/quickReply';
+import { registerQrAssistantButton, unregisterQrAssistantButton } from '@/qrAssistant';
 import { ui } from '@/state/ui';
 
 /**
@@ -10,6 +11,7 @@ import { ui } from '@/state/ui';
  * 外观和挂法与「棱镜宝书」按钮相同(见 quickReply.ts):借 quick-reply 扩展的 .qr--button 类,
  * 挂在 #qr--bar > .qr--buttons 里;ST 重建 #qr--bar 时由 MutationObserver 补回。
  * 只在开了向量记忆、且设置里没关掉时出现(由 index.ts 按两个开关同步)。
+ * 装了 QR助手时按钮会收进它的菜单,这里同时登记进 QR助手(见 qrAssistant.ts),菜单项的文字随召回结果更新。
  */
 const BTN_ID = 'bbs-qr-recall';
 let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -21,6 +23,7 @@ function applyLabel(btn: HTMLElement): void {
   btn.textContent = text;
   btn.title = title;
   btn.setAttribute('aria-expanded', String(ui.recallPeekOpen));
+  registerQrAssistantButton(BTN_ID, text);
 }
 
 function buildButton(): HTMLElement {
@@ -63,9 +66,12 @@ function startObserver(): void {
   observer.observe(sendForm, { childList: true, subtree: true });
 }
 
-/** 弹层定位用:按钮在页面上的位置;按钮不在页面上时返回 null。 */
+/**
+ * 弹层定位用:按钮在页面上的位置。按钮不在页面上,或被隐藏(收进 QR助手的菜单、快捷回复栏被收起)时返回 null。
+ */
 export function recallButtonRect(): DOMRect | null {
-  return document.getElementById(BTN_ID)?.getBoundingClientRect() ?? null;
+  const rect = document.getElementById(BTN_ID)?.getBoundingClientRect();
+  return rect && rect.width > 0 && rect.height > 0 ? rect : null;
 }
 
 /** 按开关同步「召回」按钮的有无(幂等)。 */
@@ -81,6 +87,7 @@ export function syncRecallQuickReply(enabled: boolean): void {
     stopLabelWatch = null;
     ui.recallPeekOpen = false;
     document.getElementById(BTN_ID)?.remove();
+    unregisterQrAssistantButton(BTN_ID);
     removeOwnBarIfEmpty();
     return;
   }

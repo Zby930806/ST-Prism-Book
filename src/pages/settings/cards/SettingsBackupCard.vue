@@ -107,7 +107,7 @@ function confirmImport() {
 
 <template>
   <Collapsible class="prism-settings-card" title="设置备份" :open="false">
-    <p class="prism-card-intro">导出或导入棱镜宝书的全部设置，包括副 API 渠道、摘要与注入、向量记忆、提示词、排除名单，以及札记、规划和世界书的设置。导出的文件不含 API 密钥；导入时保留本机已填写的密钥。</p>
+    <p class="prism-card-intro">导出或导入棱镜宝书的全部设置，包括副 API 渠道、摘要与注入、向量记忆、提示词、排除名单，以及札记、规划和世界书的设置。导出的文件不含 API 密钥；导入时，地址与本机是同一个服务器的保留本机已填写的密钥，地址换了服务器的需要重新填写。</p>
 
     <div class="bbs-backup-row">
       <div class="bbs-backup-text">

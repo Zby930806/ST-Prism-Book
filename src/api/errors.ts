@@ -31,8 +31,10 @@ export interface ApiErrorInfo {
   hint?: string;
   /** 已脱敏的技术细节：状态码、finish_reason、服务商原话等。 */
   detail?: string;
-  /** 回复被截断或过滤前已经收到的文本。 */
+  /** 回复被截断、过滤或超时前已经收到的文本。 */
   partial?: string;
+  /** 明确指定能否自动重试；不填时按 kind 判断（见 isRetryable）。 */
+  retryable?: boolean;
 }
 
 export class ApiError extends Error {
@@ -41,6 +43,7 @@ export class ApiError extends Error {
   readonly hint: string;
   readonly detail: string;
   readonly partial: string;
+  readonly retryable: boolean | undefined;
 
   constructor(message: string, readonly status?: number, info: ApiErrorInfo = {}) {
     super(message);
@@ -50,12 +53,13 @@ export class ApiError extends Error {
     this.hint = info.hint ?? '';
     this.detail = info.detail ?? '';
     this.partial = info.partial ?? '';
+    this.retryable = info.retryable;
   }
 }
 
 /** 由本模块生成的说明性错误；title/hint 都是我们自己写的，可以直接展示。 */
-export function apiFailure(kind: ApiErrorKind, title: string, hint = '', extra: { status?: number; detail?: string; partial?: string } = {}): ApiError {
-  return new ApiError(joinSentences(title, hint), extra.status, { kind, title, hint, detail: extra.detail, partial: extra.partial });
+export function apiFailure(kind: ApiErrorKind, title: string, hint = '', extra: { status?: number; detail?: string; partial?: string; retryable?: boolean } = {}): ApiError {
+  return new ApiError(joinSentences(title, hint), extra.status, { kind, title, hint, detail: extra.detail, partial: extra.partial, retryable: extra.retryable });
 }
 
 function joinSentences(...parts: string[]): string {
@@ -318,8 +322,26 @@ export function invalidResponse(detail = ''): ApiError {
   return apiFailure('format', 'API 返回的不是有效数据', '请确认地址指向接口而不是网站首页；OpenAI 兼容接口的地址通常以 /v1 结尾。', { detail: sanitizeDetail(detail) });
 }
 
-export function timeoutFailure(label: string, seconds: number): ApiError {
-  return apiFailure('timeout', `${label}超时（超过 ${seconds} 秒）`, '可以在该 API 的设置里调大超时；经常超时多半是服务商繁忙或网络不稳。');
+export interface TimeoutInfo {
+  /**
+   * total:整次请求超过时限(非流式请求、拉取模型列表);
+   * idle:流式请求超过时限没有收到任何数据;stream-total:流式请求一直有数据,但整次超过总上限。
+   */
+  mode?: 'total' | 'idle' | 'stream-total';
+  /** 流式请求超时前是否收到过数据(决定说「没有收到回复」还是「没有收到新内容」)。 */
+  received?: boolean;
+  /** 超时前已经收到的文本。 */
+  partial?: string;
+}
+
+export function timeoutFailure(label: string, seconds: number, info: TimeoutInfo = {}): ApiError {
+  const what = info.mode === 'idle'
+    ? `超过 ${seconds} 秒没有收到${info.received ? '新内容' : '回复'}`
+    : info.mode === 'stream-total' ? `流式输出超过 ${seconds} 秒仍未结束` : `超过 ${seconds} 秒`;
+  const partial = info.partial ?? '';
+  // 已经收到部分内容的流式请求，用同样的时限原样重试多半还会超时，不自动重试。
+  return apiFailure('timeout', `${label}超时（${what}）`, '可以在该 API 的设置里调大超时；经常超时多半是服务商繁忙或网络不稳。',
+    { partial, retryable: partial.trim() ? false : undefined });
 }
 
 /* ============ 展示 ============ */
@@ -362,18 +384,22 @@ export function describeFailure(error: unknown, fallbackTitle = '请求没有完
 export function withContext(error: unknown, prefix: string, settingsPath = ''): unknown {
   if (!(error instanceof ApiError) || !error.title) return error;
   const view = describeFailure(error, '', settingsPath);
-  return apiFailure(error.kind, `${prefix}：${view.title}`, view.hint, { status: error.status, detail: error.detail, partial: error.partial });
+  return apiFailure(error.kind, `${prefix}：${view.title}`, view.hint, { status: error.status, detail: error.detail, partial: error.partial, retryable: error.retryable });
 }
 
-/** 重试也不会成功的失败：配置、密钥、额度、地址、上下文、参数，以及达到输出上限。 */
+/**
+ * 重试也不会成功的失败：配置、密钥、额度、地址、上下文、参数，以及达到输出上限。
+ * 生成错误时明确写了 retryable 的以它为准（例如已经换过最大回复重试过的主 API 请求、收到部分内容后超时的流式请求）。
+ */
 export function isRetryable(error: unknown): boolean {
   if (!(error instanceof ApiError)) return true;
+  if (typeof error.retryable === 'boolean') return error.retryable;
   return !['config', 'auth', 'quota', 'not-found', 'context-length', 'bad-request', 'truncated'].includes(error.kind);
 }
 
-/** 截断/过滤类错误里保留的半截回复。 */
+/** 截断、过滤、服务端中断或超时的错误里保留的半截回复。 */
 export function partialReply(error: unknown): string {
-  return error instanceof ApiError && (error.kind === 'truncated' || error.kind === 'filtered' || error.kind === 'server') ? error.partial : '';
+  return error instanceof ApiError && (error.kind === 'truncated' || error.kind === 'filtered' || error.kind === 'server' || error.kind === 'timeout') ? error.partial : '';
 }
 
 /** 回复看起来是写到一半的 JSON（花括号或字符串没闭合）。用于无法拿到 finish_reason 的主 API。 */

@@ -21,6 +21,7 @@ vi.mock('@/st/context', () => ({ getContext: vi.fn() }));
 vi.mock('@/notes/service', () => ({
   notesRun: { busy: false, status: '', error: '', draft: '' },
   generateNotes: vi.fn(), cancelNotes: vi.fn(),
+  confirmedInjectionPlan: vi.fn(() => ({ text: '', injected: 0, omitted: 0, total: 0 })), NOTES_INJECTION_LIMIT: 16000,
 }));
 
 // Node 模式的 Vite 默认编译 SSR；这里直接编译客户端 SFC，避免改变项目测试配置。
@@ -211,5 +212,57 @@ describe('札记记录展开状态', () => {
     loadNotes();
     await nextTick();
     expectCollapsed();
+  });
+});
+
+describe('已确认的安排', () => {
+  it('依据的正文已改动的安排仍可设为待兑现，醒目提示并可一键取消；「注入中」按实际注入条数显示', async () => {
+    app?.unmount();
+    context = {
+      chat: [], getCurrentChatId: () => chatId,
+      chatMetadata: { [NOTES_DATA_KEY]: { version: 1,
+        records: [{ id: 'gone', createdAt: 1, floor: 3, swipe: 0, sourceHash: 'x', floorHash: 'y', text: 'Q1. 甲？凝嘤嘤暂定: 甲', questions: [{ id: 'Q1', label: 'Q1', prompt: '甲？', proposal: '甲' }] }],
+        decisions: [{ id: 'd1', noteId: 'gone', questionId: 'Q1', text: '去山里', status: 'in_progress', createdAt: 5 }] } },
+    } as unknown as STContext;
+    loadNotes();
+    const previous = { enabled: settings.notesSettings.enabled, injectConfirmed: settings.notesSettings.injectConfirmed };
+    Object.assign(settings.notesSettings, { enabled: true, injectConfirmed: true });
+    vi.mocked(service.confirmedInjectionPlan).mockReturnValue({ text: '[戏外]', injected: 1, omitted: 2, total: 3 });
+    try {
+      root = node('root'); app = renderer.createApp(NotesPage); app.mount(root); await nextTick();
+      const texts = all().map(target => target.text).join('\n');
+      expect(texts).toContain('依据的正文已改动');
+      expect(texts).toContain('注入中 · 1 条');
+      expect(texts).toContain('有 2 条安排超出注入上限');
+      expect(texts).toContain('有 1 条安排依据的札记所在楼已被改写、重抽或删除，仍在注入正文');
+      const button = (label: string) => all().find(target => target.type === 'button' && (target.text.includes(label) || target.children.some(child => child.text.includes(label))))!;
+      expect(button('待兑现').props.disabled).toBe(false);
+      expect(button('取消这条安排').props.disabled).toBe(false);
+    } finally {
+      Object.assign(settings.notesSettings, previous);
+      vi.mocked(service.confirmedInjectionPlan).mockReturnValue({ text: '', injected: 0, omitted: 0, total: 0 });
+    }
+  });
+  it('「注入已确认安排」关闭时，依据的正文已改动的安排不说「仍在注入正文」', async () => {
+    app?.unmount();
+    context = {
+      chat: [], getCurrentChatId: () => chatId,
+      chatMetadata: { [NOTES_DATA_KEY]: { version: 1,
+        records: [{ id: 'gone', createdAt: 1, floor: 3, swipe: 0, sourceHash: 'x', floorHash: 'y', text: 'Q1. 甲？凝嘤嘤暂定: 甲', questions: [{ id: 'Q1', label: 'Q1', prompt: '甲？', proposal: '甲' }] }],
+        decisions: [{ id: 'd1', noteId: 'gone', questionId: 'Q1', text: '去山里', status: 'pending', createdAt: 5 }] } },
+    } as unknown as STContext;
+    loadNotes();
+    const previous = { enabled: settings.notesSettings.enabled, injectConfirmed: settings.notesSettings.injectConfirmed };
+    Object.assign(settings.notesSettings, { enabled: true, injectConfirmed: false });
+    try {
+      root = node('root'); app = renderer.createApp(NotesPage); app.mount(root); await nextTick();
+      const texts = all().map(target => target.text).join('\n');
+      expect(texts).toContain('未注入');
+      expect(texts).toContain('有 1 条安排依据的札记所在楼已被改写、重抽或删除，仍是待兑现或进行中');
+      expect(texts).toContain('打开「注入已确认安排」后会注入正文');
+      expect(texts).not.toContain('仍在注入正文');
+    } finally {
+      Object.assign(settings.notesSettings, previous);
+    }
   });
 });

@@ -2,11 +2,13 @@
 /**
  * 未摘要楼层：批量补摘进行中的进度条，以及尚未摘要的楼层与分页。连续的楼层合成一段（中间没有别的 AI 楼，
  * 番外楼不打断）：单层点击直接补摘那一楼，多层的一段打开批量补摘确认、只补这一段。全部补摘的入口在概览的「补摘」按钮。
+ * 清洗后没有故事正文的楼层（只有状态栏、时间标签、思考或旁注）无法摘要，单独列出并提供「标为番外」。
  */
 import Icon from '@/components/Icon.vue';
-import { batchState, cancelBatchBackfill, engineState, floorBackfillState, isAiFloor, summarizeFloor } from '@/memory/engine';
+import { batchState, cancelBatchBackfill, engineState, floorBackfillState, floorHasStoryBody, isAiFloor, setFloorOmit, summarizeFloor } from '@/memory/engine';
 import { derivedMeta } from '@/memory/store';
 import { getContext } from '@/st/context';
+import { toast } from '@/st/toast';
 import { computed, ref, watch } from 'vue';
 import SummaryPager from './SummaryPager.vue';
 import { useSummaryPage } from './pageCtx';
@@ -17,13 +19,19 @@ const page = useSummaryPage();
 const { pendingFloors, allowMemoryEdit } = page;
 const { batchEta, openBatchConfirm } = page.batch;
 
+// 没有故事正文的楼层:不会被摘要,一直待摘要;新的在前
+const bodyless = computed(() => {
+  void derivedMeta.rev;
+  return pendingFloors.value.filter(f => !floorHasStoryBody(f));
+});
 // 新的段在前，与原来楼层号的顺序一致
 const ranges = computed(() => {
   void derivedMeta.rev;
   const chat = getContext()?.chat ?? [];
   const aiFloors: number[] = [];
   chat.forEach((message, index) => { if (isAiFloor(message)) aiFloors.push(index); });
-  return pendingRanges(pendingFloors.value, aiFloors).reverse();
+  const skip = new Set(bodyless.value);
+  return pendingRanges(pendingFloors.value.filter(f => !skip.has(f)), aiFloors).reverse();
 });
 const pendingPage = ref(1);
 const pendingWindow = computed(() => arrayPage(ranges.value, pendingPage.value, PENDING_PAGE_SIZE));
@@ -51,6 +59,19 @@ function openRange(range: PendingRange) {
   if (range.floors.length === 1) { summarizeOne(range.first); return; }
   openBatchConfirm(range.floors);
 }
+// 标为番外:这一楼不再参与摘要、总结和注入(可在楼层面板取消番外)
+const omitting = ref<number | null>(null);
+async function markOmit(floor: number) {
+  if (!allowMemoryEdit() || engineState.running || omitting.value !== null) return;
+  omitting.value = floor;
+  try {
+    await setFloorOmit(floor, true);
+    if (engineState.lastError && getContext()?.chat?.[floor]?.extra?.bbs_omit !== true) toast(engineState.lastError, 'error');
+    else toast(`楼层 #${floor} 已标为番外，不再参与摘要、总结和注入。`, 'success');
+  } finally {
+    omitting.value = null;
+  }
+}
 </script>
 
 <template>
@@ -75,7 +96,7 @@ function openRange(range: PendingRange) {
       </span>
     </div>
     <p class="bbs-backfill-description">连续的楼层合为一段，点击补摘这一楼或这一段；全部补摘使用上方的「补摘」按钮。</p>
-    <div class="bbs-pending-chips">
+    <div v-if="ranges.length" class="bbs-pending-chips">
       <button
         v-for="range in pendingWindow.items"
         :key="range.first"
@@ -89,6 +110,21 @@ function openRange(range: PendingRange) {
         <span v-if="summarizingFloor !== null && range.floors.includes(summarizingFloor)" class="bbs-spin"></span>
         <template v-else>{{ rangeName(range) }}<small v-if="range.floors.length > 1" class="bbs-pending-count">{{ range.floors.length }} 层</small></template>
       </button>
+    </div>
+    <div v-if="bodyless.length" class="bbs-pending-bodyless">
+      <p class="bbs-backfill-description">以下楼层清洗后没有故事正文（只有状态栏、时间标签、思考或旁注），无法摘要，会一直待摘要并拦截生成。可编辑正文、删除这一楼，或标为番外跳过。</p>
+      <div class="bbs-pending-chips">
+        <span v-for="floor in bodyless" :key="floor" class="bbs-pending-bodyless-item">
+          <span class="bbs-pending-bodyless-floor">#{{ floor }}</span>
+          <button
+            class="bbs-btn bbs-btn-sm"
+            type="button"
+            :disabled="engineState.running || batchState.running || omitting !== null"
+            :aria-label="`把楼层 #${floor} 标为番外`"
+            @click="markOmit(floor)"
+          >{{ omitting === floor ? '处理中…' : '标为番外' }}</button>
+        </span>
+      </div>
     </div>
   </section>
 
@@ -225,6 +261,25 @@ function openRange(range: PendingRange) {
 .bbs-pending-chip:disabled {
   opacity: 0.55;
   cursor: default;
+}
+/* 没有故事正文的楼层:楼层号 + 「标为番外」,与待补摘的楼层分开列出 */
+.bbs-pending-bodyless {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--bbs-line);
+}
+.bbs-pending-bodyless-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.bbs-pending-bodyless-floor {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--bbs-ink);
 }
 /* 窄屏和触屏:楼层号加大到 40px 高,便于点按 */
 @media (max-width: 640px), (pointer: coarse) {

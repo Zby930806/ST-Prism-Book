@@ -191,6 +191,85 @@ export function normalizeStickyTurns(value: unknown): number {
   return Math.min(5, Math.max(0, Math.floor(value)));
 }
 
+/** 跟随主 API 时的最大回复(tokens):默认值、可设范围,以及首次失败后重试用的值。 */
+export const MAIN_API_MAX_TOKENS_DEFAULT = 32000;
+export const MAIN_API_MAX_TOKENS_MIN = 1024;
+export const MAIN_API_MAX_TOKENS_MAX = 200000;
+export const MAIN_API_FALLBACK_TOKENS = 8192;
+
+/** 规整跟随主 API 时的最大回复:钳到可设范围内的整数;缺失、非法或输入框暂时为空时按默认 32000。 */
+export function normalizeMainApiMaxTokens(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return MAIN_API_MAX_TOKENS_DEFAULT;
+  return Math.min(MAIN_API_MAX_TOKENS_MAX, Math.max(MAIN_API_MAX_TOKENS_MIN, Math.round(value)));
+}
+
+/** 非负整数:缺失、非法、负数或输入框暂时为空(v-model.number 写入空串)时按 fallback。 */
+export function normalizeNonNegativeInt(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
+}
+
+/** 保留最近 AI 消息数:非负整数,缺失或非法时按默认 3(空串按 0 会把最近的回复也隐藏掉)。 */
+export function normalizeKeepRecent(value: unknown): number {
+  return normalizeNonNegativeInt(value, 3);
+}
+
+/**
+ * 总结阈值(每次总结几条摘要、二次总结、高层总结):0 表示关闭,其余至少为 2。
+ * 1 没有意义(引擎同样不总结),规整为 0;缺失或非法时按 fallback(各项默认值)。
+ */
+export function normalizeSummaryThreshold(value: unknown, fallback: number): number {
+  const n = normalizeNonNegativeInt(value, fallback);
+  return n === 1 ? 0 : n;
+}
+
+/** 记忆注入预算:0 = 不限制(默认);其他值钳到 2000–50000 的整数;缺失或非法时按 0。 */
+export function normalizeMemoryBudgetTokens(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+  return value === 0 ? 0 : Math.max(2000, Math.min(50000, Math.round(value)));
+}
+
+/** 召回参数中会被清空或填错的数值项的默认值(与 defaults() 一致)。 */
+const RECALL_NUMBER_DEFAULTS = {
+  rerankCandidates: 20,
+  embeddingThreshold: 0.8,
+  rerankThreshold: 0.9,
+  fullTextCount: 2,
+  finalRecallCount: 5,
+  minAiFloors: 30,
+} as const;
+
+/**
+ * 规整召回参数里的候选数、两个阈值、全文数、最终条数与起始 AI 楼数(就地修改并返回同一对象):
+ * 阈值须在 0–1 之间(误填成 80 这类百分数、空串或非数字时回退默认);
+ * 候选数为正整数,全文数、最终条数与起始 AI 楼数为非负整数,非法时回退默认。
+ */
+export function normalizeRecallParams<T extends Partial<VectorRecallSettings>>(recall: T): T {
+  const d = RECALL_NUMBER_DEFAULTS;
+  const threshold = (v: unknown, def: number) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1 ? v : def);
+  recall.rerankCandidates = Math.max(1, normalizeNonNegativeInt(recall.rerankCandidates, d.rerankCandidates));
+  recall.embeddingThreshold = threshold(recall.embeddingThreshold, d.embeddingThreshold);
+  recall.rerankThreshold = threshold(recall.rerankThreshold, d.rerankThreshold);
+  recall.fullTextCount = normalizeNonNegativeInt(recall.fullTextCount, d.fullTextCount);
+  recall.finalRecallCount = normalizeNonNegativeInt(recall.finalRecallCount, d.finalRecallCount);
+  recall.minAiFloors = normalizeNonNegativeInt(recall.minAiFloors, d.minAiFloors);
+  return recall;
+}
+
+/** 渠道采样温度:0–2 之间的有限数,缺失、非法或输入框暂时为空时按 1.0。 */
+export function normalizeChannelTemperature(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.min(2, Math.max(0, value)) : 1.0;
+}
+
+/** 渠道最大输出(tokens):至少为 1 的整数,缺失、非法或输入框暂时为空时按 65535。 */
+export function normalizeChannelMaxTokens(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 ? Math.floor(value) : 65535;
+}
+
+/** 渠道超时(秒):正整数,缺失、非法或输入框暂时为空时按 180。 */
+export function normalizeChannelTimeoutSec(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.max(1, Math.floor(value)) : 180;
+}
+
 /** 合并摘要每次最多楼层数:1–30 的整数;缺失或非法按 10。上限防止一次输出几十条摘要被截断。 */
 export function normalizeBatchMaxFloors(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 1) return 10;
@@ -245,8 +324,10 @@ export interface ApiSettings {
   promptBases: Partial<Record<keyof CustomPrompts, string>>;
   /** 任务说明三态;旧 jailbreak 字段保留作自定义内容。 */
   taskContextMode: 'default' | 'custom' | 'disabled';
-  /** 主对话四类记忆槽的总估算token预算,0=不限;不是模型精确token数。 */
+  /** 主对话四类记忆槽的总估算token预算,0=不限(默认);不是模型精确token数。 */
   memoryBudgetTokens: number;
+  /** 预算默认值改为不限制时的一次性迁移标记:旧版本按原默认值保存的 6000 改成 0,之后用户自己填的值不再改动。 */
+  memoryBudgetMigrated: boolean;
   /** 内置模板的字数详尽档位:详细/精简,管总结与二次总结的篇幅。自定义模板不受影响。 */
   verbosity: Verbosity;
   /** 向量记忆配置 */
@@ -304,6 +385,14 @@ export interface ApiSettings {
   recentResolvedPlansCount: number;
   /** 摘要/总结失败(请求报错或 JSON 解析失败)的最大重试次数。0=不重试;默认 1(最多再试一次)。 */
   summaryMaxRetries: number;
+  /**
+   * 跟随主 API(未给摘要/总结指派副 API 渠道)时,请求期间临时设置的主 API 最大回复(tokens)。
+   * 酒馆的 generateRaw 会把它原样作为 max_tokens 发给服务商,超过模型的输出上限会被拒绝。
+   * 默认 32000,可设 1024–200000;首次失败时改用 8192 重试一次(见 client.ts 的 requestViaMainApi)。
+   */
+  mainApiMaxTokens: number;
+  /** 跟随主 API 时保留摘要、总结请求末尾的 assistant 预填充消息。默认开(与旧版本相同);接口不接受时关闭。 */
+  mainApiPrefill: boolean;
   /**
    * 回看原文补全角色档案(默认开):摘要时新登场或被提到的角色缺外貌、身份或性别,
    * 到之前的楼层找原文补全,每次多发一个请求。关闭后自动补档不发请求,已补好的结果保持不变;
@@ -363,6 +452,8 @@ interface SharedExcludesStore {
 /** 条目名过滤的内置默认规则:首次载入时「播种」进用户列表(见 hydrateSettings),之后用户可自由增删。
  *  \[mvu…\] = 过滤变量框架 MVU 的机制条目(对剧情摘要是纯噪音)。大小写不敏感(engine 编译带 i)。 */
 const DEFAULT_WI_PATTERNS = ['\\[mvu[\\s\\S]*?\\]'];
+/** 注入预算原来的默认值;首次载入时把按它保存的设置改为不限制(见 hydrateSettings)。 */
+const LEGACY_MEMORY_BUDGET_DEFAULT = 6000;
 const LEGACY_STORAGE_KEY = 'bbs.api.v1';
 // 旧版界面偏好(主题/导航位置/分页)曾单独存这里;现把主题+导航迁进 ui,分页仍留本机(见 state/ui.ts)。
 const LEGACY_UI_STORAGE_KEY = 'bbs.ui.v1';
@@ -400,7 +491,8 @@ function defaults(): ApiSettings {
     prompts: { summary: '', resummary: '', resummary2: '', jailbreak: '', timeTag: '' },
     promptBases: {},
     taskContextMode: 'default',
-    memoryBudgetTokens: 6000,
+    memoryBudgetTokens: 0,
+    memoryBudgetMigrated: false,
     verbosity: 'detailed',
     vector: {
       enabled: false,
@@ -444,6 +536,8 @@ function defaults(): ApiSettings {
     higherResummaryThreshold: 3,
     recentResolvedPlansCount: 5,
     summaryMaxRetries: 1,
+    mainApiMaxTokens: MAIN_API_MAX_TOKENS_DEFAULT,
+    mainApiPrefill: true,
     npcEnrichAuto: true,
     summaryMaxChars: SUMMARY_MAX_CHARS_DEFAULT,
     batchMaxChars: 30000,
@@ -476,8 +570,21 @@ function normalize(raw: unknown): ApiSettings {
   merged.taskContextMode = savedMode === 'default' || savedMode === 'custom' || savedMode === 'disabled'
     ? savedMode : (typeof merged.prompts.jailbreak === 'string' && merged.prompts.jailbreak.trim() ? 'custom' : 'default');
   const budget = (raw as Partial<ApiSettings>).memoryBudgetTokens;
-  merged.memoryBudgetTokens = typeof budget === 'number' && Number.isFinite(budget)
-    ? (budget === 0 ? 0 : Math.max(2000, Math.min(50000, Math.round(budget)))) : d.memoryBudgetTokens;
+  merged.memoryBudgetTokens = normalizeMemoryBudgetTokens(budget);
+  merged.memoryBudgetMigrated = (raw as Partial<ApiSettings>).memoryBudgetMigrated === true;
+  // 总开关与几项模式开关:布尔,手改坏或类型不符时回退默认,不能把非空字符串当成「开」
+  const rb = raw as Partial<ApiSettings>;
+  merged.enabled = typeof rb.enabled === 'boolean' ? rb.enabled : d.enabled;
+  merged.autoSummaryEnabled = typeof rb.autoSummaryEnabled === 'boolean' ? rb.autoSummaryEnabled : d.autoSummaryEnabled;
+  merged.summaryOnlyMode = typeof rb.summaryOnlyMode === 'boolean' ? rb.summaryOnlyMode : d.summaryOnlyMode;
+  // 保留窗口与总结阈值:输入框清空时会存成空串,按空串计算会隐藏全部已摘要楼层或停掉总结,这里回退默认;
+  // 总结阈值 1 与 0 一样不会总结,统一存成 0(界面写「填 0 关闭」)
+  merged.keepRecent = normalizeKeepRecent(rb.keepRecent);
+  merged.leafBatchThreshold = normalizeSummaryThreshold(rb.leafBatchThreshold, d.leafBatchThreshold);
+  merged.resummaryThreshold = normalizeSummaryThreshold(rb.resummaryThreshold, d.resummaryThreshold);
+  // 跟随主 API 时的最大回复与预填充:旧数据没有这两项时按默认(32000、保留预填充)
+  merged.mainApiMaxTokens = normalizeMainApiMaxTokens(rb.mainApiMaxTokens);
+  merged.mainApiPrefill = typeof rb.mainApiPrefill === 'boolean' ? rb.mainApiPrefill : d.mainApiPrefill;
   // ui 同为嵌套对象,逐字段兜底(老数据没有 ui 键时回退默认,值非字符串时丢弃)
   const ru = ((raw as Partial<ApiSettings>).ui ?? {}) as Partial<UiPrefs>;
   merged.ui = {
@@ -543,13 +650,12 @@ function normalize(raw: unknown): ApiSettings {
     queryRewrite: normalizeVectorEndpoint(rv.queryRewrite, d.vector.queryRewrite),
     recall: { ...d.vector.recall, ...(rv.recall ?? {}) },
   };
+  merged.vector.enabled = typeof rv.enabled === 'boolean' ? rv.enabled : d.vector.enabled;
   // 召回注入深度:非负整数;老配置缺失、非法或输入框暂时为空时回退 D0。
   merged.vector.recall.injectionDepth = normalizeRecallInjectionDepth(merged.vector.recall.injectionDepth);
-  // 召回起始 AI 楼数:非负整数,缺失/非法回退 0(不限制)
-  merged.vector.recall.minAiFloors =
-    Number.isFinite(merged.vector.recall.minAiFloors) && merged.vector.recall.minAiFloors >= 0
-      ? Math.floor(merged.vector.recall.minAiFloors)
-      : 0;
+  // 候选数、两个阈值、全文数、最终条数、召回起始 AI 楼数(0=不限制):空串或越界时回退默认,
+  // 否则空串参与比较会按 0 计算(最终条数为空时一段都不注入,阈值为空时全部放行)
+  normalizeRecallParams(merged.vector.recall);
   // 关键词召回、在场角色加权:布尔,老数据缺失时按默认(开);保留轮数:0–5 的整数,缺失/非法回退 0
   merged.vector.recall.keywordRoute =
     typeof merged.vector.recall.keywordRoute === 'boolean' ? merged.vector.recall.keywordRoute : d.vector.recall.keywordRoute;
@@ -575,11 +681,8 @@ function normalize(raw: unknown): ApiSettings {
     Number.isFinite(merged.leafKeepRecent) && merged.leafKeepRecent >= 0
       ? Math.floor(merged.leafKeepRecent)
       : 3;
-  // 高层总结阈值:老配置没有该字段时补 3,避免 L2 继续按 7 条堆积成长文本
-  merged.higherResummaryThreshold =
-    Number.isFinite(merged.higherResummaryThreshold) && merged.higherResummaryThreshold >= 0
-      ? Math.floor(merged.higherResummaryThreshold)
-      : 3;
+  // 高层总结阈值:老配置没有该字段时补 3,避免 L2 继续按 7 条堆积成长文本;1 与 0 一样不会总结,存成 0
+  merged.higherResummaryThreshold = normalizeSummaryThreshold(rb.higherResummaryThreshold, 3);
   // 近期已完成计划条数:非负整数,缺失/非法回退默认 5(计划/悬念各取 N;0=不附带)
   merged.recentResolvedPlansCount =
     Number.isFinite(merged.recentResolvedPlansCount) && merged.recentResolvedPlansCount >= 0
@@ -672,12 +775,10 @@ function normalizeChannel(c: Partial<ApiChannel>): ApiChannel {
     url: typeof c.url === 'string' ? c.url : '',
     key: typeof c.key === 'string' ? c.key : '',
     model: typeof c.model === 'string' ? c.model : '',
-    temperature: typeof c.temperature === 'number' ? c.temperature : 1.0,
-    maxTokens: typeof c.maxTokens === 'number' ? c.maxTokens : 65535,
-    timeoutSec:
-      typeof c.timeoutSec === 'number' && Number.isFinite(c.timeoutSec) && c.timeoutSec > 0
-        ? Math.floor(c.timeoutSec)
-        : 180,
+    // 温度、最大输出、超时:非有限数(含输入框清空后存下的空串)回退默认,不把空串发给服务商
+    temperature: normalizeChannelTemperature(c.temperature),
+    maxTokens: normalizeChannelMaxTokens(c.maxTokens),
+    timeoutSec: normalizeChannelTimeoutSec(c.timeoutSec),
     stream: typeof c.stream === 'boolean' ? c.stream : false,
     // 流式与预填充默认都关(很多 OpenAI 兼容接口不接受末尾的 assistant 预填充);已保存的选择照旧
     prefill: typeof c.prefill === 'boolean' ? c.prefill : false,
@@ -716,6 +817,7 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.promptBases = src.promptBases;
   target.taskContextMode = src.taskContextMode;
   target.memoryBudgetTokens = src.memoryBudgetTokens;
+  target.memoryBudgetMigrated = src.memoryBudgetMigrated;
   target.verbosity = src.verbosity;
   target.vector = src.vector;
   target.channels = src.channels;
@@ -736,6 +838,8 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.higherResummaryThreshold = src.higherResummaryThreshold;
   target.recentResolvedPlansCount = src.recentResolvedPlansCount;
   target.summaryMaxRetries = src.summaryMaxRetries;
+  target.mainApiMaxTokens = src.mainApiMaxTokens;
+  target.mainApiPrefill = src.mainApiPrefill;
   target.npcEnrichAuto = src.npcEnrichAuto;
   target.summaryMaxChars = src.summaryMaxChars;
   target.batchMaxChars = src.batchMaxChars;
@@ -1030,6 +1134,14 @@ export function hydrateSettings(): void {
     ctx.saveSettingsDebounced?.();
   }
 
+  // 注入预算改为默认不限制:按原默认值保存的 6000 改成 0。只做一次,之后用户自己填的值不再改动。
+  if (!apiSettings.memoryBudgetMigrated) {
+    if (apiSettings.memoryBudgetTokens === LEGACY_MEMORY_BUDGET_DEFAULT) apiSettings.memoryBudgetTokens = 0;
+    apiSettings.memoryBudgetMigrated = true;
+    ctx.extensionSettings[SETTINGS_KEY] = JSON.parse(JSON.stringify(apiSettings));
+    ctx.saveSettingsDebounced?.();
+  }
+
   // 排除名单共享存储接管(在播种之后:老用户名单/新播种规则作为种子写入)
   hydrateSharedExcludes();
 
@@ -1141,11 +1253,18 @@ export function resolveVectorModel(role: 'embedding' | 'rerank' | 'queryRewrite'
   const base = v.embedding;
   if (role === 'embedding') return { ...base };
   const cfg = v[role];
+  const url = cfg.url.trim() || base.url; // 地址留空 → 复用 embedding 地址
   return {
-    url: cfg.url.trim() || base.url, // 地址留空 → 复用 embedding 地址
-    key: cfg.key.trim() || base.key, // 密钥留空 → 复用 embedding 密钥
+    url,
+    // 密钥留空 → 复用 embedding 密钥,但只限同一服务器:另填了别家地址却没填密钥时不把 embedding 的密钥发过去
+    key: cfg.key.trim() || (sameOrigin(url, base.url) ? base.key : ''),
     model: cfg.model, // 模型始终独立,不回落
     timeoutSec: cfg.timeoutSec, // 超时/重试始终独立,不回落(各角色默认本就不同)
     retries: cfg.retries,
   };
+}
+
+/** 两个地址是否属于同一服务器(协议、主机、端口都相同);任一无法解析时按不同处理。 */
+function sameOrigin(a: string, b: string): boolean {
+  try { return new URL(a.trim()).origin === new URL(b.trim()).origin; } catch { return false; }
 }

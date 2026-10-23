@@ -107,6 +107,26 @@ describe('手动生成', () => {
     expect(worldbookRun.error).toContain('长度上限');
     expect(worldbookState.cursor).toBeNull();
   });
+
+  it('单层正文最多读到「正文字数上限」；被截断的楼层在状态里说明', async () => {
+    worldbookSettings.read = { ...worldbookSettings.read, maxChars: 4000 };
+    tavern.ctx.chat.push(message('继续。', { is_user: true }), message('长'.repeat(6000)));
+    try {
+      await generateSuggestions();
+      expect(worldbookRun.status).toContain('第 3 楼超过单层上限（4000 字），后半段没有读取');
+      expect(completion.mock.calls[0][1].map(m => m.content).join('\n')).toContain('以下截断');
+    } finally { worldbookSettings.read = { ...worldbookSettings.read, maxChars: 24000 }; }
+  });
+
+  it('整段改写的建议只采用全文完整发送过的条目', async () => {
+    worldbookSettings.permission = 'modify';
+    tavern.books.set(BOOK, { entries: { 0: { uid: 0, comment: '雾港', key: ['雾港'], content: '潮'.repeat(2500) } } });
+    completion.mockResolvedValueOnce(reply([{ action: 'rewrite', uid: 0, content: '改写后的雾港。', reason: 'r', floors: [1] }]));
+    tavern.ctx.chat[1] = message('雾港的钟塔在城北。');
+    await generateSuggestions();
+    expect(worldbookState.batches).toEqual([]);
+    expect(worldbookRun.lastDropped[0].reason).toContain('不能整段改写');
+  });
 });
 
 describe('自动建议', () => {

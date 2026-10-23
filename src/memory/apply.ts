@@ -6,6 +6,7 @@ import { mergeProtagonistDelta } from './protagonist';
 import { applyNpcAffinity, cleanNpcAffinityLevel } from './npcRelations';
 import { memory, memoryWriteIssue, assertMemoryWritable, recomputeDerived, saveMemory, scheduleLeafFlush } from './store';
 import { readItemsTagText, writeItemLogTag, writeVarLogTag } from './timeTag';
+import { calculateRelativeDays, parseStoryDate } from './timeRel';
 import { scheduleVectorIndex } from './vector';
 import { invalidateRecallCache } from './vector/cache';
 import { createEmptyMemory, NPC_ENRICH_FIELDS } from './types';
@@ -205,6 +206,8 @@ function cleanNpcDelta(raw: unknown, preserveEvidence = false): NpcDelta | null 
         ? { place: raw.lastKnownLocation.place.trim(), time: scalarText(raw.lastKnownLocation.time), leafId: scalarText(raw.lastKnownLocation.leafId) } : undefined,
       // 伤情锚点同属内部证据:手动改名、带数据建新对话时沿用原记录时间;模型输出不得自带。
       conditionTime: optText(raw.conditionTime),
+      // 曾用名同属内部数据:带数据建新对话的种子叶子写入,重放时并入角色的曾用名。
+      formerNames: (() => { const names = [...new Set(cleanTextList(raw.formerNames))]; return names.length ? names : undefined; })(),
     } : {}),
   };
 }
@@ -246,12 +249,14 @@ function cleanSceneFocus(raw: unknown): SceneFocus | null | undefined {
   return out;
 }
 
-/** 清洗生活细节 add:text 必填;topics/anchors 各留前几个短词。 */
-function cleanLifeDetailAdd(raw: unknown): LifeDetailAdd | null {
+/** 清洗生活细节 add:text 必填;topics/anchors 各留前几个短词。keepId 只用于已存储的手动条目。 */
+function cleanLifeDetailAdd(raw: unknown, keepId = false): LifeDetailAdd | null {
   if (!isRecord(raw)) return null;
   const text = optText(raw.text);
   if (!text) return null;
   const out: LifeDetailAdd = { text };
+  const id = keepId ? cleanExplicitId(raw.id, 'detail') : undefined;
+  if (id) out.id = id;
   const subject = typeof raw.subject === 'string' ? raw.subject.trim() : '';
   if (subject) out.subject = subject;
   const topics = cleanTextList(raw.topics).slice(0, 3);
@@ -262,8 +267,8 @@ function cleanLifeDetailAdd(raw: unknown): LifeDetailAdd | null {
   if (until) out.until = until;
   return out;
 }
-function cleanLifeDetailAddList(v: unknown): LifeDetailAdd[] {
-  return arr(v).map(cleanLifeDetailAdd).filter((x): x is LifeDetailAdd => !!x);
+function cleanLifeDetailAddList(v: unknown, keepId = false): LifeDetailAdd[] {
+  return arr(v).map(x => cleanLifeDetailAdd(x, keepId)).filter((x): x is LifeDetailAdd => !!x);
 }
 
 /** 清洗生活细节 update:稳定 id 必填;tier 仅手动 op 出现,透传合法值。 */
@@ -292,20 +297,22 @@ function cleanNameList(v: unknown): string[] {
   return [...new Set(cleanTextList(v, ['name']))].slice(0, 12);
 }
 
-/** 清洗信息差 add:内容必填;名单可空(可以只记知情者或只记不知情者)。 */
-function cleanSecretAdd(raw: unknown): SecretAdd | null {
+/** 清洗信息差 add:内容必填;名单可空(可以只记知情者或只记不知情者)。keepId 只用于已存储的手动条目。 */
+function cleanSecretAdd(raw: unknown, keepId = false): SecretAdd | null {
   if (!isRecord(raw)) return null;
   const content = optText(raw.content);
   if (!content) return null;
   const out: SecretAdd = { content };
+  const id = keepId ? cleanExplicitId(raw.id, 'secret') : undefined;
+  if (id) out.id = id;
   const knownBy = cleanNameList(raw.knownBy);
   const unaware = cleanNameList(raw.unaware);
   if (knownBy.length) out.knownBy = knownBy;
   if (unaware.length) out.unaware = unaware;
   return out;
 }
-function cleanSecretAddList(v: unknown): SecretAdd[] {
-  return arr(v).map(cleanSecretAdd).filter((x): x is SecretAdd => !!x);
+function cleanSecretAddList(v: unknown, keepId = false): SecretAdd[] {
+  return arr(v).map(x => cleanSecretAdd(x, keepId)).filter((x): x is SecretAdd => !!x);
 }
 
 /** 清洗信息差 update:id 必填;给出的名单整体覆盖(空数组=清空),省略=保持。 */
@@ -337,34 +344,44 @@ function cleanProtagonistDelta(raw: unknown, internal = false): ProtagonistDelta
   return Object.keys(out).length ? out : null;
 }
 
-type PlanAdd = { kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string };
+type PlanAdd = { kind: 'plan' | 'suspense'; content: string; createdTime?: string; targetTime?: string; id?: string };
 
-function cleanPlanAdd(raw: unknown): PlanAdd | null {
+/** 显式稳定 id 只认插件自己生成的格式(kind:任意#数字),模型输出不走这里(keepId=false)。 */
+function cleanExplicitId(v: unknown, kind: 'plan' | 'detail' | 'secret'): string | undefined {
+  const id = typeof v === 'string' ? v.trim() : '';
+  return id && id.startsWith(`${kind}:`) && /#\d+$/.test(id) ? id : undefined;
+}
+
+function cleanPlanAdd(raw: unknown, keepId = false): PlanAdd | null {
   if (!isRecord(raw)) {
     const content = scalarText(raw);
     return content ? { kind: 'plan', content } : null;
   }
   const content = namedText(raw, ['content', 'text', 'name']);
   if (!content) return null;
-  return {
+  const out: PlanAdd = {
     kind: raw.kind === 'suspense' ? 'suspense' : 'plan',
     content,
     createdTime: optText(raw.createdTime),
     targetTime: optText(raw.targetTime),
   };
+  const id = keepId ? cleanExplicitId(raw.id, 'plan') : undefined;
+  if (id) out.id = id;
+  return out;
 }
 
-function cleanPlanAddList(v: unknown): PlanAdd[] {
-  return arr(v).map(cleanPlanAdd).filter((x): x is PlanAdd => !!x);
+function cleanPlanAddList(v: unknown, keepId = false): PlanAdd[] {
+  return arr(v).map(x => cleanPlanAdd(x, keepId)).filter((x): x is PlanAdd => !!x);
 }
 
 function cleanPlanUpdateList(v: unknown): PlanUpdate[] {
   return arr(v).flatMap(raw => {
     if (!isRecord(raw) || typeof raw.id !== 'string' || !raw.id.trim() ||
       typeof raw.content !== 'string' || !raw.content.trim() ||
-      ('targetTime' in raw && typeof raw.targetTime !== 'string')) return [];
+      ('targetTime' in raw && raw.targetTime !== null && typeof raw.targetTime !== 'string')) return [];
     const update: PlanUpdate = { id: raw.id.trim(), content: raw.content.trim() };
     if (typeof raw.targetTime === 'string') update.targetTime = raw.targetTime.trim();
+    else if (raw.targetTime === null) update.targetTime = ''; // 模型常用 null 表示没有期限:与空字符串一样,撤销旧期限
     return [update];
   });
 }
@@ -439,7 +456,7 @@ function cleanStoredDelta(raw: StoredDelta, seed = false): StoredDelta {
 
   if (isRecord(raw.plans)) {
     const plans: NonNullable<StoredDelta['plans']> = {};
-    const add = cleanPlanAddList(raw.plans.add);
+    const add = cleanPlanAddList(raw.plans.add, true);
     const update = cleanPlanUpdateList(raw.plans.update);
     const resolve = cleanStoredPlanResolveList(raw.plans.resolve);
     const remove = cleanTextList(raw.plans.remove, ['id', 'planId']);
@@ -454,7 +471,7 @@ function cleanStoredDelta(raw: StoredDelta, seed = false): StoredDelta {
 
   if (isRecord(raw.lifeDetails)) {
     const lifeDetails: NonNullable<StoredDelta['lifeDetails']> = {};
-    const add = cleanLifeDetailAddList(raw.lifeDetails.add);
+    const add = cleanLifeDetailAddList(raw.lifeDetails.add, true);
     const update = cleanLifeDetailUpdateList(raw.lifeDetails.update);
     const archive = cleanTextList(raw.lifeDetails.archive, ['id', 'ref', 'detailId']);
     const remove = cleanTextList(raw.lifeDetails.remove, ['id', 'ref', 'detailId']);
@@ -467,7 +484,7 @@ function cleanStoredDelta(raw: StoredDelta, seed = false): StoredDelta {
 
   if (isRecord(raw.secrets)) {
     const secrets: NonNullable<StoredDelta['secrets']> = {};
-    const add = cleanSecretAddList(raw.secrets.add);
+    const add = cleanSecretAddList(raw.secrets.add, true);
     const update = cleanSecretUpdateList(raw.secrets.update);
     const resolve = cleanTextList(raw.secrets.resolve, ['id', 'secretId']);
     const remove = cleanTextList(raw.secrets.remove, ['id', 'secretId']);
@@ -554,6 +571,14 @@ export function detailId(leafId: string, addIndex: number): string {
 export function secretId(leafId: string, addIndex: number): string {
   return `secret:${leafId}#${addIndex}`;
 }
+
+/**
+ * 同一叶子上三部分新增条目的 id 序号分段,避免互相撞号:
+ * delta(模型结果)从 0 起;migratedDelta(Horae 迁移)从 MIGRATED_ADD_BASE 起;
+ * manualOps(手动修改)写入时分配显式 id,序号从 MANUAL_ADD_BASE 起,叶子移动后 id 不变。
+ */
+export const MIGRATED_ADD_BASE = 5000;
+export const MANUAL_ADD_BASE = 10000;
 
 /** 从一条 resolve 指令取稳定 plan id(兼容裸字符串旧数据) */
 export function resolveEntryId(r: PlanResolveItem): string {
@@ -812,42 +837,63 @@ export function leafIntact(m: STMessage | undefined): boolean {
   return !!(leaf && leaf.id && leaf.delta);
 }
 
+type AddKind = 'plans' | 'lifeDetails' | 'secrets';
+type AddEntry<K extends AddKind> = NonNullable<NonNullable<StoredDelta[K]>['add']>[number];
+type LeafPart = 'delta' | 'migratedDelta' | 'manualOps';
+
 /**
- * 把一个稳定 plan id(plan:${leafId}#${addIdx})反查成计划内容文本。
+ * 找到产生某个稳定 id 的新增条目:手动条目按显式 id 在各叶子的 manualOps 里找(叶子移动后也找得到);
+ * 其余按 id 里的叶子 id 和序号,在 delta(0 起)或 migratedDelta(MIGRATED_ADD_BASE 起)里找。
+ * 只看 end 之前的楼层;validOnly 时只看参与重放的叶子。
+ */
+function findAddEntry<K extends AddKind>(
+  chat: STMessage[], kind: K, id: string, end = chat.length, validOnly = false,
+): { index: number; leaf: LeafExtra; part: LeafPart; entry: AddEntry<K> } | null {
+  const prefix = kind === 'plans' ? 'plan' : kind === 'lifeDetails' ? 'detail' : 'secret';
+  const m = id.match(new RegExp(`^${prefix}:(.+)#(\\d+)$`));
+  if (!m) return null;
+  const leafId = m[1];
+  const n = Number(m[2]);
+  const adds = (d: StoredDelta | undefined): AddEntry<K>[] => ((d?.[kind] as { add?: AddEntry<K>[] } | undefined)?.add ?? []);
+  for (let i = 0; i < Math.min(end, chat.length); i++) {
+    const leaf = getLeaf(chat[i]);
+    if (!leaf || (validOnly && !leafReplayed(chat[i]))) continue;
+    const manual = adds(leaf.manualOps).find(a => a.id === id);
+    if (manual) return { index: i, leaf, part: 'manualOps', entry: manual };
+    if (leaf.id !== leafId) continue;
+    const [part, offset] = n >= MANUAL_ADD_BASE ? ['manualOps', MANUAL_ADD_BASE] as const
+      : n >= MIGRATED_ADD_BASE ? ['migratedDelta', MIGRATED_ADD_BASE] as const : ['delta', 0] as const;
+    const entry = adds(leaf[part])[n - offset];
+    // 带显式 id 的手动条目只按 id 对应(上面已找过),不按序号
+    if (entry && (part !== 'manualOps' || !entry.id)) return { index: i, leaf, part, entry };
+  }
+  return null;
+}
+
+/**
+ * 把一个稳定 plan id(plan:${leafId}#${addIdx},手动条目为显式 id)反查成计划内容文本。
  * resolve/reopen/remove 只存 id、不存文本;楼内面板要显示「了结:找到妹妹」需据此回查产生它的叶子。
  * 找不到(叶子已删/id 非法)返回空串,调用方自行降级。
  */
 export function planContentById(planIdStr: string, upToExclusive?: number): string {
-  const m = planIdStr.match(/^plan:(.+)#(\d+)$/);
-  if (!m) return '';
-  const leafId = m[1];
-  const addIdx = Number(m[2]);
+  if (!/^plan:(.+)#(\d+)$/.test(planIdStr)) return '';
   const chat = getContext()?.chat;
   if (!chat) return '';
   const current = deriveMemory(chat, upToExclusive).plans.find(p => p.id === planIdStr);
   if (current) return current.content;
   // 已删除条目仍可回查来源；限于展示楼之前，不借后续调整改写历史标签。
-  for (let i = 0; i < Math.min(chat.length, upToExclusive ?? chat.length); i++) {
-    const lf = getLeaf(chat[i]);
-    if (lf?.id === leafId) return scalarText(lf.delta?.plans?.add?.[addIdx]?.content);
-  }
-  return '';
+  const found = findAddEntry(chat, 'plans', planIdStr, upToExclusive ?? chat.length);
+  return found ? scalarText(found.entry.content) : '';
 }
 
 /**
- * 把稳定信息差 id(secret:${leafId}#${addIdx})反查成新增时的内容。只扫叶子、不重放,
+ * 把稳定信息差 id(secret:${leafId}#${addIdx},手动条目为显式 id)反查成新增时的内容。只扫叶子、不重放,
  * 供楼层面板标签显示「结案:某事」;找不到返回空串。
  */
 export function secretContentById(id: string, upToExclusive?: number): string {
-  const m = id.match(/^secret:(.+)#(\d+)$/);
-  if (!m) return '';
   const chat = getContext()?.chat ?? [];
-  const end = Math.min(chat.length, upToExclusive ?? chat.length);
-  for (let i = 0; i < end; i++) {
-    const lf = getLeaf(chat[i]);
-    if (lf?.id === m[1]) return scalarText(lf.delta?.secrets?.add?.[Number(m[2])]?.content);
-  }
-  return '';
+  const found = findAddEntry(chat, 'secrets', id, upToExclusive ?? chat.length);
+  return found ? scalarText(found.entry.content) : '';
 }
 
 /** 叶子记录的页码(缺省按第一页 0);消息当前页码同口径(swipe_id 缺省 0)。 */
@@ -878,6 +924,25 @@ export function leafValid(m: STMessage | undefined): boolean {
 }
 
 /* ============ 重放引擎 ============ */
+
+/**
+ * 故事时间是否明确跨日(定点 NPC 的位置随之降为「未确认」)。只在两端日期可以可靠比较时判断:
+ * 都是标准日期且年份写法一致(都有年份或都没有),或都是「故事第N天」;天数差不是 0 就算跨日
+ * (无年份跨年按 timeRel 的规则返回 null,按没有跨日处理)。架空历法、只有时段、解析不出时不触发,不用楼数推时长。
+ */
+export function crossedStoryDay(oldTime: string, newTime: string): boolean {
+  const from = oldTime?.trim();
+  const to = newTime?.trim();
+  if (!from || !to || from === to) return false;
+  const a = parseStoryDate(from);
+  const b = parseStoryDate(to);
+  if (!a || !b) return false;
+  const comparable = (a.type === 'relative' && b.type === 'relative')
+    || (a.type === 'standard' && b.type === 'standard' && (a.year == null) === (b.year == null));
+  if (!comparable) return false;
+  const days = calculateRelativeDays(from, to);
+  return days !== null && days !== 0;
+}
 
 /**
  * 把一条叶子的 StoredDelta 施加到派生记忆 mem 上。无副作用地 fold。
@@ -1005,6 +1070,18 @@ function applyProtagonistState(target: BaibaiMemory['protagonist'], src: Protago
   }
   applyAge(target, src, storyTime);
   stampCondition(target, before, src, { time: storyTime, floor });
+}
+
+/** 把内部写入的曾用名并进角色记录:去重、按先后保留,不收录角色现在的名字。 */
+function mergeFormerNames(n: MemNpc, names: string[] | undefined): void {
+  if (!names?.length) return;
+  const merged = [...(n.formerNames ?? [])];
+  for (const raw of names) {
+    const name = raw.trim();
+    if (!name || norm(name) === norm(n.name) || merged.some(x => norm(x) === norm(name))) continue;
+    merged.push(name);
+  }
+  if (merged.length) n.formerNames = merged;
 }
 
 /**
@@ -1443,9 +1520,25 @@ export function finalizeVarOps(raw: unknown): VarOp[] {
   return out;
 }
 
-function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: string; createdAt: number; time: string; seed?: boolean; floor?: number }): void {
+/**
+ * 重放一部分增量时用到的叶子信息。idBase 区分同一叶子上 delta / migratedDelta / manualOps 的新增序号;
+ * explicitIds 只对手动修改为真:新增条目自带的显式 id 优先(其余部分一律按「叶子 id#序号」派生)。
+ */
+interface ReplayLeafInfo {
+  id: string;
+  createdAt: number;
+  time: string;
+  seed?: boolean;
+  floor?: number;
+  idBase?: number;
+  explicitIds?: boolean;
+}
+
+function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: ReplayLeafInfo): void {
   const t = leaf.createdAt;
   const logTime = leaf.time;
+  const idBase = leaf.idBase ?? 0;
+  const ownId = (add: { id?: string }): string | undefined => (leaf.explicitIds ? add.id : undefined);
   const log = (kind: ItemLogEntry['kind'], name: string, from?: number, to?: number): void => {
     mem.itemLog.push({ name, kind, from, to, time: logTime });
   };
@@ -1467,9 +1560,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
     mem.state.locationPath = Array.isArray(d.locationPath) ? lp : undefined;
   }
   const newScene = JSON.stringify(mem.state.locationPath) + '|' + mem.state.location;
-  const day = (v: string) => v.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:\s|$)/)?.slice(1).map(Number).join('-');
-  const crossedDay = day(oldTime) && day(mem.state.time) && day(oldTime) !== day(mem.state.time);
-  if (oldScene !== newScene || crossedDay) {
+  if (oldScene !== newScene || crossedStoryDay(oldTime, mem.state.time)) {
     for (const npc of mem.npcs) if (!npc.follow) npc.locationStale = true;
   }
   if (d.protagonist) applyProtagonistState(mem.protagonist, d.protagonist, logTime || mem.state.time, leaf.floor);
@@ -1594,6 +1685,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
         applyNpcAffinity(ex, add, true);
         applyNpcState(ex, add, stamp);
         applyNpcPlacement(ex, add, leaf);
+        mergeFormerNames(ex, add.formerNames);
         touch(ex);
       } else {
         const npc: BaibaiMemory['npcs'][number] = created({
@@ -1612,6 +1704,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
         applyAge(npc, add, npcTime);
         applyNpcState(npc, add, stamp);
         applyNpcPlacement(npc, add, leaf);
+        mergeFormerNames(npc, add.formerNames);
         mem.npcs.push(npc);
       }
     }
@@ -1644,6 +1737,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
       applyNpcAffinity(n, upd); // 两侧独立覆盖,不做累加或自动联动
       applyNpcState(n, upd, stamp); // 即时层(着装/状态/重要性)覆盖刷新
       applyNpcPlacement(n, upd, leaf); // 随行/所在地变更(NPC 移动)
+      mergeFormerNames(n, upd.formerNames);
       touch(n);
     }
     for (const name of d.npcs.remove ?? []) {
@@ -1657,7 +1751,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
   if (d.plans) {
     (d.plans.add ?? []).forEach((add, addIdx) => {
       if (!add?.content?.trim()) return;
-      const id = planId(leaf.id, addIdx);
+      const id = ownId(add) || planId(leaf.id, idBase + addIdx);
       if (mem.plans.some(p => p.id === id)) return; // 同叶子重放幂等
       const plan: MemPlan = {
         id,
@@ -1704,7 +1798,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
     }
   }
 
-  // 生活小档案:add(去重)→ update → archive → remove。id 确定性:detail:${leafId}#序号,重放幂等
+  // 生活小档案:add(去重)→ update → archive → remove。id 确定性:detail:${leafId}#序号(手动条目带显式 id),重放幂等
   if (d.lifeDetails) {
     (d.lifeDetails.add ?? []).forEach((add, i) => {
       const text = add.text?.trim();
@@ -1715,10 +1809,11 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
         if (add.topics?.length) dup.topics = add.topics.slice(0, 3);
         if (add.anchors?.length) dup.anchors = add.anchors.slice(0, 5);
         if (add.until?.trim()) dup.until = add.until.trim();
+        dup.updatedAt = t;
         return;
       }
       mem.lifeDetails.push({
-        id: detailId(leaf.id, i),
+        id: ownId(add) || detailId(leaf.id, idBase + i),
         subject: lifeDetailSubject(add),
         text,
         topics: (add.topics ?? []).slice(0, 3),
@@ -1727,6 +1822,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
         until: add.until?.trim() || undefined,
         createdTime: logTime || undefined,
         createdAt: t,
+        updatedAt: t,
       });
     });
     for (const upd of d.lifeDetails.update ?? []) {
@@ -1738,10 +1834,11 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
       if (upd.anchors) det.anchors = upd.anchors.slice(0, 5);
       if (upd.until !== undefined) det.until = upd.until.trim() || undefined; // 空串=清除时效
       if (upd.tier) det.tier = upd.tier;
+      det.updatedAt = t;
     }
     for (const id of d.lifeDetails.archive ?? []) {
       const det = mem.lifeDetails.find(x => x.id === id);
-      if (det) det.tier = 'archive';
+      if (det) { det.tier = 'archive'; det.updatedAt = t; }
     }
     for (const id of d.lifeDetails.remove ?? []) {
       const idx = mem.lifeDetails.findIndex(x => x.id === id);
@@ -1749,10 +1846,10 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
     }
   }
 
-  // 信息差:add → update → resolve → reopen → remove。id 确定性:secret:${leafId}#序号,重放幂等
+  // 信息差:add → update → resolve → reopen → remove。id 确定性:secret:${leafId}#序号(手动条目带显式 id),重放幂等
   if (d.secrets) {
     (d.secrets.add ?? []).forEach((add, i) => {
-      const id = secretId(leaf.id, i);
+      const id = ownId(add) || secretId(leaf.id, idBase + i);
       if (mem.secrets.some(s => s.id === id)) return;
       mem.secrets.push({
         id,
@@ -1789,52 +1886,109 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: { id: strin
   if (d.varOps?.length) applyVarOps(mem.vars, d.varOps);
 }
 
+/** 叶子的故事内时间:结束时间优先(本段最后时刻),缺则起始,再缺旧 timeLabel,最后空串。 */
+function leafStoryTime(leaf: LeafExtra): string {
+  return optText(leaf.timeEnd) || optText(leaf.timeStart) || optText(leaf.timeLabel) || '';
+}
+
+/**
+ * 补档结果与手动修改:补档先施加、手动修改在后(手动修改优先)。
+ * 补档所指的角色此时还不存在、由同一叶子的手动修改新建时(角色页手动新增后又「从原文补全」,两者都记在最新一条叶子上),
+ * 在手动修改之后再补这几条,不让补档落空;补档只填空字段,已存在的角色不重复处理,手动清空的字段不会被补回。
+ */
+function applyEnrichedAndManual(
+  mem: BaibaiMemory,
+  enriched: NpcEnrichment[] | undefined,
+  manualOps: StoredDelta | undefined,
+  storyTime: string,
+  manualInfo: ReplayLeafInfo,
+): void {
+  const enrichTime = storyTime || mem.state.time;
+  const late = enriched?.length && manualOps
+    ? cleanEnrichment(enriched).filter(e => !mem.npcs.some(n => n.id === npcId(e.name)))
+    : [];
+  if (enriched) applyEnrichment(mem, enriched, enrichTime);
+  if (!manualOps) return;
+  applyStoredDeltaTo(mem, manualOps, manualInfo);
+  if (late.length) applyEnrichment(mem, late, enrichTime);
+}
+
+/**
+ * 重放一条叶子的各部分:delta(模型结果)→ migratedDelta(迁移状态)→ enriched(补档)→ manualOps(手动修改)。
+ * withManual=false 时停在手动修改之前(合并新的手动操作时用来判断「此前已有」的条目)。
+ */
+function replayLeaf(mem: BaibaiMemory, leaf: LeafExtra, floor: number, withManual = true): void {
+  const time = leafStoryTime(leaf);
+  const info: ReplayLeafInfo = { id: leaf.id, createdAt: leaf.createdAt, time, seed: leaf.seed, floor };
+  applyStoredDeltaTo(mem, leaf.delta, info);
+  if (leaf.migratedDelta) applyStoredDeltaTo(mem, leaf.migratedDelta, { ...info, seed: false, idBase: MIGRATED_ADD_BASE });
+  applyEnrichedAndManual(mem, leaf.enriched, withManual ? leaf.manualOps : undefined, time,
+    { ...info, seed: false, idBase: MANUAL_ADD_BASE, explicitIds: true });
+}
+
+/** 这一楼的叶子是否参与重放(番外楼与失效叶子都不参与)。 */
+function leafReplayed(m: STMessage | undefined): boolean {
+  return !!m && !m.extra?.bbs_omit && leafValid(m);
+}
+
+/** 重放到 end 之前;stopBeforeManualAt 指定的那一楼只重放到手动修改之前。 */
+function replayChat(chat: STMessage[] | null, end: number | undefined, stopBeforeManualAt?: number): BaibaiMemory {
+  const mem = createEmptyMemory();
+  // 变量从三层合并模板起算(无 chat 也返回初始状态);seed 时展开模板里的 ST 宏({{user}} 等)
+  mem.vars = expandVarMacros(mergeTemplates(memory.varTemplates));
+  if (!chat) return mem;
+  const last = typeof end === 'number' ? Math.min(end, chat.length) : chat.length;
+  for (let i = 0; i < last; i++) {
+    if (!leafReplayed(chat[i])) continue; // 番外楼与失效叶子不参与派生重放
+    replayLeaf(mem, getLeaf(chat[i])!, i, i !== stopBeforeManualAt);
+  }
+  // 只留最近若干条变动(注入/喂模型够用即可,省 token)
+  if (mem.itemLog.length > ITEM_LOG_KEEP) mem.itemLog = mem.itemLog.slice(-ITEM_LOG_KEEP);
+  return mem;
+}
+
+function derivedParts(mem: BaibaiMemory): Pick<BaibaiMemory, 'state' | 'protagonist' | 'items' | 'plans' | 'scenes' | 'npcs' | 'itemLog' | 'lifeDetails' | 'secrets' | 'vars'> {
+  return { state: mem.state, protagonist: mem.protagonist, items: mem.items, plans: mem.plans, scenes: mem.scenes, npcs: mem.npcs, itemLog: mem.itemLog, lifeDetails: mem.lifeDetails, secrets: mem.secrets, vars: mem.vars };
+}
+
 /**
  * 从 chat 重放出结构化状态。
- * 按**楼层物理顺序**扫 chat,对每条有效叶子 fold 其 delta(楼层序即叙事序,删消息后天然正确)。
- * 压缩节点只压文本、不带 delta、不参与重放。
+ * 按**楼层物理顺序**扫 chat,对每条有效叶子依次施加 delta → migratedDelta → enriched → manualOps
+ * (楼层序即叙事序,删消息后天然正确)。压缩节点只压文本、不带 delta、不参与重放。
  * @param upToExclusive 仅重放索引 < 该值的楼层(截断到被分析楼之前;省略=全部)。
  */
 export function deriveMemory(
   chat: STMessage[] | null,
   upToExclusive?: number,
 ): Pick<BaibaiMemory, 'state' | 'protagonist' | 'items' | 'plans' | 'scenes' | 'npcs' | 'itemLog' | 'lifeDetails' | 'secrets' | 'vars'> {
-  const mem = createEmptyMemory();
-  // 变量从三层合并模板起算(无 chat 也返回初始状态);seed 时展开模板里的 ST 宏({{user}} 等)
-  mem.vars = expandVarMacros(mergeTemplates(memory.varTemplates));
-  if (!chat) return { state: mem.state, protagonist: mem.protagonist, items: mem.items, plans: mem.plans, scenes: mem.scenes, npcs: mem.npcs, itemLog: mem.itemLog, lifeDetails: mem.lifeDetails, secrets: mem.secrets, vars: mem.vars };
-  const end = typeof upToExclusive === 'number' ? Math.min(upToExclusive, chat.length) : chat.length;
-  for (let i = 0; i < end; i++) {
-    if (chat[i]?.extra?.bbs_omit) continue; // 番外楼:不参与派生重放
-    if (!leafValid(chat[i])) continue;
-    const leaf = getLeaf(chat[i])!;
-    // 日志用「故事内时间」:结束时间优先(本段最后时刻),缺则起始,再缺旧 timeLabel,最后空串
-    const time = optText(leaf.timeEnd) || optText(leaf.timeStart) || optText(leaf.timeLabel) || '';
-    applyStoredDeltaTo(mem, leaf.delta, { id: leaf.id, createdAt: leaf.createdAt, time, seed: leaf.seed, floor: i });
-    if (leaf.enriched) applyEnrichment(mem, leaf.enriched, time || mem.state.time);
-  }
-  // 只留最近若干条变动(注入/喂模型够用即可,省 token)
-  if (mem.itemLog.length > ITEM_LOG_KEEP) mem.itemLog = mem.itemLog.slice(-ITEM_LOG_KEEP);
-  return { state: mem.state, protagonist: mem.protagonist, items: mem.items, plans: mem.plans, scenes: mem.scenes, npcs: mem.npcs, itemLog: mem.itemLog, lifeDetails: mem.lifeDetails, secrets: mem.secrets, vars: mem.vars };
+  return derivedParts(replayChat(chat, upToExclusive));
+}
+
+/** 重放到 index 这一楼的手动修改之前(含该楼的 delta、迁移状态和补档)。 */
+function deriveBeforeManualOps(chat: STMessage[], index: number): ReturnType<typeof deriveMemory> {
+  return derivedParts(replayChat(chat, index + 1, index));
 }
 
 /** 变动日志保留的最近条数(注入与喂摘要共用)。 */
 export const ITEM_LOG_KEEP = 8;
 
 /**
- * 在「本楼之前的状态」上施加一份 delta(及补档结果),得到本楼之后的状态;不读 chat、不改入参。
+ * 在「本楼之前的状态」上施加一份 delta(及迁移状态、补档结果、手动修改),得到本楼之后的状态;不读 chat、不改入参。
+ * 施加顺序与 deriveMemory 相同:delta → migratedDelta → enriched → manualOps。
  * 供摘要落叶前判断哪些角色需要回看原文补档案(计划等稳定 id 不准确,只用于看角色)。
  */
 export function deriveAfterDelta(
   before: ReturnType<typeof deriveMemory>,
   delta: StoredDelta,
-  leaf: { time: string; floor?: number; enriched?: NpcEnrichment[] },
+  leaf: { time: string; floor?: number; enriched?: NpcEnrichment[]; migratedDelta?: StoredDelta; manualOps?: StoredDelta },
 ): ReturnType<typeof deriveMemory> {
   const mem = createEmptyMemory();
   Object.assign(mem, JSON.parse(JSON.stringify(before)));
-  applyStoredDeltaTo(mem, delta, { id: 'projection', createdAt: 0, time: leaf.time, floor: leaf.floor });
-  if (leaf.enriched) applyEnrichment(mem, leaf.enriched, leaf.time || mem.state.time);
-  return { state: mem.state, protagonist: mem.protagonist, items: mem.items, plans: mem.plans, scenes: mem.scenes, npcs: mem.npcs, itemLog: mem.itemLog, lifeDetails: mem.lifeDetails, secrets: mem.secrets, vars: mem.vars };
+  const info: ReplayLeafInfo = { id: 'projection', createdAt: 0, time: leaf.time, floor: leaf.floor };
+  applyStoredDeltaTo(mem, delta, info);
+  if (leaf.migratedDelta) applyStoredDeltaTo(mem, leaf.migratedDelta, { ...info, idBase: MIGRATED_ADD_BASE });
+  applyEnrichedAndManual(mem, leaf.enriched, leaf.manualOps, leaf.time, { ...info, idBase: MANUAL_ADD_BASE, explicitIds: true });
+  return derivedParts(mem);
 }
 
 /**
@@ -2135,30 +2289,28 @@ export function addSummary(
 
 /* ============ 叶子(在消息 extra 上) ============ */
 
-/** 最新一条有效叶子(chat 里最后一条 leafValid 的消息);无则 null */
+/** 最新一条参与重放的叶子(chat 里最后一条 leafValid 且不是番外楼的消息);无则 null */
 export function latestLeaf(): { index: number; leaf: LeafExtra } | null {
   const chat = getContext()?.chat ?? [];
   for (let i = chat.length - 1; i >= 0; i--) {
-    if (leafValid(chat[i])) return { index: i, leaf: getLeaf(chat[i])! };
+    if (leafReplayed(chat[i])) return { index: i, leaf: getLeaf(chat[i])! };
   }
   return null;
 }
 
 /**
- * 把一段手动 op 合并进「最新有效叶子」的 delta,改内存 extra → 重算 + 落盘(chat 文件)。
- * 无有效叶子时返回 false(页面据此禁用手动添加)。
- * resolve/reopen 互斥去重:对同一 plan,后一次操作覆盖前一次(同叶子内 last-write-wins)。
- * 只改 delta,不改变叶子的结构与 swipe 归属,故不影响 leafValid。
+ * 把一段手动 op 合并进目标增量(叶子的 manualOps),规则与旧版写进 delta 时相同:
+ *  - 同名物品 / NPC 在 add/update 与 remove 之间互斥(跨桶抵消),add 桶内保留累加;
+ *  - 计划与信息差的 resolve/reopen 互斥,后一次覆盖前一次;生活小档案走 mergeLifeDetailsOp(删除后重加可复活原条目);
+ *  - 主角档案按字段合并,局势卡整卡覆盖,地点、变量命令按先后追加。
+ * 只改 target,返回是否有任何操作。existingLifeDetails:目标叶子手动修改之前已有的生活档案(用于复活被删条目)。
  */
-export function appendOpToLatestLeaf(op: StoredDelta): boolean {
-  assertMemoryWritable();
-  const found = latestLeaf();
-  if (!found) return false;
-  const { index, leaf } = found;
-  const chat = getContext()!.chat;
-  const d: StoredDelta = (leaf.delta ??= {});
+function mergeManualOps(d: StoredDelta, op: StoredDelta, existingLifeDetails?: MemLifeDetail[]): boolean {
   let changed = false;
 
+  if (typeof op.time === 'string' && op.time.trim()) { d.time = op.time; changed = true; }
+  if (typeof op.location === 'string' && op.location.trim()) { d.location = op.location; changed = true; }
+  if (op.locationPath !== undefined) { d.locationPath = [...op.locationPath]; changed = true; }
   if (op.protagonist) {
     d.protagonist = mergeProtagonistDelta(d.protagonist, op.protagonist);
     changed = true;
@@ -2169,8 +2321,8 @@ export function appendOpToLatestLeaf(op: StoredDelta): boolean {
       : null;
     changed = true;
   }
-  if (op.items) {
-    if (op.items.add?.length || op.items.update?.length || op.items.remove?.length) changed = true;
+  if (op.items && (op.items.add?.length || op.items.update?.length || op.items.remove?.length)) {
+    changed = true;
     // 关键:同名物品在 add/update 与 remove 之间必须互斥(跨桶抵消),否则改名(remove旧+add新)
     // 往返会让 remove 桶残留旧名,而重放固定按 add→update→remove 分组——最后的 remove 会把刚
     // add 回来的同名物品删掉(物品离奇消失)。add 桶内仍保留 push 累加,不动「手动+1」语义。
@@ -2193,12 +2345,14 @@ export function appendOpToLatestLeaf(op: StoredDelta): boolean {
     if (di.add && !di.add.length) delete di.add;
     if (di.update && !di.update.length) delete di.update;
     if (di.remove && !di.remove.length) delete di.remove;
+    if (!Object.keys(di).length) delete d.items;
   }
-  if (op.npcs) {
-    if (op.npcs.add?.length || op.npcs.update?.length || op.npcs.remove?.length) changed = true;
+  if (op.npcs && (op.npcs.add?.length || op.npcs.update?.length || op.npcs.remove?.length || op.npcs.rename?.length)) {
+    changed = true;
     // 与物品同款跨桶互斥:同名 NPC 在 add/update 与 remove 之间不能并存,
     // 否则改名(remove旧+add新)往返会让 remove 桶残留旧名,重放按 add→update→remove 把刚 add 的删掉。
     const dn = (d.npcs ??= {});
+    if (op.npcs.rename?.length) (dn.rename ??= []).push(...op.npcs.rename);
     for (const name of op.npcs.remove ?? []) {
       const id = npcId(name);
       if (dn.add) dn.add = dn.add.filter(a => npcId(a.name) !== id);
@@ -2216,15 +2370,16 @@ export function appendOpToLatestLeaf(op: StoredDelta): boolean {
     if (dn.add && !dn.add.length) delete dn.add;
     if (dn.update && !dn.update.length) delete dn.update;
     if (dn.remove && !dn.remove.length) delete dn.remove;
+    if (!Object.keys(dn).length) delete d.npcs;
   }
-  if (op.scenes) {
-    if (
-      op.scenes.add?.length
-      || op.scenes.update?.length
-      || op.scenes.reparent?.length
-      || op.scenes.remove?.length
-      || op.scenes.ops?.length
-    ) changed = true;
+  if (op.scenes && (
+    op.scenes.add?.length
+    || op.scenes.update?.length
+    || op.scenes.reparent?.length
+    || op.scenes.remove?.length
+    || op.scenes.ops?.length
+  )) {
+    changed = true;
     const ds = (d.scenes ??= {});
     if (op.scenes.add?.length) (ds.add ??= []).push(...op.scenes.add);
     if (op.scenes.update?.length) (ds.update ??= []).push(...op.scenes.update);
@@ -2232,8 +2387,8 @@ export function appendOpToLatestLeaf(op: StoredDelta): boolean {
     if (op.scenes.remove?.length) (ds.remove ??= []).push(...op.scenes.remove);
     if (op.scenes.ops?.length) (ds.ops ??= []).push(...op.scenes.ops);
   }
-  if (op.plans) {
-    if (op.plans.add?.length || op.plans.update?.length || op.plans.resolve?.length || op.plans.remove?.length || op.plans.reopen?.length) changed = true;
+  if (op.plans && (op.plans.add?.length || op.plans.update?.length || op.plans.resolve?.length || op.plans.remove?.length || op.plans.reopen?.length)) {
+    changed = true;
     const dp = (d.plans ??= {});
     if (op.plans.add?.length) (dp.add ??= []).push(...op.plans.add);
     if (op.plans.update?.length) (dp.update ??= []).push(...op.plans.update);
@@ -2249,15 +2404,17 @@ export function appendOpToLatestLeaf(op: StoredDelta): boolean {
     for (const id of op.plans.remove ?? []) {
       (dp.remove ??= []).push(id);
     }
+    if (dp.resolve && !dp.resolve.length) delete dp.resolve;
+    if (dp.reopen && !dp.reopen.length) delete dp.reopen;
   }
-  const existingLifeDetails = op.lifeDetails?.add?.length
-    ? deriveMemory(chat, index).lifeDetails
-    : undefined;
-  if (mergeLifeDetailsOp(d, op.lifeDetails, { leafId: leaf.id, existingDetails: existingLifeDetails })) changed = true;
-  if (op.secrets) {
-    if (op.secrets.resolve?.length || op.secrets.reopen?.length || op.secrets.remove?.length) changed = true;
-    // 结案与重开互斥(同 plans);删除直接追加
+  // 手动条目都带显式 id,只按 id 在本增量里找同批新增(不按叶子序号)
+  if (mergeLifeDetailsOp(d, op.lifeDetails, { existingDetails: existingLifeDetails, explicitIds: true })) changed = true;
+  if (op.secrets && (op.secrets.add?.length || op.secrets.update?.length || op.secrets.resolve?.length || op.secrets.reopen?.length || op.secrets.remove?.length)) {
+    changed = true;
+    // 结案与重开互斥(同 plans);新增、修改与删除按先后追加
     const dsec = (d.secrets ??= {});
+    if (op.secrets.add?.length) (dsec.add ??= []).push(...op.secrets.add);
+    if (op.secrets.update?.length) (dsec.update ??= []).push(...op.secrets.update);
     for (const id of op.secrets.resolve ?? []) {
       dsec.reopen = (dsec.reopen ?? []).filter(x => x !== id);
       dsec.resolve = [...(dsec.resolve ?? []).filter(x => x !== id), id];
@@ -2272,12 +2429,77 @@ export function appendOpToLatestLeaf(op: StoredDelta): boolean {
     if (!Object.keys(dsec).length) delete d.secrets;
   }
   if (op.varOps?.length) {
-    // 追加本次命令到最新叶子(按顺序,后施加者覆盖前者)
+    // 追加本次命令(按顺序,后施加者覆盖前者)
     (d.varOps ??= []).push(...op.varOps);
     changed = true;
   }
+  return changed;
+}
 
-  if (!changed) return false;
+/** 叶子各部分(含其他分页上的副本)里已经用过的显式条目 id。 */
+function usedExplicitIds(chat: STMessage[]): Set<string> {
+  const used = new Set<string>();
+  const collect = (leaf: unknown): void => {
+    if (!isRecord(leaf)) return;
+    for (const part of [leaf.delta, leaf.migratedDelta, leaf.manualOps]) {
+      if (!isRecord(part)) continue;
+      for (const kind of ['plans', 'lifeDetails', 'secrets'] as const) {
+        const group = part[kind];
+        if (!isRecord(group)) continue;
+        for (const add of arr(group.add)) if (isRecord(add) && typeof add.id === 'string') used.add(add.id);
+      }
+    }
+  };
+  for (const m of chat) {
+    collect(m?.extra?.bbs_leaf);
+    const pages = (m as unknown as Record<string, unknown> | undefined)?.swipe_info;
+    if (Array.isArray(pages)) for (const page of pages) if (isRecord(page) && isRecord(page.extra)) collect(page.extra.bbs_leaf);
+  }
+  return used;
+}
+
+/**
+ * 给手动新增的计划、生活档案、信息差分配显式稳定 id:「类型:写入时的叶子 id#序号」,序号从 MANUAL_ADD_BASE 起取第一个没用过的。
+ * 叶子失效、修改移到别的叶子后 id 不变,之后对它的结案、修改和删除仍然有效。
+ */
+function withManualIds(op: StoredDelta, leafId: string, used: Set<string>): StoredDelta {
+  const next = (kind: 'plan' | 'detail' | 'secret'): string => {
+    let n = MANUAL_ADD_BASE;
+    while (used.has(`${kind}:${leafId}#${n}`)) n++;
+    const id = `${kind}:${leafId}#${n}`;
+    used.add(id);
+    return id;
+  };
+  const out: StoredDelta = { ...op };
+  if (op.plans?.add?.length) out.plans = { ...op.plans, add: op.plans.add.map(a => (a.id ? a : { ...a, id: next('plan') })) };
+  if (op.lifeDetails?.add?.length) out.lifeDetails = { ...op.lifeDetails, add: op.lifeDetails.add.map(a => (a.id ? a : { ...a, id: next('detail') })) };
+  if (op.secrets?.add?.length) out.secrets = { ...op.secrets, add: op.secrets.add.map(a => (a.id ? a : { ...a, id: next('secret') })) };
+  return out;
+}
+
+/** 深拷贝一份增量(去掉 undefined 字段),合并时不与调用方或其他分页共用对象。 */
+function cloneDelta(d: StoredDelta): StoredDelta {
+  return JSON.parse(JSON.stringify(d ?? {})) as StoredDelta;
+}
+
+/**
+ * 把一段手动 op 写进「最新一条参与重放的叶子」的 manualOps(不并入 delta),改内存 extra → 重算 + 落盘(chat 文件)。
+ * 手动修改与模型结果分开保存:重新摘要、重抽替换这条叶子时由引擎沿用 manualOps;叶子失效时由 relocateManualOps
+ * 移到之前最近一条有效叶子。合并规则见 mergeManualOps;新增条目分配显式稳定 id。
+ * 无有效叶子时返回 false(页面据此禁用手动添加);没有任何操作时也返回 false。
+ * 不改变叶子的结构与 swipe 归属,故不影响 leafValid。
+ */
+export function appendOpToLatestLeaf(op: StoredDelta): boolean {
+  assertMemoryWritable();
+  const found = latestLeaf();
+  if (!found) return false;
+  const { index, leaf } = found;
+  const chat = getContext()!.chat;
+  const target = leaf.manualOps ? cloneDelta(leaf.manualOps) : {};
+  const incoming = withManualIds(cloneDelta(op), leaf.id, usedExplicitIds(chat));
+  const existingLifeDetails = incoming.lifeDetails?.add?.length ? deriveBeforeManualOps(chat, index).lifeDetails : undefined;
+  if (!mergeManualOps(target, incoming, existingLifeDetails)) return false;
+  leaf.manualOps = target;
 
   // 重设 extra 引用以确保持久化带上改动
   chat[index].extra = { ...(chat[index].extra ?? {}), bbs_leaf: leaf };
@@ -2286,6 +2508,76 @@ export function appendOpToLatestLeaf(op: StoredDelta): boolean {
   pruneBrokenComps();
   scheduleLeafFlush();
   return true;
+}
+
+/**
+ * 增量里是否有任何操作。显式的 locationPath:[]、sceneFocus:null 和空字符串都算:
+ * 手动修改里的空字符串表示清空(如清除主角伤情 protagonist.condition:''),同样要随叶子移动。
+ */
+function deltaHasOps(d: unknown): boolean {
+  if (!isRecord(d)) return false;
+  if (Array.isArray(d.locationPath)) return true;
+  return Object.values(d).some(v => v === null || (Array.isArray(v) ? v.length > 0 : isRecord(v) ? deltaHasOps(v) : v !== undefined));
+}
+
+/** 一条消息的各分页(ST 的 swipe_info);没有时为空数组。 */
+function swipePages(m: STMessage): unknown[] {
+  const pages = (m as unknown as Record<string, unknown>).swipe_info;
+  return Array.isArray(pages) ? pages : [];
+}
+
+/**
+ * 叶子失效(重抽、翻页后不再属于当前显示的回复,或该楼被标为番外)时,把它上面的手动修改(manualOps)
+ * 合并到它之前最近一条参与重放的叶子的 manualOps,并从原处移除(当前页和其他分页上的同一叶子副本都去掉,
+ * 翻回原页时不会重复施加)。合并规则与手动写入相同(mergeManualOps),新增条目的显式 id 不变。
+ * 找不到之前的有效叶子时保留原处。返回是否有改动;有改动时调用方负责 recomputeDerived 与落盘。
+ * evictFloor:这一楼的当前叶子仍有效、但即将被替换(重新生成会删掉这条回复)时,也把它的手动修改先移走。
+ */
+export function relocateManualOps(chat: STMessage[], evictFloor?: number): boolean {
+  if (!chat?.length || memoryWriteIssue()) return false;
+  let changed = false;
+  for (let i = 0; i < chat.length; i++) {
+    const m = chat[i];
+    if (!m) continue;
+    const current = getLeaf(m);
+    const live = leafReplayed(m) && i !== evictFloor ? current : undefined;
+    // 同一叶子可能在当前页和其他分页各有一份副本:按叶子 id 归并,取操作最多的一份(手动操作只会追加)
+    const moving = new Map<string, StoredDelta>();
+    const consider = (leaf: unknown): void => {
+      if (!isRecord(leaf) || typeof leaf.id !== 'string' || !deltaHasOps(leaf.manualOps)) return;
+      if (live && leaf.id === live.id) return;
+      const ops = leaf.manualOps as StoredDelta;
+      const prev = moving.get(leaf.id);
+      if (!prev || JSON.stringify(ops).length > JSON.stringify(prev).length) moving.set(leaf.id, ops);
+    };
+    if (current && !live) consider(current);
+    const swipeId = typeof m.swipe_id === 'number' ? m.swipe_id : 0;
+    swipePages(m).forEach((page, k) => {
+      if (k !== swipeId && isRecord(page) && isRecord(page.extra)) consider(page.extra.bbs_leaf);
+    });
+    if (!moving.size) continue;
+    let j = i - 1;
+    while (j >= 0 && !leafReplayed(chat[j])) j--;
+    if (j < 0) continue; // 找不到之前的有效叶子:保留原处
+    const targetLeaf = getLeaf(chat[j])!;
+    const target = targetLeaf.manualOps ? cloneDelta(targetLeaf.manualOps) : {};
+    const existingLifeDetails = [...moving.values()].some(ops => ops.lifeDetails?.add?.length)
+      ? deriveBeforeManualOps(chat, j).lifeDetails : undefined;
+    for (const ops of moving.values()) mergeManualOps(target, cloneDelta(ops), existingLifeDetails);
+    targetLeaf.manualOps = target;
+    chat[j].extra = { ...(chat[j].extra ?? {}), bbs_leaf: targetLeaf };
+    // 从原处移除:当前页与各分页上同一叶子的副本
+    const strip = (leaf: unknown): void => {
+      if (isRecord(leaf) && typeof leaf.id === 'string' && moving.has(leaf.id) && 'manualOps' in leaf) delete leaf.manualOps;
+    };
+    if (current && moving.has(current.id)) {
+      strip(current);
+      m.extra = { ...(m.extra ?? {}), bbs_leaf: current };
+    }
+    for (const page of swipePages(m)) if (isRecord(page) && isRecord(page.extra)) strip(page.extra.bbs_leaf);
+    changed = true;
+  }
+  return changed;
 }
 
 /**
@@ -2693,56 +2985,68 @@ function rewriteFloorTags(chat: STMessage[], index: number, delta: StoredDelta):
 
 /**
  * 编辑一条计划/悬念:改 content / createdTime / targetTime。
- * 计划 id = `plan:${叶子id}#${在该叶子 add 数组里的序号}`,据此定位到产生它的叶子的 delta.plans.add[idx]。
- * 只改叶子 delta,叶子仍有效;改完重算派生 + 落盘。
+ * 按稳定 id 找到产生它的新增条目(模型结果、迁移状态或手动修改里的都可以)。
+ *  - createdTime 属于最初设立事件:改在产生它的条目上。
+ *  - 未了结的计划改内容或期限:作为手动修改(plans.update)单独保存在最新一条叶子上,排在模型结果之后,
+ *    重新摘要或重抽来源楼层后仍然生效;期限填空字符串表示撤销旧期限。
+ *  - 已了结的条目:沿用原做法,改在「最后生效的那次调整」上,不改源头后又被后面的调整覆盖。
+ * 改完重算派生 + 落盘。
  */
 export function editPlan(
   planIdStr: string,
   patch: { content?: string; createdTime?: string; targetTime?: string },
 ): boolean {
   assertMemoryWritable();
-  const m = planIdStr.match(/^plan:(.+)#(\d+)$/);
-  if (!m) return false;
-  const leafId = m[1];
-  const addIdx = Number(m[2]);
   const chat = getContext()?.chat;
   if (!chat) return false;
-
-  // 找到 id 匹配的有效叶子
-  let index = -1;
-  for (let i = 0; i < chat.length; i++) {
-    const lf = getLeaf(chat[i]);
-    if (lf && lf.id === leafId && leafValid(chat[i])) {
-      index = i;
-      break;
-    }
-  }
-  if (index < 0) return false;
-  const leaf = getLeaf(chat[index])!;
-  const add = leaf.delta?.plans?.add?.[addIdx];
-  if (!add) return false;
+  const src = findAddEntry(chat, 'plans', planIdStr, chat.length, true);
+  if (!src) return false;
+  const add = src.entry;
 
   if (typeof patch.content === 'string' && !patch.content.trim()) return false;
-  // 编辑当前值应落在最后生效的调整上，而不是改源头后又被后楼覆盖。
-  // createdTime 仍属最初设立事件；不改其他事项，也不让已结案后的无效update生效。
-  let current: typeof add | PlanUpdate = add;
-  let currentIndex = index;
-  for (let i = index + 1; i < chat.length; i++) {
-    const later = getLeaf(chat[i]);
-    if (!later || !leafValid(chat[i]) || chat[i].extra?.bbs_omit) continue;
-    const updates = later.delta.plans?.update?.filter(u => u.id === planIdStr);
-    if (!updates?.length || deriveMemory(chat, i).plans.find(p => p.id === planIdStr)?.status !== 'open') continue;
-    current = updates[updates.length - 1];
-    currentIndex = i;
+  if (patch.createdTime !== undefined) {
+    add.createdTime = patch.createdTime.trim() || undefined;
+    chat[src.index].extra = { ...(chat[src.index].extra ?? {}), bbs_leaf: src.leaf };
   }
-  if (typeof patch.content === 'string') current.content = patch.content.trim();
-  if (patch.createdTime !== undefined) add.createdTime = patch.createdTime.trim() || undefined;
-  if (patch.targetTime !== undefined) {
+  const plan = deriveMemory(chat).plans.find(p => p.id === planIdStr);
+  const content = typeof patch.content === 'string' ? patch.content.trim() : undefined;
+  const targetTime = patch.targetTime !== undefined ? patch.targetTime.trim() : undefined;
+  const changed = (content !== undefined && content !== plan?.content) || (targetTime !== undefined && targetTime !== (plan?.targetTime ?? ''));
+  if (plan?.status === 'open' && changed) {
+    const update: PlanUpdate = { id: planIdStr, content: content ?? plan.content };
+    if (targetTime !== undefined) update.targetTime = targetTime;
+    if (appendOpToLatestLeaf({ plans: { update: [update] } })) return true;
+  }
+  if (changed) {
+    // 已了结的条目:按重放顺序(楼层先后;同一楼 delta → migratedDelta → manualOps)找设立之后、了结之前最后生效的调整。
+    let current: typeof add | PlanUpdate = add;
+    let currentIndex = src.index;
+    const mem = replayChat(chat, src.index);
+    let started = false;
+    for (let i = src.index; i < chat.length; i++) {
+      if (!leafReplayed(chat[i])) continue;
+      const lf = getLeaf(chat[i])!;
+      const info: ReplayLeafInfo = { id: lf.id, createdAt: lf.createdAt, time: leafStoryTime(lf), seed: lf.seed, floor: i };
+      const parts: Array<[LeafPart, StoredDelta | undefined, number]> = [['delta', lf.delta, 0], ['migratedDelta', lf.migratedDelta, MIGRATED_ADD_BASE], ['manualOps', lf.manualOps, MANUAL_ADD_BASE]];
+      for (const [part, d, idBase] of parts) {
+        if (!d) continue;
+        if (started) {
+          const updates = d.plans?.update?.filter(u => u.id === planIdStr);
+          if (updates?.length && mem.plans.find(p => p.id === planIdStr)?.status === 'open') {
+            current = updates[updates.length - 1];
+            currentIndex = i;
+          }
+        }
+        applyStoredDeltaTo(mem, d, { ...info, seed: part === 'delta' ? lf.seed : false, idBase, explicitIds: part === 'manualOps' });
+        if (i === src.index && part === src.part) started = true;
+      }
+    }
+    if (content !== undefined) current.content = content;
     // update 中的空字符串是清除期限，不能删键使旧期限复活。
-    current.targetTime = current === add ? patch.targetTime.trim() || undefined : patch.targetTime.trim();
+    if (targetTime !== undefined) current.targetTime = current === add ? targetTime || undefined : targetTime;
+    chat[src.index].extra = { ...(chat[src.index].extra ?? {}), bbs_leaf: src.leaf };
+    if (currentIndex !== src.index) chat[currentIndex].extra = { ...chat[currentIndex].extra, bbs_leaf: getLeaf(chat[currentIndex])! };
   }
-  chat[index].extra = { ...(chat[index].extra ?? {}), bbs_leaf: leaf };
-  if (currentIndex !== index) chat[currentIndex].extra = { ...chat[currentIndex].extra, bbs_leaf: getLeaf(chat[currentIndex])! };
   recomputeDerived();
   scheduleLeafFlush();
   return true;

@@ -12,7 +12,6 @@ import { getContext, type STContext } from '@/st/context';
 import { toast } from '@/st/toast';
 import { isDeepSeekModel } from '@/memory/prompts';
 import { messageHash } from '@/notes/source';
-import { WB_LIMITS as L } from './limits';
 import { resolveWorldbookChannel, worldbookApiPath, worldbookSettings } from './settings';
 import { hostApiIssue, loadBook, refreshWorldHost, worldHost, type BookBindings } from './host';
 import { commitBatch, loadWorldbookData, setCursor, worldbookState, worldbookWriteIssue } from './store';
@@ -109,6 +108,7 @@ export async function generateSuggestions(opts: { auto?: boolean } = {}): Promis
   const auto = opts.auto === true;
   if (!auto) { worldbookRun.error = ''; worldbookRun.errorDetail = ''; }
   worldbookRun.status = '';
+  worldbookState.pruneNotice = '';
   let own = 0, phase: 'preflight' | 'request' | 'parse' | 'save' = 'preflight';
   try {
     if (!engineActiveHere()) throw new Error('当前角色没有启用棱镜宝书。');
@@ -129,7 +129,7 @@ export async function generateSuggestions(opts: { auto?: boolean } = {}): Promis
       try { const data = await loadBook(name); if (data) references.push({ name, data }); } catch { /* 参考书读不到时跳过 */ }
     }
     if (!sameChat(identity)) throw new Error('聊天已经切换，没有生成。');
-    const plan = planRead(ctx, worldbookState.cursor, worldbookSettings.read, { allowReread: !auto, floorText: L.floorText });
+    const plan = planRead(ctx, worldbookState.cursor, worldbookSettings.read, { allowReread: !auto, floorText: worldbookSettings.read.maxChars });
     if (!plan) throw new Error(auto ? '没有新的楼层。' : '当前聊天还没有可以读取的正文。');
     const range = makeRange(ctx, plan.floors[0], plan.floors[plan.floors.length - 1]);
     const permission = worldbookSettings.permission;
@@ -147,7 +147,7 @@ export async function generateSuggestions(opts: { auto?: boolean } = {}): Promis
     }
     if (looksLikeUnfinishedJson(reply)) throw apiFailure('truncated', '回复不完整（JSON 写到一半就结束了），多半是输出达到了长度上限', '请调大该 API 的「最大输出」。');
     phase = 'parse';
-    const result = parseWorldbookReply(reply, { data: target, permission, range: { from: range.from, to: range.to } });
+    const result = parseWorldbookReply(reply, { data: target, permission, range: { from: range.from, to: range.to }, fullUids: built.fullUids });
     phase = 'save';
     const cursor = { floor: range.to, hash: messageHash(ctx.chat[range.to]) };
     if (!current()) { if (own === runId) worldbookRun.status = '聊天或依据的楼层已经变化，这次的结果没有采用。'; return false; }
@@ -161,9 +161,12 @@ export async function generateSuggestions(opts: { auto?: boolean } = {}): Promis
     const writes = result.suggestions.filter(s => s.kind !== 'flag').length, flags = result.suggestions.length - writes;
     const droppedText = result.dropped.length ? '另有 ' + result.dropped.length + ' 条不符合要求，已丢弃。' : '';
     const remainText = plan.remaining ? '还有 ' + plan.remaining + ' 层新楼层没有读取，可再次生成继续。' : '';
+    const cutText = built.stats.truncatedFloors.length
+      ? '第 ' + built.stats.truncatedFloors.join('、') + ' 楼超过单层上限（' + worldbookSettings.read.maxChars + ' 字），后半段没有读取；可在「读取范围」中调高「正文字数上限」。'
+      : '';
     worldbookRun.status = (auto ? '自动建议：' : '') + (result.suggestions.length
       ? '读取了第 ' + range.from + '–' + range.to + ' 楼，生成 ' + (writes ? writes + ' 条建议' : '') + (writes && flags ? '、' : '') + (flags ? flags + ' 条提醒' : '') + '，请在下方审核。'
-      : '读取了第 ' + range.from + '–' + range.to + ' 楼，没有需要写入的新设定。') + droppedText + remainText;
+      : '读取了第 ' + range.from + '–' + range.to + ' 楼，没有需要写入的新设定。') + droppedText + remainText + cutText;
     autoFailure = null; worldbookRun.autoNote = '';
     if (auto && result.suggestions.length) toast('世界书有 ' + result.suggestions.length + ' 条新建议待审核，可在宝书的「世界书」页查看。', 'info');
     return true;

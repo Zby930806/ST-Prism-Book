@@ -26,14 +26,19 @@ const timeText = computed(() => {
   return `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
 });
 
-/** 贴着按钮上沿弹出;按钮不在(比如快捷回复栏被隐藏)就放在屏幕下方居中。 */
+/**
+ * 贴着按钮上沿弹出。按钮不在或被隐藏(快捷回复栏被收起、按钮收进了 QR助手的菜单)时,
+ * 改贴着输入框上沿居中;输入框也找不到时放在屏幕下方居中。
+ */
 function place(): void {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   const width = Math.min(520, vw - 16);
   const rect = recallButtonRect();
+  const form = rect ? null : document.getElementById('send_form')?.getBoundingClientRect();
   const left = rect ? Math.min(Math.max(8, rect.left), vw - width - 8) : Math.round((vw - width) / 2);
-  const bottom = rect && rect.top > 0 ? Math.max(8, vh - rect.top + 8) : 96;
+  const anchorTop = rect?.top ?? (form && form.height > 0 ? form.top : 0);
+  const bottom = anchorTop > 0 ? Math.max(8, vh - anchorTop + 8) : 96;
   pos.value = { left, bottom, width };
 }
 
@@ -48,9 +53,10 @@ function close(restoreFocus = false): void {
 function onPointerDown(e: PointerEvent): void {
   const path = e.composedPath();
   if (panel.value && path.includes(panel.value)) return;
-  // 点按钮由按钮自己开关,这里不抢
+  // 点按钮由按钮自己开关,这里不抢;QR助手菜单里的「召回」项(data-dom-id 指向按钮)同样算按钮
   const btn = document.getElementById('bbs-qr-recall');
   if (btn && path.includes(btn)) return;
+  if (path.some(node => node instanceof HTMLElement && node.dataset.domId === 'bbs-qr-recall')) return;
   close();
 }
 function onKey(e: KeyboardEvent): void {
@@ -111,7 +117,7 @@ useBackLayer(() => ui.recallPeekOpen, () => close(true));
         <summary>注入原文</summary>
         <pre class="bbs-recall-peek-raw">{{ recallDebug.injectedText }}</pre>
       </details>
-      <p class="bbs-recall-peek-hint">检索问题和评分过程见「设置 → 向量记忆 → 上次召回详情」。</p>
+      <p class="bbs-recall-peek-hint">检索问题和评分过程见「设置 → 记忆与召回 → 召回调试」。</p>
     </div>
   </div>
 </template>

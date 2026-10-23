@@ -161,10 +161,14 @@ describe('新聊天开场时间的正式保存与消费', () => {
 describe('未知时间不是摘要失败', () => {
   it.each(['<thinking>秘密思考</thinking><aftertalk>秘密札记</aftertalk>', '<bbs_start></bbs_start><bbs_end>时间待设定</bbs_end>'])('只有元数据/旁注不能冒充有效正文: %s', text => {
     ctx.chat[0].mes = text;
-    return summarizeFloor(0).then(() => {
+    return summarizeFloor(0).then(result => {
+      expect(result).toBe('failed');
       expect(client.requestViaMainApi).not.toHaveBeenCalled();
       expect(ctx.chat[0].extra?.bbs_leaf).toBeUndefined();
-      expect(engineState.lastError).toContain('没有可提取的故事正文');
+      // 报错写清原因和改法:编辑正文、标为番外(及其位置)或删除这一楼
+      expect(engineState.lastError).toContain('清洗后没有故事正文');
+      expect(engineState.lastError).toContain('「未摘要楼层」中点「标为番外」');
+      expect(engineState.lastError).toContain('设置 → 基本设置');
     });
   });
   it('前置系统通知不进入摘要材料或证据来源', async () => {

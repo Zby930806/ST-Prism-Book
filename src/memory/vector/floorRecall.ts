@@ -39,10 +39,21 @@ export interface FloorRecallRecord {
   items: FloorRecallItem[];
   /** 达到阈值、但放不进召回预算而没有注入的段数(没有时省略;旧记录没有) */
   cut?: number;
+  /** 本轮没有重排时的说明(没有时省略;旧记录没有) */
+  rerankIssue?: string;
+  /** 索引方面的提示(没有时省略;旧记录没有) */
+  indexNote?: string;
 }
+
+/** 楼层记录里说明文字的长度上限(防止异常数据撑大聊天文件)。 */
+const MAX_NOTE_CHARS = 600;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+function noteOf(v: unknown): string {
+  return typeof v === 'string' ? v.trim().slice(0, MAX_NOTE_CHARS) : '';
 }
 
 function msgSwipe(m: STMessage): number {
@@ -52,6 +63,8 @@ function msgSwipe(m: STMessage): number {
 /** 从调试快照生成楼层记录。 */
 export function floorRecallFromDebug(d: RecallDebug, swipe: number): FloorRecallRecord {
   const cut = recallCutCount(d);
+  const rerankIssue = noteOf(d.rerankIssue);
+  const indexNote = noteOf(d.indexNote);
   return {
     v: 1,
     at: d.at || Date.now(),
@@ -59,6 +72,8 @@ export function floorRecallFromDebug(d: RecallDebug, swipe: number): FloorRecall
     status: d.status,
     items: recalledItems(d).map(({ source, storyTime, tier, preview }) => ({ source, storyTime, tier, preview })),
     ...(cut ? { cut } : {}),
+    ...(rerankIssue ? { rerankIssue } : {}),
+    ...(indexNote ? { indexNote } : {}),
   };
 }
 
@@ -80,7 +95,14 @@ export function readFloorRecall(m: STMessage | undefined): FloorRecallRecord | n
     });
   }
   const cut = typeof raw.cut === 'number' && Number.isInteger(raw.cut) && raw.cut > 0 ? raw.cut : 0;
-  return { v: 1, at: typeof raw.at === 'number' ? raw.at : 0, swipe, status: raw.status, items, ...(cut ? { cut } : {}) };
+  const rerankIssue = noteOf(raw.rerankIssue);
+  const indexNote = noteOf(raw.indexNote);
+  return {
+    v: 1, at: typeof raw.at === 'number' ? raw.at : 0, swipe, status: raw.status, items,
+    ...(cut ? { cut } : {}),
+    ...(rerankIssue ? { rerankIssue } : {}),
+    ...(indexNote ? { indexNote } : {}),
+  };
 }
 
 /* ============ 生成 → 回复的归属 ============ */

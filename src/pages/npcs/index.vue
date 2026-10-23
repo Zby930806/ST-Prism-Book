@@ -2,8 +2,8 @@
 /**
  * 角色页：统计行，随后依次为主角、主要角色、NPC（按在场、同区域、不在场分组，带检索与筛选），页尾为生活小档案、信息差。
  * 角色卡见 NpcCard，添加/编辑表单见 NpcFormDialog，从原文补全档案见 NpcEnrichDialog；区块各自的状态与弹窗在对应组件中。
+ * 各区块是否随正文发送与注入设置一致（见 sendScope.ts）。
  */
-import { apiSettings } from '@/api/settings';
 import EmptyState from '@/components/EmptyState.vue';
 import Icon from '@/components/Icon.vue';
 import PageHeader from '@/components/PageHeader.vue';
@@ -26,15 +26,19 @@ import NpcTierHead from './NpcTierHead.vue';
 import ProtagonistCard from './ProtagonistCard.vue';
 import SecretsSection from './SecretsSection.vue';
 import { emptyNpcDraft, type NpcDraft } from './npcView';
+import { blockLocalNote } from './sendScope';
 
-// 角色是从叶子摘要重放出的派生数据,手动操作写入「最新一条有效叶子」;无有效叶子时无处挂载。
+// 角色是从叶子摘要重放出的派生数据,手动操作单独保存在「最新一条有效叶子」上;无有效叶子时无处挂载。
 const hasLeaf = computed(() => derivedMeta.hasLeaf);
 const protagonistName = computed(() => {
   void derivedMeta.rev;
   return getContext()?.name1?.trim() || '主角';
 });
 const openSecretCount = computed(() => memory.secrets.filter(s => s.status === 'open').length);
-const summaryOnly = computed(() => apiSettings.summaryOnlyMode);
+// 主要角色与 NPC 是否随正文发送:看「仅注入剧情摘要」和注入设置里的「NPC 名册」「场景信息」(见 sendScope.ts)
+const rosterNote = computed(() => blockLocalNote('npcs'));
+const rosterLocal = computed(() => !!rosterNote.value);
+const ABSENT_HINT = '有名字的每人发送一行简要信息：最近正文提到名字的一律发送，其余按最近出场补足到 24 位；最后确认在主角所在处或附近的单独列出，未具名的也发送';
 
 // 触屏判定:跳过弹窗自动聚焦(移动端自动聚焦会弹输入法挡界面),与场景/摘要页一致。
 const isTouch = typeof window !== 'undefined' && window.matchMedia?.('(hover: none)').matches;
@@ -247,8 +251,8 @@ function confirmRemove() {
 
     <!-- 二、主要角色:不论在场与否都单列,档案与当前状态随正文发送 -->
     <section class="bbs-npc-tier" aria-labelledby="bbs-tier-main">
-      <NpcTierHead title="主要角色" heading-id="bbs-tier-main" :meta="mains.length ? `${mains.length} 位` : undefined" :local-only="summaryOnly"
-        :hint="summaryOnly ? '除主角外的主要登场角色；仅在棱镜宝书中记录，不发送给主对话 AI。' : '除主角外的主要登场角色，档案与当前状态始终随正文发送。'" />
+      <NpcTierHead title="主要角色" heading-id="bbs-tier-main" :meta="mains.length ? `${mains.length} 位` : undefined" :local-only="rosterLocal"
+        :hint="rosterNote ? `除主角外的主要登场角色；${rosterNote}。` : '除主角外的主要登场角色，档案与当前状态随正文发送。'" />
       <div v-if="mains.length" class="bbs-npc-list">
         <NpcCard v-for="n in mains" :key="n.id" :npc="n" tier="main" :can-enrich="hasLeaf"
           :enriching="npcEnrichState.running === n.name" :enrich-busy="!!npcEnrichState.running"
@@ -271,8 +275,8 @@ function confirmRemove() {
       <div v-if="visibleNpcCount" class="bbs-npc-groups">
         <!-- 在场:随行 / 所在当前场景。全量信息发给 AI,这里也全量展示 -->
         <div v-if="visibleGroups.present.length" class="bbs-npc-group">
-          <NpcSectionHead tag="在场" tag-tone="present" :local-only="summaryOnly"
-            :hint="summaryOnly ? '按在场状态完整记录，不发送给主对话 AI' : '完整信息随剧情发送'" />
+          <NpcSectionHead tag="在场" tag-tone="present" :local-only="rosterLocal"
+            :hint="rosterNote ?? '完整信息随剧情发送'" />
           <div class="bbs-npc-list">
             <NpcCard v-for="n in visibleGroups.present" :key="n.id" :npc="n" tier="present" :can-enrich="hasLeaf"
               :enriching="npcEnrichState.running === n.name" :enrich-busy="!!npcEnrichState.running"
@@ -280,10 +284,10 @@ function confirmRemove() {
           </div>
         </div>
 
-        <!-- 同区域:在附近但未必照面。发名字、身份、性格给 AI -->
+        <!-- 同区域:在附近但未必照面。发名字、身份、性格、位置和身体状态给 AI -->
         <div v-if="visibleGroups.nearby.length" class="bbs-npc-group">
-          <NpcSectionHead tag="同区域" tag-tone="nearby" :local-only="summaryOnly"
-            :hint="summaryOnly ? '按同区域分档记录，不发送给主对话 AI' : '位于附近，发送名字、身份与性格'" />
+          <NpcSectionHead tag="同区域" tag-tone="nearby" :local-only="rosterLocal"
+            :hint="rosterNote ?? '位于附近，发送名字、身份、性格、位置和身体状态'" />
           <div class="bbs-npc-list">
             <NpcCard v-for="n in visibleGroups.nearby" :key="n.id" :npc="n" tier="nearby" :can-enrich="hasLeaf"
               :enriching="npcEnrichState.running === n.name" :enrich-busy="!!npcEnrichState.running"
@@ -291,10 +295,10 @@ function confirmRemove() {
           </div>
         </div>
 
-        <!-- 不在场:有名字的只发一行简要信息,无名角色不发;这里压暗显示 -->
+        <!-- 不在场:有名字的按最近出场发前 24 位,最后确认在附近的单列;这里压暗显示 -->
         <div v-if="visibleGroups.absent.length" class="bbs-npc-group">
-          <NpcSectionHead tag="不在场 / 位置未确认" :local-only="summaryOnly"
-            :hint="summaryOnly ? '保留名册分档，不发送给主对话 AI' : '有名字的发送一行简要信息，未具名的不发送'" />
+          <NpcSectionHead tag="不在场 / 位置未确认" :local-only="rosterLocal"
+            :hint="rosterNote ?? ABSENT_HINT" />
           <div class="bbs-npc-list">
             <NpcCard v-for="n in visibleGroups.absent" :key="n.id" :npc="n" tier="absent" :can-enrich="hasLeaf"
               :enriching="npcEnrichState.running === n.name" :enrich-busy="!!npcEnrichState.running"
@@ -333,7 +337,7 @@ function confirmRemove() {
       @confirm="confirmRemove"
       @cancel="removing = null"
     >
-      删除「{{ removing?.name }}」？删除操作记录在最新一条摘要上，删除该楼层可恢复。
+      删除「{{ removing?.name }}」？这项修改单独保存，重新摘要或重抽后仍然保留。
     </ConfirmDialog>
   </section>
 </template>

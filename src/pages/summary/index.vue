@@ -11,9 +11,15 @@ import IconButton from '@/components/IconButton.vue';
 import PageHeader from '@/components/PageHeader.vue';
 import { apiSettings } from '@/api/settings';
 import { deleteLeafAt, deleteSummary, invalidateSummaryAncestors } from '@/memory/apply';
-import { engineState, resummarizeNow, syncHiddenNow } from '@/memory/engine';
+import { estimateTokens } from '@/memory/budget';
+import { continuityNoteText } from '@/memory/continuity';
+import { engineState, resummarizeNow, resummaryHold, syncHiddenNow } from '@/memory/engine';
 import { estimateInjectionTokenBreakdown, refreshInjection, type ViewNode } from '@/memory/inject';
 import { derivedMeta, memory, recomputeDerived } from '@/memory/store';
+import { recallDebug } from '@/memory/vector/debug';
+import { buildConfirmedInjection } from '@/notes/service';
+import { buildOutlineInjection } from '@/outline/service';
+import { getContext } from '@/st/context';
 import { toast } from '@/st/toast';
 import { computed, nextTick, onUnmounted, provide, ref, watch } from 'vue';
 import BatchBackfillDialog from './BatchBackfillDialog.vue';
@@ -45,22 +51,55 @@ const resummaryRunning = ref(false);
 const resummaryHint = ref('');
 let resummaryHintTimer: ReturnType<typeof setTimeout> | null = null;
 
-// 总结节奏:实际约每「保留最近 AI 消息数 + 每次总结 AI 消息数」楼总结一次——
-// 最近 keepRecent 条发全文不摘,更早的摘成叶子,叶子攒够 leafBatchThreshold 条压一次总结。
+// 总结节奏:每条 AI 回复都会摘要(与保留窗口无关);逐楼摘要攒够「每次总结数 + 保留摘要数」条时,合并最旧的「每次总结数」条。
+// 每轮约 2 楼(用户 + AI),所以首次约在 (每次总结数 + 保留摘要数)×2 楼前后,之后约每 每次总结数×2 楼一次。
 // 阈值关闭(<2)时不显示节奏句。
-const resummaryEvery = computed(() => (Math.max(0, apiSettings.keepRecent) + apiSettings.leafBatchThreshold + apiSettings.leafKeepRecent) * 2);
+const resummaryFirst = computed(() => (apiSettings.leafBatchThreshold + Math.max(0, apiSettings.leafKeepRecent)) * 2);
+const resummaryEvery = computed(() => apiSettings.leafBatchThreshold * 2);
 const showCadence = computed(() => apiSettings.leafBatchThreshold >= 2);
 
 // 估算涉及引擎的全量注入选择，仅在用户需要时计算，避免进入/滑动阅读页额外构造全树。
 const showInjectionEstimate = ref(false);
 // 纯前端估算当前实际注入量。derivedMeta.rev 补上 chat/is_system 这类非 Vue 响应式数据的刷新信号。
+// 除摘要与状态外,召回(按上一次召回的内容)、札记安排、创作规划和连续性提醒各走自己的注入,分别列出。
 const injectionTokenEstimate = computed(() => {
   void derivedMeta.rev;
   const estimate = estimateInjectionTokenBreakdown();
+  const tokens = (text: string) => (text ? estimateTokens(text) : 0);
+  const recall = tokens(recallDebug.injectedText);
+  const notes = tokens(buildConfirmedInjection());
+  const outline = tokens(buildOutlineInjection());
+  const continuity = tokens(continuityNoteText());
   return {
     summary: estimate.summary.toLocaleString(),
     other: estimate.other.toLocaleString(),
+    recall: recall.toLocaleString(),
+    showRecall: apiSettings.vector.enabled || recall > 0,
+    notes: notes ? notes.toLocaleString() : '',
+    outline: outline ? outline.toLocaleString() : '',
+    continuity: continuity ? continuity.toLocaleString() : '',
+    total: (estimate.summary + estimate.other + recall + notes + outline + continuity).toLocaleString(),
   };
+});
+
+// 总结因截断等原因失败后暂停自动重发:只在当前聊天显示,与上方的失败提示重复时不再显示
+const holdShown = computed(() => {
+  void derivedMeta.rev; // 切换聊天后重新核对
+  return resummaryHold.active
+    && resummaryHold.chatId === (getContext()?.getCurrentChatId?.() ?? '')
+    && engineState.lastError !== resummaryHold.message;
+});
+
+// 没有摘要时的说明:每条 AI 回复在发送下一条消息时摘要(开启「回复结束后立即摘要」时在回复结束后)
+const emptyText = computed(() => {
+  const timing = !apiSettings.autoSummaryEnabled
+    ? '自动摘要已关闭（设置 → 摘要设置），可用上方的「补摘」手动生成'
+    : apiSettings.summarizeOnReplyEnd
+      ? '每条 AI 回复会在回复结束后自动摘要（已开启「回复结束后立即摘要」）'
+      : '每条 AI 回复会在发送下一条消息时自动摘要（开启「回复结束后立即摘要」时在回复结束后）';
+  return pendingFloors.value.length
+    ? `上方列出了尚未摘要的楼层，点击楼层号即可生成。${timing}。`
+    : `${timing}；已有的旧总结可在页面底部的「导入旧总结」中导入。`;
 });
 
 async function doResummarize() {
@@ -76,8 +115,8 @@ async function doResummarize() {
     } else if (made > 0) {
       resummaryHint.value = `已生成 ${made} 条总结`;
     } else {
-      // 未达阈值:补一句动态节奏,告诉用户大概每多少楼总结一次
-      const cadence = showCadence.value ? `，大约每 ${resummaryEvery.value} 楼合并一次` : '';
+      // 未达阈值:补一句节奏,告诉用户大概什么时候合并
+      const cadence = showCadence.value ? `；首次约在第 ${resummaryFirst.value} 楼前后合并，之后约每 ${resummaryEvery.value} 楼合并一次` : '';
       resummaryHint.value = `摘要数量尚未达到合并条件${cadence}。`;
     }
   } finally {
@@ -347,7 +386,13 @@ onUnmounted(() => {
         <button class="bbs-btn bbs-btn-sm bbs-estimate-toggle" type="button" :aria-expanded="showInjectionEstimate" @click="showInjectionEstimate = !showInjectionEstimate">{{ showInjectionEstimate ? '收起估算' : '估算注入量' }}</button>
         <div v-if="showInjectionEstimate" class="bbs-token-estimate" title="按字数粗略估算，不请求接口">
           <span>摘要注入 ≈ {{ injectionTokenEstimate.summary }} tokens</span>
-          <span>其他注入 ≈ {{ injectionTokenEstimate.other }} tokens</span>
+          <span>其他注入 ≈ {{ injectionTokenEstimate.other }} tokens（当前状态、只读账本说明、时间标签提示词）</span>
+          <span v-if="injectionTokenEstimate.showRecall">召回注入（上一次）≈ {{ injectionTokenEstimate.recall }} tokens</span>
+          <span v-if="injectionTokenEstimate.notes">札记安排 ≈ {{ injectionTokenEstimate.notes }} tokens</span>
+          <span v-if="injectionTokenEstimate.outline">创作规划 ≈ {{ injectionTokenEstimate.outline }} tokens</span>
+          <span v-if="injectionTokenEstimate.continuity">连续性提醒 ≈ {{ injectionTokenEstimate.continuity }} tokens</span>
+          <span class="bbs-token-total">合计 ≈ {{ injectionTokenEstimate.total }} tokens</span>
+          <span v-if="injectionTokenEstimate.showRecall" class="bbs-token-note">召回每轮不同，这里按上一次召回实际注入的内容估算。</span>
         </div>
       </div>
       <div class="bbs-summary-tools" role="group" aria-label="摘要整理工具">
@@ -397,6 +442,11 @@ onUnmounted(() => {
       </div>
     </div>
     <p v-if="resummaryHint" class="bbs-resummary-hint">{{ resummaryHint }}</p>
+    <div v-if="holdShown" class="bbs-callout is-warning bbs-resummary-hold" role="status">
+      <strong class="bbs-callout-title">总结已暂停自动重试</strong>
+      <span class="bbs-callout-help">上次合并这批摘要时失败：{{ resummaryHold.message }} 修改总结所用的渠道、模型或最大输出之前，不再自动重发同一批，以免每楼重复扣费；调整后会照常自动总结，也可以点「重试总结」立即再试。</span>
+      <button class="bbs-btn bbs-btn-sm" type="button" :disabled="resummaryRunning || engineState.running" @click="doResummarize">重试总结</button>
+    </div>
 
     <!-- 搜索框:点工具行放大镜才展开(选择模式下不显示,两态互斥)。搜全森林(含已压缩的深层节点) -->
     <div v-if="!selectMode && searchOpen && rootNodes.length" class="bbs-search">
@@ -492,7 +542,7 @@ onUnmounted(() => {
       v-else
       icon="summary"
       :title="editingBlocked ? '记忆处于只读保护' : '暂无摘要'"
-      :text="editingBlocked ? '请先查看上方说明。这不表示聊天没有记忆，请勿用重建或导入解除保护。' : pendingFloors.length ? '上方列出了尚未摘要的楼层，点击楼层号即可生成；对话继续到设定楼层后也会自动摘要。' : '对话进行到设定楼层后会自动生成摘要；已有的旧总结可在页面底部的「导入旧总结」中导入。'"
+      :text="editingBlocked ? '请先查看上方说明。这不表示聊天没有记忆，请勿用重建或导入解除保护。' : emptyText"
     />
 
     <SummaryPager :page="activeWindow.page" :total="activeWindow.total" :size="SUMMARY_PAGE_SIZE" label="摘要" @update:page="changeSummaryPage" />
@@ -574,6 +624,21 @@ onUnmounted(() => {
   color: var(--bbs-ink-muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+.bbs-token-total {
+  color: var(--bbs-ink-soft);
+  font-weight: 600;
+}
+.bbs-token-note {
+  margin-top: 2px;
+}
+/* 总结暂停自动重试:沿用共享提示条,按钮另起一行 */
+.bbs-resummary-hold {
+  margin-top: 10px;
+}
+.bbs-resummary-hold .bbs-btn {
+  align-self: flex-start;
+  margin-top: 6px;
 }
 .bbs-summary-tools {
   display: flex;

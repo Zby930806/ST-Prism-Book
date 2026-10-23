@@ -2,7 +2,7 @@
  * 召回结果的显示逻辑:快捷回复栏的「召回」按钮、召回速览弹层和楼层面板共用。纯函数。
  * 上次召回读调试快照(recallDebug);楼层面板读存在消息里的召回记录(floorRecall.ts)。
  */
-import { RECALL_DONE_OVER_BUDGET, type RecallDebug } from './debug';
+import { RECALL_DONE_OVER_BUDGET, RECALL_STOPPED, type RecallDebug } from './debug';
 import type { FloorRecallRecord } from './floorRecall';
 
 export type RecallPhase = 'none' | 'running' | 'done' | 'skipped' | 'failed';
@@ -21,7 +21,7 @@ export interface RecallPeekItem {
 /** 召回走到了哪一步(只看状态文案,调试快照和楼层记录通用)。 */
 export function recallPhase(d: { status: string }): RecallPhase {
   if (!d.status) return 'none';
-  if (d.status === '进行中…') return 'running';
+  if (d.status.startsWith('进行中')) return 'running';
   if (d.status.startsWith('召回完成')) return 'done';
   if (d.status.startsWith('失败')) return 'failed';
   return 'skipped';
@@ -54,9 +54,15 @@ const SKIP_REASONS: Array<[string, string]> = [
   ['未召回:查询重写未产出 query', '未召回：查询重写没有生成检索问题。'],
   ['未召回:检索无候选', '未召回：没有检索到相关内容。'],
   ['未召回:已取消或保护状态变化', '未召回：召回已取消（例如切换了聊天）。'],
+  [RECALL_STOPPED, '未召回：已停止生成，本次召回随之取消。'],
 ];
 
-const RAISE_BUDGET = '可在「设置 → 注入设置」中调高「记忆注入预算」。';
+const RAISE_BUDGET = '可在「设置 → 注入设置」中调高「记忆注入预算」，或填 0 不限制。';
+
+/** 去掉句末的句号,便于后面再接一句;避免出现「。。」。 */
+function trimPeriod(text: string): string {
+  return text.trim().replace(/[。.]+$/, '');
+}
 
 /** 召回完成时的说明:注入了几段,有没有因为预算没放进去的。 */
 function doneSentence(base: string, count: number, cut: number): string {
@@ -74,11 +80,11 @@ function statusSentence(status: string, count: number, cut = 0): string {
     case 'none':
       return '当前聊天尚未召回。启用向量记忆后，每次生成回复前自动召回。';
     case 'running':
-      return '正在召回，完成后开始生成回复。';
+      return '正在召回，完成后开始生成回复；点酒馆的停止键可以取消。';
     case 'done':
       return doneSentence(base, count, cut) + cacheNote;
     case 'failed':
-      return `召回失败：${base.replace(/^失败[:：]\s*/, '')}。本次生成未注入召回内容。`;
+      return `召回失败：${trimPeriod(base.replace(/^失败[:：]\s*/, ''))}。本次生成未注入召回内容。`;
     default: {
       const known = SKIP_REASONS.find(([raw]) => base === raw);
       return (known ? known[1] : base.replace(':', '：')) + cacheNote;
@@ -86,9 +92,19 @@ function statusSentence(status: string, count: number, cut = 0): string {
   }
 }
 
+/** 重排和索引方面的补充说明(召回完成或失败时才接在后面)。 */
+function noteSentences(phase: RecallPhase, notes: { rerankIssue?: string; indexNote?: string }): string {
+  if (phase !== 'done' && phase !== 'failed') return '';
+  return [phase === 'done' ? notes.rerankIssue : '', notes.indexNote].filter(Boolean).join('');
+}
+
 /** 上次召回的一句说明。 */
 export function recallStatusText(d: RecallDebug): string {
-  return statusSentence(d.status, recalledItems(d).length, recallCutCount(d));
+  const phase = recallPhase(d);
+  if (phase === 'running' && (d.indexPending ?? 0) > 0) {
+    return `正在补建向量索引（剩余 ${d.indexPending} 条），完成后召回并开始生成回复；点酒馆的停止键可以取消。`;
+  }
+  return statusSentence(d.status, recalledItems(d).length, recallCutCount(d)) + noteSentences(phase, d);
 }
 
 /** 快捷回复栏按钮上的字和悬停说明。 */
@@ -96,7 +112,7 @@ export function recallButtonLabel(d: RecallDebug): { text: string; title: string
   const phase = recallPhase(d);
   const title = recallStatusText(d);
   if (phase === 'none') return { text: '召回', title };
-  if (phase === 'running') return { text: '召回中…', title };
+  if (phase === 'running') return { text: (d.indexPending ?? 0) > 0 ? '补索引中…' : '召回中…', title };
   if (phase === 'done') return { text: `召回 ${recalledItems(d).length}`, title: `${title}点击查看内容。` };
   return { text: phase === 'failed' ? '召回失败' : '未召回', title };
 }
@@ -114,5 +130,6 @@ export function floorRecallView(rec: FloorRecallRecord | null): FloorRecallView 
   const items = phase === 'done'
     ? rec.items.map((it, i) => ({ key: String(i), source: it.source, storyTime: it.storyTime, tier: it.tier, tierLabel: tierLabel(it.tier), preview: it.preview }))
     : [];
-  return { phase, statusText: statusSentence(rec.status, items.length, phase === 'done' ? rec.cut ?? 0 : 0), items };
+  const statusText = statusSentence(rec.status, items.length, phase === 'done' ? rec.cut ?? 0 : 0) + noteSentences(phase, rec);
+  return { phase, statusText, items };
 }

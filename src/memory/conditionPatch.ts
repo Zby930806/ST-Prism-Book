@@ -1,4 +1,4 @@
-import { createSourceEvidenceMatcher } from './sourceEvidence';
+import { createSourceEvidenceMatcher, type EvidenceDropReason } from './sourceEvidence';
 
 /** 仅摘要请求使用的临时协议；叶子仍存 condition 字符串，不迁移历史数据。 */
 export interface ConditionPatch {
@@ -10,11 +10,14 @@ export interface ConditionState {
   npcs: { name: string; condition?: string }[];
 }
 export interface ConditionContext extends ConditionState { content: string; sourceTexts?: readonly string[]; strict: boolean }
-export class ConditionPatchError extends Error {}
+export class ConditionPatchError extends Error {
+  /** 最后一次尝试去掉这项更新时的原因:缺原话、原话对不上、编号或字段不对 */
+  constructor(message: string, readonly reason: EvidenceDropReason = 'invalid') { super(message); }
+}
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const own = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
 const norm = (s: string) => s.trim().toLowerCase();
-function fail(message: string): never { throw new ConditionPatchError(message); }
+function fail(message: string, reason: EvidenceDropReason = 'invalid'): never { throw new ConditionPatchError(message, reason); }
 
 /** 只按标点提供可寻址片段，不声称程序已识别伤处或恢复语义。保留原标点。 */
 function parts(text: string) {
@@ -46,9 +49,13 @@ export function buildConditionPatchContext(state: ConditionState): string {
 /**
  * 修改解析后的临时对象；旧状态不变，默认任何错误由调用方丢弃整份响应。
  * 传入 onDrop（最后一次尝试仍不合格时）则只去掉不合格的那个人的伤情更新、保留原伤情记录，其余照常保存；
- * onDrop 收到该人物的标识（主角为 protagonist）。
+ * onDrop 收到该人物的标识（主角为 protagonist）、去掉的原因（缺原话、原话对不上、编号或字段不对）和该人物的对象。
  */
-export function materializeConditionPatches(parsed: Record<string, unknown>, context: ConditionContext, options: { onDrop?: (who: string) => void } = {}): void {
+export function materializeConditionPatches(
+  parsed: Record<string, unknown>,
+  context: ConditionContext,
+  options: { onDrop?: (who: string, reason: EvidenceDropReason, target: Record<string, unknown>) => void } = {},
+): void {
   const matchesSource = createSourceEvidenceMatcher(context.sourceTexts ?? context.content);
   const guarded = (target: Record<string, unknown>, who: string, run: () => void): void => {
     if (!options.onDrop) { run(); return; }
@@ -57,7 +64,7 @@ export function materializeConditionPatches(parsed: Record<string, unknown>, con
       if (!(error instanceof ConditionPatchError)) throw error;
       delete target.conditionPatch;
       delete target.condition;
-      options.onDrop(who);
+      options.onDrop(who, error.reason, target);
     }
   };
   function update(target: Record<string, unknown>, previous: string, label: string) {
@@ -84,8 +91,8 @@ export function materializeConditionPatches(parsed: Record<string, unknown>, con
           fail(path + ' 含未知字段；只允许 text、evidence' + (op === 'replace' ? '、id。' : '。') + '不要使用 content/quote/source 等别名。');
         }
         if (typeof entry.text !== 'string') fail(path + '.text 缺失或不是字符串；填写变化后的状态，只有 replace 清除片段时可用空字符串。');
-        if (typeof entry.evidence !== 'string' || !entry.evidence.trim()) fail(path + '.evidence 缺失或不是非空字符串；每项须连续照录本轮正文证据，清除伤情也不能省略。');
-        if (!matchesSource(entry.evidence)) fail(path + '.evidence 与本轮正文不匹配；请连续照录【本轮对话】中支持该角色变化的短句。仅容忍排版差异，不得改写、拼接、删否定或引用旧状态。没有变化依据才省略该操作，不能借无关原句通过校验。');
+        if (typeof entry.evidence !== 'string' || !entry.evidence.trim()) fail(path + '.evidence 缺失或不是非空字符串；每项须连续照录本轮正文证据，清除伤情也不能省略。', 'missing');
+        if (!matchesSource(entry.evidence)) fail(path + '.evidence 与本轮正文不匹配；请连续照录【本轮对话】中支持该角色变化的短句。仅容忍排版差异，不得改写、拼接、删否定或引用旧状态。没有变化依据才省略该操作，不能借无关原句通过校验。', 'mismatch');
         const text = entry.text.trim();
         if (op === 'replace') {
           if (typeof entry.id !== 'string' || !rows.some(r => r.id === entry.id) || replacements.has(entry.id)) fail(path + '.id 编号不存在或重复；只能使用该人物本次请求提供的 c 编号。');

@@ -150,6 +150,26 @@ describe('世界书建议协议：动作校验', () => {
     expect(result.suggestions[0]).toMatchObject({ kind: 'flag', uid: 3, reason: '正文改了开放时间', floors: [15] });
     expect(result.dropped[0].reason).toContain('没有写明原因');
   });
+
+  it('整段改写只允许全文完整发送过的条目；只发了开头或截断的条目丢弃并说明改用 append 或 replace', () => {
+    const full = parseWorldbookReply(reply([{ action: 'rewrite', uid: 9, content: '改写后的修表铺说明。' }]), { ...input('modify'), fullUids: new Set([9]) });
+    expect(full.suggestions.map(s => s.kind)).toEqual(['rewrite']);
+    const partial = parseWorldbookReply(reply([{ action: 'rewrite', uid: 3, content: '整段改写。' }, { action: 'append', uid: 3, text: '新的一句。' }]), { ...input('modify'), fullUids: new Set([9]) });
+    expect(partial.dropped[0].reason).toBe('这个条目只发送了开头或截断后的内容，不能整段改写，请改用 append 或 replace。');
+    expect(partial.suggestions.map(s => s.kind)).toEqual(['append']);
+    // 用户手动编辑不受这条限制
+    expect(normalizeEdit('rewrite', { title: '', keys: '', content: '用户改写的内容。', find: '' }, book().entries[3], book()).content).toBe('用户改写的内容。');
+  });
+
+  it('调整说明每条不超过 200 字、丢弃记录不超过 50 条，整批建议照常可以保存', () => {
+    const longKeys = Array.from({ length: 30 }, (_, i) => '超长关键词'.repeat(10) + i);
+    const result = parseWorldbookReply(reply([{ action: 'create', title: '码头', keys: ['码头', ...longKeys], content: '内容' }]), input('create'));
+    expect(result.suggestions[0].warnings.every(w => w.length <= 200)).toBe(true);
+    const many = Array.from({ length: 70 }, () => ({ action: 'delete', uid: 0 }));
+    const dropped = parseWorldbookReply(reply(many), input('create')).dropped;
+    expect(dropped).toHaveLength(50);
+    expect(dropped[49]).toEqual({ label: '其余动作', reason: '另有 21 条超出单次上限，已丢弃。' });
+  });
 });
 
 describe('编辑建议的校验', () => {

@@ -227,6 +227,21 @@ for (const [from, to, expected] of dayDiffCases) {
   equal(calculateRelativeDays(from, to), expected, `天数差错误: ${from} -> ${to}`);
 }
 
+// 两端都没写年份时按同一年计算;相差超过半年多半是跨年,宁可不标。
+const noYearCases = [
+  ['9/29', '9/30', 1],
+  ['9月29日', '10月2日', 3],
+  ['1/2', '6/30', 180],
+  ['12/30', '1/2', null],
+  ['12月30日 22:00', '1月2日 08:00', null],
+  ['1/2', '12/30', null],
+];
+for (const [from, to, expected] of noYearCases) {
+  equal(calculateRelativeDays(from, to), expected, `无年份天数差错误: ${from} -> ${to}`);
+}
+equal(relativeTimeLabel('12月30日 22:00', '1月2日 08:00'), '', '无年份跨年不应标成「11个月后」');
+equal(relativeTimeLabel('2024/12/30', '2025/1/2'), '大前天', '带年份的跨年照常计算');
+
 // 架空月份只允许同月比较，跨月应放弃。
 deepEqual(parseStoryDate('霜月3日'), { monthId: '霜月', day: 3, type: 'fantasy', raw: '霜月3日' });
 equal(relativeTimeLabel('霜月3日', '霜月5日'), '前天');

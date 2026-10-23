@@ -4,6 +4,7 @@ import type { STContext, STMessage } from '@/st/context';
 import type { OutlineContent } from './types';
 import type { ViewNode } from '@/memory/select';
 import * as host from '@/st/context';
+import { apiSettings } from '@/api/settings';
 import { notesSettings, settingsIssue as notesIssue, hydrateNotesSettings, NOTES_SETTINGS_KEY } from '@/notes/settings';
 import { selectHistoryNodesBefore, renderHistoryNodes } from '@/memory/inject';
 import { memoryWriteIssue } from '@/memory/store';
@@ -31,7 +32,7 @@ vi.mock('@/memory/store', () => ({
   memoryWriteIssue: vi.fn(() => ''),
 }));
 vi.mock('@/memory/inject', () => ({ selectHistoryNodesBefore: vi.fn(() => []), renderHistoryNodes: vi.fn(() => '') }));
-vi.mock('@/api/settings', () => ({ apiSettings: { customStripTags: [], channels: [{ url: 'https://forbidden.invalid', model: '禁止回退' }] } }));
+vi.mock('@/api/settings', () => ({ apiSettings: { customStripTags: [], channels: [{ url: 'https://forbidden.invalid', model: '禁止回退' }], memoryBudgetTokens: 0 } }));
 
 const copy = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 function content(): OutlineContent {
@@ -61,6 +62,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(() => { throw new Error('禁止真实网络'); }));
   boundary.guardMemory = false;
   boundary.memory.state.location = '现有地点';
+  apiSettings.memoryBudgetTokens = 0;
   vi.mocked(memoryWriteIssue).mockReturnValue('');
   vi.mocked(selectHistoryNodesBefore).mockReset().mockReturnValue([]);
   vi.mocked(renderHistoryNodes).mockReset().mockImplementation(nodes => nodes.map(n => n.text).join('\n\n'));
@@ -81,8 +83,19 @@ describe('独立大纲设置与渠道边界', () => {
     expect(isReactive(outlineSettings)).toBe(true); expect(isRef(outlineSettingsIssue)).toBe(true);
     expect(OUTLINE_SETTINGS_KEY).toBe('prism_book_outline_settings');
     expect(outlineSettings.apiMode).toBe('notes');
-    expect(outlineSettings.channel).toMatchObject({ url: '', key: '', model: '', temperature: 0.7, maxTokens: 6000, timeoutSec: 180, stream: true });
+    expect(outlineSettings.channel).toMatchObject({ url: '', key: '', model: '', temperature: 0.7, maxTokens: 8000, timeoutSec: 180, stream: true });
     expect(ctx.saveSettingsDebounced).not.toHaveBeenCalled();
+  });
+  it('默认最大输出 8000；旧版保存时仍是默认 6000 的跟着新默认，改过的保留', () => {
+    ctx.extensionSettings![OUTLINE_SETTINGS_KEY] = { version: 1, apiMode: 'independent', channel: { url: 'https://o.invalid/v1', model: 'm', maxTokens: 6000 } };
+    hydrateOutlineSettings(); expect(outlineSettings.channel.maxTokens).toBe(8000);
+    ctx.extensionSettings![OUTLINE_SETTINGS_KEY] = { version: 1, apiMode: 'independent', channel: { maxTokens: 5000 } };
+    hydrateOutlineSettings(); expect(outlineSettings.channel.maxTokens).toBe(5000);
+    ctx.extensionSettings![OUTLINE_SETTINGS_KEY] = { version: 1, apiMode: 'independent', defaultMaxTokens: 8000, channel: { maxTokens: 6000 } };
+    hydrateOutlineSettings(); expect(outlineSettings.channel.maxTokens).toBe(6000);
+    outlineSettings.channel.maxTokens = 12000; saveOutlineSettings();
+    expect(ctx.extensionSettings![OUTLINE_SETTINGS_KEY]).toMatchObject({ version: 1, defaultMaxTokens: 8000, channel: { maxTokens: 12000 } });
+    hydrateOutlineSettings(); expect(outlineSettings.channel.maxTokens).toBe(12000);
   });
   it('札记未启用仍只复用札记 channel，并返回隔离副本', () => {
     configure(); notesSettings.enabled = false;
@@ -182,18 +195,59 @@ describe('严格大纲内容与回复协议', () => {
   it('支持裸 JSON、一个 JSON 围栏及闭合 think/thinking，不改变 JSON 字符串内容', () => {
     const value = content(); value.premise = '文本中的 <think>字面内容</think> 保留';
     const json = JSON.stringify(value);
-    expect(parseOutlineReply(json)).toEqual(value);
-    expect(parseOutlineReply('<think>私密推理</think>\n```json\n' + json + '\n```\n<thinking>尾部思考</thinking>')).toEqual(value);
+    expect(parseOutlineReply(json)).toEqual({ content: value, warnings: [] });
+    expect(parseOutlineReply('<think>私密推理</think>\n```json\n' + json + '\n```\n<thinking>尾部思考</thinking>').content).toEqual(value);
   });
   it.each([
-    (s: string) => '正文不应混入' + s,
-    (s: string) => s + '正文不应混入',
-    (s: string) => s + s,
-    (s: string) => '```json\n' + s + '\n```\n```json\n' + s + '\n```',
-    (s: string) => '<think>没有闭合' + s,
+    (s: string) => '以下是规划：' + s,
+    (s: string) => s + '\n以上规划供参考。',
     (s: string) => '```javascript\n' + s + '\n```',
-  ])('不从混合回复中捞取 JSON %#', wrap => {
-    expect(() => parseOutlineReply(wrap(JSON.stringify(content())))).toThrow('大纲格式无效');
+    (s: string) => '先说明 {不是 JSON} 的写法：\n' + s,
+    (s: string) => '思考到此为止</think>\n' + s,
+  ])('与世界书相同的提取方式：跳过前后说明文字和代码围栏，取第一个完整的大纲 JSON %#', wrap => {
+    expect(parseOutlineReply(wrap(JSON.stringify(content())))).toEqual({ content: content(), warnings: [] });
+  });
+  it('大纲被包在别的对象里（如 {"outline": {…}}）时照样取出，不误报「JSON 语法无效」', () => {
+    const value = content();
+    expect(parseOutlineReply(JSON.stringify({ outline: value }))).toEqual({ content: value, warnings: [] });
+    expect(parseOutlineReply('结果如下：\n' + JSON.stringify({ result: { plan: value }, note: '仅供参考' }, null, 2))).toEqual({ content: value, warnings: [] });
+    // 外层里放了两份大纲时仍无法确定用哪一个
+    expect(() => parseOutlineReply(JSON.stringify({ old: value, new: value }))).toThrow('多个大纲 JSON');
+  });
+  it.each([
+    [(s: string) => s + s, '多个大纲 JSON'],
+    [(s: string) => '```json\n' + s + '\n```\n```json\n' + s + '\n```', '多个大纲 JSON'],
+    [(s: string) => '<think>没有闭合' + s, '思考过程没有写完'],
+    [(s: string) => s.slice(0, -1), 'JSON 语法无效或不完整'],
+  ])('多个对象、没闭合的思考块和残缺 JSON 仍然拒绝 %#', (wrap, reason) => {
+    expect(() => parseOutlineReply(wrap(JSON.stringify(content())))).toThrow(reason);
+  });
+  it('模型输出：忽略多余字段、超长文字截断、超出项数只保留前面的，并把调整写成警告；嵌在里面的阶段对象不会被当成大纲', () => {
+    const value: any = { ...content(), enabled: true, TOP_SECRET_FIELD: 1 };
+    value.title = '题'.repeat(L.title + 30);
+    value.constraints = Array.from({ length: L.constraints + 2 }, (_, i) => `约束${i}`);
+    value.chapters = [{ ...content().chapters[0], currentChapter: 3, approach: '方'.repeat(L.approach + 1), beats: Array.from({ length: L.beats + 2 }, (_, i) => `要点${i}`) }];
+    const { content: parsed, warnings } = parseOutlineReply('```json\n' + JSON.stringify(value) + '\n```');
+    expect(parsed.title).toHaveLength(L.title);
+    expect(parsed.constraints).toHaveLength(L.constraints);
+    expect(parsed.chapters[0].approach).toHaveLength(L.approach);
+    expect(parsed.chapters[0].beats).toEqual(Array.from({ length: L.beats }, (_, i) => `要点${i}`));
+    expect(parsed).not.toHaveProperty('enabled'); expect(parsed.chapters[0]).not.toHaveProperty('currentChapter');
+    expect(warnings).toEqual(expect.arrayContaining([
+      '忽略了回复中 3 个不支持的字段。', '规划标题超过240字，已截断。', '整体约束超过12条，只保留前12条。',
+      '第1阶段·发展方式超过3200字，已截断。', '第1阶段的剧情要点超过8条，只保留前8条。',
+    ]));
+    expect(warnings.join()).not.toContain('TOP_SECRET');
+    // 用户手动编辑保存仍用严格校验
+    expect(() => validateOutlineContent(value)).toThrow('大纲格式无效');
+  });
+  it('缺少必填内容时照常报错，不凭空补齐；只有阶段对象的回复不当作大纲', () => {
+    const noApproach: any = content(); delete noApproach.chapters[0].approach;
+    expect(() => parseOutlineReply(JSON.stringify(noApproach))).toThrow('chapters[0].approach 缺失');
+    expect(() => parseOutlineReply(JSON.stringify(content().chapters[0]))).toThrow('不是大纲');
+    expect(() => parseOutlineReply(JSON.stringify({ ...content(), chapters: [] }))).toThrow('chapters 应为1～12项的数组');
+    const noConstraints: any = content(); delete noConstraints.constraints;
+    expect(parseOutlineReply(JSON.stringify(noConstraints))).toEqual({ content: { ...content(), constraints: [] }, warnings: ['回复没有 constraints（整体约束），按没有约束处理。'] });
   });
   it.each(['enabled', 'currentChapter', 'state', 'id', '__proto__', 'unknown'])('拒绝根或章节额外字段 %s', key => {
     const root = { ...content(), [key]: true };
@@ -245,7 +299,7 @@ describe('严格大纲内容与回复协议', () => {
     const padded = '{' + ' '.repeat(L.json) + json.slice(1); expect(() => parseOutlineReply(padded)).toThrow();
   });
   it('错误不回显原文、字段名或底层异常', () => {
-    for (const value of ['TOP_SECRET_RAW', '{"TOP_SECRET_KEY":1}', JSON.stringify({ ...content(), title: 'TOP_SECRET_RAW'.repeat(100) })]) {
+    for (const value of ['TOP_SECRET_RAW', '{"TOP_SECRET_KEY":1}', JSON.stringify({ title: 'TOP_SECRET_RAW'.repeat(100), premise: 'TOP_SECRET_RAW' })]) {
       try { parseOutlineReply(value); throw new Error('未拒绝'); } catch (error) {
         expect((error as Error).message).toContain('大纲'); expect((error as Error).message).not.toContain('TOP_SECRET');
       }
@@ -269,12 +323,12 @@ describe('放宽篇幅、角色连续性与安全诊断', () => {
       ...content().chapters[0], approach: '动'.repeat(2000), beats: ['要'.repeat(1000)],
     }));
     expect(JSON.stringify(value).length).toBeGreaterThan(24000);
-    expect(parseOutlineReply(JSON.stringify(value))).toEqual(value);
+    expect(parseOutlineReply(JSON.stringify(value)).content).toEqual(value);
     expect(renderOutlineGuidance(active(value)).length).toBeLessThan(L.injection);
   });
   it('闭合的无标签代码围栏仅作包装兼容，不修补残缺JSON', () => {
     const json = JSON.stringify(content());
-    expect(parseOutlineReply('\x60\x60\x60\n' + json + '\n\x60\x60\x60')).toEqual(content());
+    expect(parseOutlineReply('\x60\x60\x60\n' + json + '\n\x60\x60\x60').content).toEqual(content());
     expect(() => parseOutlineReply(json.slice(0, -1))).toThrow('JSON 语法无效或不完整');
     expect(() => parseOutlineReply('<think>仅思考</think>')).toThrow('没有大纲 JSON');
   });
@@ -347,13 +401,36 @@ describe('只读上下文与通用未来提示词', () => {
     Object.defineProperty(ctx.chatMetadata, 'prism_book_notes_data', { get() { throw new Error('禁止札记'); } });
     expect(buildOutlineContext(ctx, '需求', 1)[3].content).toContain('已隐藏正文事实');
   });
-  it('仅使用已有压缩节点，按顺序保留完整节点，不混入 L0', () => {
-    const nodes = [node('早期L1'), node('不能混入的L0', 0), node('较近L2', 2)];
+  it('逐楼摘要（L0）和总结都带上，按时间顺序保留完整节点', () => {
+    const nodes = [node('早期L1'), node('尚未压缩的逐楼摘要', 0), node('较近L2', 2)];
     vi.mocked(selectHistoryNodesBefore).mockReturnValue(nodes);
     const before = copy(nodes);
     const memory = buildOutlineContext(ctx, '需求', 2)[2].content;
-    expect(memory).toContain('早期L1\n\n较近L2'); expect(memory).not.toContain('不能混入'); expect(memory).toContain('现有地点');
-    expect(nodes).toEqual(before); expect(renderHistoryNodes).toHaveBeenCalledTimes(2);
+    expect(memory).toContain('[已有的摘要和总结，按时间顺序]\n早期L1\n\n尚未压缩的逐楼摘要\n\n较近L2');
+    expect(memory).toContain('当前地点：现有地点');
+    expect(nodes).toEqual(before); expect(renderHistoryNodes).toHaveBeenCalledTimes(3);
+  });
+  it('状态改为紧凑文字：去掉内部 id 和时间戳，未了结的计划和悬念排在最前', () => {
+    const original = copy(boundary.memory);
+    Object.assign(boundary.memory, {
+      plans: [
+        { id: 'plan-secret-id', kind: 'plan', content: '月底前还清欠款', status: 'open', createdAt: 1700000000000, targetTime: '月底' },
+        { id: 'plan-done-id', kind: 'suspense', content: '谁寄的信', status: 'resolved', createdAt: 1, resolvedAt: 2, outcome: 'done', resolvedReason: '查明是旧友' },
+      ],
+      items: [{ id: 'item-id', name: '旧怀表', qty: 1, desc: '停在三点', createdAt: 1, updatedAt: 2 }],
+    });
+    try {
+      const memory = buildOutlineContext(ctx, '需求', 2)[2].content;
+      const state = memory.slice(memory.indexOf('[当前状态'));
+      expect(state.indexOf('[未了结的计划与悬念]')).toBeLessThan(state.indexOf('[时间、地点与局势]'));
+      expect(state).toContain('- [计划] 月底前还清欠款（目标 月底）');
+      expect(state).toContain('旧怀表 ×1 —— 停在三点');
+      expect(state).toContain('谁寄的信');
+      expect(memory).not.toMatch(/plan-secret-id|plan-done-id|item-id|1700000000000|createdAt|leafId/);
+      expect(memory).not.toContain('{"');
+    } finally {
+      Object.assign(boundary.memory, original);
+    }
   });
   it('保护期连 memory 属性也不读，不渲染压缩层，不泄漏保护诊断原文', () => {
     boundary.guardMemory = true; vi.mocked(memoryWriteIssue).mockReturnValue('敏感诊断详情');
@@ -362,17 +439,32 @@ describe('只读上下文与通用未来提示词', () => {
     expect(selectHistoryNodesBefore).not.toHaveBeenCalled(); expect(renderHistoryNodes).not.toHaveBeenCalled();
     expect(result[3].content).toContain('最新约束');
   });
-  it('严格计入截断标记与分隔符：memory <=12000，recent <=24000，角色卡 <=3000', () => {
+  it('填写了记忆注入预算时：摘要与总结 7800、状态 4200，从新到旧连续保留并注明省略；最近正文 24000，角色卡 12000', () => {
+    apiSettings.memoryBudgetTokens = 6000;
     ctx.chat = Array.from({ length: 8 }, () => message('文'.repeat(10000)));
-    ctx.characters![0].description = '卡'.repeat(10000);
+    ctx.characters![0].description = '卡'.repeat(20000);
     boundary.memory.state.location = '状'.repeat(20000);
-    vi.mocked(selectHistoryNodesBefore).mockReturnValue([node('旧'.repeat(8000)), node('近'.repeat(7700), 2)]);
+    vi.mocked(selectHistoryNodesBefore).mockReturnValue([node('旧'.repeat(100)), node('中'.repeat(7500)), node('近'.repeat(700), 2)]);
     const result = buildOutlineContext(ctx, '需求', 12);
-    expect(result[2].content.length).toBeLessThanOrEqual(12000);
-    expect(result[2].content).not.toContain('旧'); expect(result[2].content).toContain('近'.repeat(7700));
+    expect(result[2].content.length).toBeLessThanOrEqual(7800 + 4200);
+    // 连续保留：最新的「近」放得下，「中」放不下就停，更早、更短的「旧」也不再跳过去取
+    expect(result[2].content).toContain('近'.repeat(700));
+    expect(result[2].content).not.toContain('中'.repeat(10)); expect(result[2].content).not.toContain('旧'.repeat(10));
+    expect(result[2].content).toContain('更早的 2 条摘要和总结因字数上限省略');
+    // 状态整条省略并注明，不在中间截断
+    expect(result[2].content).not.toContain('状'.repeat(10));
+    expect(result[2].content).toContain('因字数上限另有 1 条状态没有列出：时间地点与局势');
     expect(result[3].content.length).toBeLessThanOrEqual(24000);
-    expect(result[1].content.split('\n').slice(1).join('\n').length).toBeLessThanOrEqual(3000);
-    expect(result[2].content).toContain('截断'); expect(result[3].content).toContain('截断');
+    expect(result[1].content.split('\n').slice(1).join('\n').length).toBeLessThanOrEqual(12000);
+    expect(result[1].content).toContain('截断'); expect(result[3].content).toContain('截断');
+  });
+  it('记忆注入预算为 0（默认）时摘要、总结和状态都不封顶', () => {
+    vi.mocked(selectHistoryNodesBefore).mockReturnValue([node('旧'.repeat(8000)), node('近'.repeat(7700), 2)]);
+    boundary.memory.state.location = '状'.repeat(20000);
+    const memory = buildOutlineContext(ctx, '需求', 2)[2].content;
+    expect(memory).toContain('旧'.repeat(8000)); expect(memory).toContain('近'.repeat(7700));
+    expect(memory).toContain('状'.repeat(20000));
+    expect(memory).not.toMatch(/省略|没有列出/);
   });
   it('无聊天及无角色卡时正常；群聊不误取第零张卡', () => {
     ctx.chat = []; ctx.characterId = ''; expect(buildOutlineContext(ctx, '需求', 1)[1].content).not.toContain('角色设定');

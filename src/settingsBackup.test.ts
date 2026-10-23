@@ -132,7 +132,7 @@ describe('导入：合并与保存', () => {
     expect(lines.join('\n')).not.toContain('其他设置');
   });
 
-  it('合并时保留本机密钥：渠道按 id 合并、只增不删，排除名单只增加，确认框写明共享插件会看到变化', async () => {
+  it('合并：渠道按 id 合并、只增不删，排除名单只增加，确认框写明共享插件会看到变化；地址换了服务器的密钥不保留', async () => {
     const { ext, win, settings, notes, outline, backup } = await setup(localExt);
     const file = backup.buildSettingsBackup(ext);
     const main = file.settings.baibai_book as Rec;
@@ -158,8 +158,16 @@ describe('导入：合并与保存', () => {
     expect(lines).toContain('柏宝绘等同源插件共用这份渠道');
     expect(lines).toContain('排除名单与清洗标签：增加 1 条');
     expect(lines).toContain('当前版本不认识的设置（prism_book_future_settings）');
-    expect(lines).toContain('本机已经填写的密钥都会保留');
-    expect(plan.needKeys).toEqual(['渠道「新渠道」（设置 → 副 API）']);
+    // Embedding 换了服务器；Rerank 的地址留空、沿用 Embedding 的地址，也跟着换了服务器
+    expect(lines).toContain('向量记忆 · Embedding（向量化）的地址由 https://api.siliconflow.cn/v1 改为 https://embed.example/v1，导入后需要重新填写密钥。');
+    expect(lines).toContain('向量记忆 · Rerank（重排）的地址由 https://api.siliconflow.cn/v1 改为 https://embed.example/v1，导入后需要重新填写密钥。');
+    expect(lines).toContain('札记设置：改用文件中的设置（API 地址、模型和各项选项）；地址与本机是同一个服务器，保留本机的密钥。');
+    expect(lines).not.toContain('本机已经填写的密钥都会保留');
+    expect(plan.needKeys).toEqual([
+      '渠道「新渠道」（设置 → 副 API）',
+      '向量记忆 · Embedding（向量化）的密钥（设置 → 向量记忆）',
+      '向量记忆 · Rerank（重排）的密钥（设置 → 向量记忆）',
+    ]);
 
     const result = backup.applySettingsImport(plan);
     expect(result.failed).toEqual([]);
@@ -168,8 +176,8 @@ describe('导入：合并与保存', () => {
     expect(a.keepRecent).toBe(8);
     expect(a.channels.map(c => [c.id, c.name, c.key])).toEqual([['ch-a', '摘要渠道（改名）', 'sk-a-LOCAL'], ['ch-b', '新渠道', '']]);
     expect(a.assignments.summary).toBe('ch-a');
-    expect(a.vector.embedding).toMatchObject({ url: 'https://embed.example/v1', key: 'sk-embed-LOCAL' });
-    expect(a.vector.rerank.key).toBe('sk-rerank-LOCAL');
+    expect(a.vector.embedding).toMatchObject({ url: 'https://embed.example/v1', key: '' });
+    expect(a.vector.rerank.key).toBe('');
     expect(a.excludedChars).toEqual(['甲', '乙']);
     expect(a.varsGlobalTemplate.json).toEqual({ key: '铜钥匙', token: 3 });
     expect(notes.notesSettings.channel).toMatchObject({ model: 'notes-model-2', key: 'sk-notes-LOCAL' });
@@ -185,6 +193,60 @@ describe('导入：合并与保存', () => {
     expect(ext.baibai_api_channels.channels[0].key).toBe('sk-a-LOCAL');
     expect(ext.baibai_exclude_settings.excludedChars).toEqual(['甲', '乙']);
     expect(win.dispatchEvent).toHaveBeenCalled();
+  });
+
+  it('地址写法不同但还是同一个服务器（末尾斜杠、少写 /v1、不同路径）时保留本机密钥', async () => {
+    const { ext, settings, backup } = await setup(localExt);
+    const file = backup.buildSettingsBackup(ext);
+    const main = file.settings.baibai_book as Rec;
+    main.keepRecent = 6;
+    main.vector.embedding.url = 'https://API.siliconflow.cn/';
+    main.channels = [{ ...main.channels[0], url: 'https://ch-a.example/v2/coding' }];
+    (file.settings.baibai_api_channels as Rec).channels = clone(main.channels);
+    (file.settings.prism_book_notes_settings as Rec).channel.url = 'https://notes.example/';
+    (file.settings.prism_book_notes_settings as Rec).channel.model = 'notes-model-2';
+    const plan = backup.planSettingsImport(file, ext);
+    expect(plan.needKeys).toEqual([]);
+    expect(backup.describeImportPlan(plan).join('\n')).not.toContain('重新填写');
+    backup.applySettingsImport(plan);
+    expect(settings.apiSettings.vector.embedding.key).toBe('sk-embed-LOCAL');
+    expect(settings.apiSettings.vector.rerank.key).toBe('sk-rerank-LOCAL');
+    expect(settings.apiSettings.channels[0]).toMatchObject({ url: 'https://ch-a.example/v2/coding', key: 'sk-a-LOCAL' });
+    expect(ext.prism_book_notes_settings.channel.key).toBe('sk-notes-LOCAL');
+  });
+
+  it('渠道和札记的地址换了服务器时不保留本机密钥，确认框写明由哪个地址改为哪个地址', async () => {
+    const { ext, settings, notes, backup } = await setup(localExt);
+    const file = backup.buildSettingsBackup(ext);
+    const main = file.settings.baibai_book as Rec;
+    main.channels = [{ ...main.channels[0], url: 'https://other.example/v1?token=abc' }];
+    (file.settings.baibai_api_channels as Rec).channels = clone(main.channels);
+    (file.settings.prism_book_notes_settings as Rec).channel.url = 'https://evil.example/v1';
+    const plan = backup.planSettingsImport(file, ext);
+    const lines = backup.describeImportPlan(plan).join('\n');
+    expect(lines).toContain('渠道「摘要渠道」的地址由 https://ch-a.example/v1 改为 https://other.example/v1，导入后需要重新填写密钥。');
+    expect(lines).not.toContain('token=abc');
+    expect(lines).toContain('札记设置：改用文件中的设置（API 地址、模型和各项选项）；API 地址由 https://notes.example/v1 改为 https://evil.example/v1，本机的密钥没有保留，导入后需要重新填写。');
+    expect(plan.needKeys).toEqual(['渠道「摘要渠道」（设置 → 副 API）', '札记的 API 密钥（札记页 → 独立 API 设置）']);
+    backup.applySettingsImport(plan);
+    expect(settings.apiSettings.channels[0].key).toBe('');
+    expect(notes.notesSettings.channel).toMatchObject({ url: 'https://evil.example/v1', key: '' });
+  });
+
+  it('Rerank 改到本机没用过的服务器、又没有单独的密钥时，会沿用 Embedding 的密钥，所以 Embedding 的密钥也不保留', async () => {
+    const { ext, settings, backup } = await setup(d => {
+      const e = localExt(d);
+      e.baibai_book.vector.rerank.key = ''; // 本机 Rerank 沿用 Embedding 的地址和密钥
+      return e;
+    });
+    const file = backup.buildSettingsBackup(ext);
+    (file.settings.baibai_book as Rec).vector.rerank.url = 'https://rerank.example/v1';
+    const plan = backup.planSettingsImport(file, ext);
+    const lines = backup.describeImportPlan(plan).join('\n');
+    expect(lines).toContain('向量记忆 · Rerank（重排）将使用 https://rerank.example/v1，没有单独的密钥时会沿用 Embedding 的密钥；为免把本机密钥发到新的地址，Embedding 的密钥没有保留，导入后需要重新填写。');
+    expect(plan.needKeys).toEqual(['向量记忆 · Embedding（向量化）的密钥（设置 → 向量记忆）']);
+    backup.applySettingsImport(plan);
+    expect(settings.apiSettings.vector.embedding.key).toBe('');
   });
 
   it('本机另有的渠道保留；文件里有密钥时按文件填写', async () => {

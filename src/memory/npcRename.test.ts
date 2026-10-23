@@ -8,7 +8,7 @@ import { deriveMemory, finalizeDelta } from './apply';
 import { DELTA_OP_LABEL, deltaTagGroups } from './deltaTags';
 import { currentSummaryPromise, engineState, summarizeFloor } from './engine';
 import { memory, recomputeDerived } from './store';
-import { parseSummaryResponse, SummaryResponseError } from './summaryResponse';
+import { parseSummaryResponse, SummaryResponseError, type DroppedEvidence } from './summaryResponse';
 import { createEmptyMemory, type LeafExtra, type StoredDelta } from './types';
 
 // 改名操作的校验与重放;模拟响应不代表模型实际会这样输出。
@@ -73,6 +73,42 @@ describe('改名操作的校验', () => {
   });
   it('改名后对已有伤情整段覆盖仍按局部协议拒绝', () => {
     expect(() => parse({ npcs: { ...rename().npcs, update: [{ name: '老周', condition: '痊愈' }] } })).toThrow('conditionPatch');
+  });
+});
+
+describe('最后一次尝试时不合格的改名只去掉这一条', () => {
+  const lenient = (body: Record<string, unknown>, roster = ['酒保A', '梅芙']) => {
+    const dropped: DroppedEvidence[] = [];
+    const d = parseSummaryResponse(JSON.stringify({ summary: '酒保报出名字。', ...body }), {
+      requireStateChanges: false, sourceTexts: source, sourceContent: source[0], npcRoster: roster, userName: '沈遥',
+      conditionContext: { protagonist: {}, npcs: [{ name: '酒保A', condition: '右手割伤' }], content: source[0], strict: true },
+      finalize: v => finalizeDelta(v, []), onDroppedEvidence: list => { dropped.push(...list); },
+    });
+    return { d, dropped };
+  };
+  it('原句对不上:去掉改名,同楼用新名字的更新改回旧名,新建改为对旧名的更新,不建出重复角色', () => {
+    const { d, dropped } = lenient({ npcs: {
+      rename: [{ from: '酒保A', to: '老周', evidence: '我叫老周,是这里的老板' }],
+      update: [{ name: '老周', outfit: '围裙' }], add: [{ name: '老周', title: '老板' }],
+    } });
+    expect(d.npcs?.rename).toBeUndefined();
+    expect(d.npcs?.add).toBeUndefined();
+    expect(d.npcs?.update).toEqual([{ name: '酒保A', outfit: '围裙' }, { name: '酒保A', title: '老板' }]);
+    expect(dropped).toEqual([{ kind: 'rename', name: '酒保A → 老周', reason: 'mismatch', detail: '给出的原句与本楼正文对不上' }]);
+  });
+  it('多余字段直接忽略;同楼仍用旧名的操作改成新名字,新建改名后的角色改为更新', () => {
+    const { d, dropped } = lenient({ npcs: { ...rename({ reason: '报了名字' }).npcs, update: [{ name: '酒保A', outfit: '围裙' }], add: [{ name: '老周', title: '老板' }] } });
+    expect(d.npcs?.rename).toEqual([{ from: '酒保A', to: '老周' }]);
+    expect(d.npcs?.add).toBeUndefined();
+    expect(d.npcs?.update).toEqual([{ name: '老周', outfit: '围裙' }, { name: '老周', title: '老板' }]);
+    expect(dropped).toEqual([]);
+  });
+  it('新名字已是名册里的另一个角色:去掉改名并提示两条记录可能是同一人,对那个角色的更新照常', () => {
+    const { d, dropped } = lenient({ npcs: { rename: [{ from: '酒保A', to: '梅芙', evidence: '叫我老周就行' }], update: [{ name: '梅芙', outfit: '斗篷' }] } });
+    expect(d.npcs?.rename).toBeUndefined();
+    expect(d.npcs?.update).toEqual([{ name: '梅芙', outfit: '斗篷' }]);
+    expect(dropped[0]).toMatchObject({ kind: 'rename', reason: 'invalid' });
+    expect(dropped[0].detail).toContain('两条记录可能是同一人');
   });
 });
 

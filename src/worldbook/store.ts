@@ -6,13 +6,16 @@ import { reactive } from 'vue';
 import { getContext, type STContext } from '@/st/context';
 import { WB_LIMITS } from './limits';
 import type { AppliedRecord, EntrySnapshot, SourceRange, Suggestion, SuggestionBatch, SuggestionKind, SuggestionStatus, WorldbookChatData, WorldbookPermission } from './types';
-import { captureChat, sameChat, type ChatIdentity } from './source';
+import { captureChat, rangeCurrent, sameChat, type ChatIdentity } from './source';
 
 export const WORLDBOOK_DATA_KEY = 'prism_book_worldbook';
+/**
+ * pruneNotice：保存新批次时因超出 20 批而删掉了仍有效的待审核建议，说明删了哪一批（只记在内存里，下一次生成或切换聊天时清除）。
+ */
 export const worldbookState = reactive<{
   target: string | null; cursor: WorldbookChatData['cursor']; batches: SuggestionBatch[]; applied: AppliedRecord[];
-  issue: string; saveWarning: string; revision: number; saving: boolean;
-}>({ target: null, cursor: null, batches: [], applied: [], issue: '', saveWarning: '', revision: 0, saving: false });
+  issue: string; saveWarning: string; pruneNotice: string; revision: number; saving: boolean;
+}>({ target: null, cursor: null, batches: [], applied: [], issue: '', saveWarning: '', pruneNotice: '', revision: 0, saving: false });
 
 let loaded: ChatIdentity | undefined;
 let protectedData = false;
@@ -72,7 +75,7 @@ export function loadWorldbookData(): void {
   const ctx = getContext();
   loaded = ctx ? captureChat(ctx) : undefined;
   protectedData = false;
-  Object.assign(worldbookState, { target: null, cursor: null, batches: [], applied: [], issue: '', saveWarning: '' });
+  Object.assign(worldbookState, { target: null, cursor: null, batches: [], applied: [], issue: '', saveWarning: '', pruneNotice: '' });
   worldbookState.revision++;
   const raw = ctx?.chatMetadata?.[WORLDBOOK_DATA_KEY];
   if (raw == null) return;
@@ -102,16 +105,27 @@ function snapshotData(): WorldbookChatData {
   return { version: 1, target: worldbookState.target, cursor: clone(worldbookState.cursor), batches: clone(worldbookState.batches), applied: clone(worldbookState.applied) };
 }
 
-/** 超出上限时先删最早的已处理批次和最早的写入记录（已撤销的优先）；有待处理建议的批次不删。 */
-function prune(next: WorldbookChatData): void {
+/**
+ * 超出上限时依次删除：依据楼层已失效的批次（最早的先删）、已全部处理完的批次、最早的批次。
+ * 删掉仍有效的待审核建议时返回说明（删了哪一批），由页面显示。写入记录先删已撤销的，再删最早的。
+ */
+function prune(next: WorldbookChatData, ctx: STContext): string {
+  const notices: string[] = [];
   while (next.batches.length > WB_LIMITS.batches) {
-    const index = next.batches.findIndex(b => !b.suggestions.some(s => s.status === 'pending'));
-    next.batches.splice(index >= 0 ? index : 0, 1);
+    let index = next.batches.findIndex(b => !rangeCurrent(b.source, ctx));
+    if (index < 0) index = next.batches.findIndex(b => !b.suggestions.some(s => s.status === 'pending'));
+    if (index < 0) {
+      index = 0;
+      const b = next.batches[0], pending = b.suggestions.filter(s => s.status === 'pending').length;
+      notices.push('第 ' + b.source.from + '–' + b.source.to + ' 楼的一批（' + pending + ' 条待审核）');
+    }
+    next.batches.splice(index, 1);
   }
   while (next.applied.length > WB_LIMITS.applied) {
     const index = next.applied.findIndex(r => r.undoneAt !== null);
     next.applied.splice(index >= 0 ? index : 0, 1);
   }
+  return notices.length ? '建议批次超过 ' + WB_LIMITS.batches + ' 批，删除了最早的' + notices.join('、') + '。请及时处理待审核的建议。' : '';
 }
 
 /**
@@ -120,7 +134,7 @@ function prune(next: WorldbookChatData): void {
  */
 async function persist(next: WorldbookChatData, ctx: STContext, keepOnFailure = false): Promise<void> {
   if (!loaded || !sameChat(loaded)) throw new Error('聊天已经切换，这次操作没有保存。');
-  prune(next);
+  const pruned = prune(next, ctx);
   if (!validWorldbookData(next)) throw new Error('世界书建议数据校验未通过，这次操作没有保存。');
   const identity = loaded, metadata = ctx.chatMetadata, previous = metadata[WORLDBOOK_DATA_KEY];
   const written = clone(next);
@@ -129,6 +143,7 @@ async function persist(next: WorldbookChatData, ctx: STContext, keepOnFailure = 
   const apply = () => {
     if (!sameChat(identity)) return;
     Object.assign(worldbookState, { target: next.target, cursor: clone(next.cursor), batches: clone(next.batches), applied: clone(next.applied) });
+    if (pruned) worldbookState.pruneNotice = pruned;
     worldbookState.revision++;
   };
   try {

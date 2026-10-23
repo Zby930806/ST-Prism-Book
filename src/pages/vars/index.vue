@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 自定义变量页(MVU 式:一个 JSON 状态树 + 路径命令)。三块:
- *  ① 当前状态:AI 在剧情里用命令建/改出来的 JSON(派生,只读展示;可手动编辑整份 → 写回最新叶子)。
+ *  ① 当前状态:AI 在剧情里用命令建/改出来的 JSON(派生,只读展示;可手动编辑整份 → 作为手动修改单独保存在最新叶子上)。
  *  ② 初始模板与说明:三层(全局/角色/聊天)各一份初始结构 + 给 AI 的说明,合并作为重放起点。
  *  ③ 导入/导出:分享变量结构(模板+说明,不含值)。
  * 值永远每聊天独立(从各聊天叶子的 varOps 重放);改模板不需摘要,改「当前值」需要有摘要(写最新叶子)。
@@ -307,7 +307,7 @@ function applyImport() {
 
     <!-- 编辑当前值 -->
     <ModalShell :open="editStateOpen" title="编辑当前值" @close="editStateOpen = false">
-      <p class="bbs-modal-hint">编辑完整 JSON，保存后写入最新摘要所在楼层（删除该楼层可撤销）。</p>
+      <p class="bbs-modal-hint">编辑完整 JSON。这项修改单独保存，重新摘要或重抽后仍然保留。</p>
       <textarea v-model="stateEdit" aria-label="编辑当前变量 JSON" class="bbs-input bbs-json-edit bbs-io-area" spellcheck="false"></textarea>
       <span v-if="stateEditErr" class="bbs-json-err">{{ stateEditErr }}</span>
       <template #footer>

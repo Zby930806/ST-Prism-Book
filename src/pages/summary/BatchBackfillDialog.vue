@@ -42,10 +42,11 @@ const scopeLabel = computed(() => {
           </label>
         </div>
         <p class="bbs-field-hint bbs-batch-warning">合并的楼层只生成摘要，不记录人物、物品、计划等状态；状态从逐层摘要的楼层开始记录。</p>
+        <p class="bbs-field-hint bbs-batch-plan">一组没有写全时先保存写好的楼层，其余楼层对半拆开重试，拆到一层时改为逐层摘要；回复被截断或超出上下文时同样拆开重试。</p>
       </template>
-      <p v-else class="bbs-field-hint bbs-batch-plan">每层请求一次 AI，记录摘要和人物、物品、计划等状态，共 {{ batchFloors.length }} 次请求。</p>
+      <p v-else class="bbs-field-hint bbs-batch-plan">每层请求一次 AI，记录摘要和人物、物品、计划等状态，共 {{ batchFloors.length }} 次请求；摘要达到数量时按设置合并为总结。</p>
     </template>
-    <p v-else class="bbs-field-hint bbs-batch-plan">按楼层顺序逐层生成摘要，并更新人物、物品、计划等状态，每层请求一次 AI。</p>
+    <p v-else class="bbs-field-hint bbs-batch-plan">按楼层顺序逐层生成摘要，并更新人物、物品、计划等状态，每层请求一次 AI；摘要达到数量时按设置合并为总结。</p>
     <template #footer>
       <button class="bbs-btn" type="button" @click="batchConfirmOpen = false">取消</button>
       <button class="bbs-btn bbs-btn-primary" type="button" @click="runBatchBackfill">开始</button>

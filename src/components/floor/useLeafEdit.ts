@@ -353,7 +353,7 @@ export function useLeafEdit(opts: {
     });
   }
 
-  /** 删除某条变动(从对应桶按序号剔除)。 */
+  /** 删除某条变动(从对应桶按序号剔除)。类目与 delta 字段一一对应,未知类目不动任何数据。 */
   function deleteTag(tag: DeltaTag) {
     const [cat, bucket] = tag.key.split(':');
     commitDelta(dd => {
@@ -361,11 +361,17 @@ export function useLeafEdit(opts: {
         delete dd.protagonist;
         return;
       }
+      if (cat === 'focus') {
+        delete dd.sceneFocus; // 局势卡:去掉本楼这次的覆盖或清空
+        return;
+      }
       if (cat === 'var') {
         if (Array.isArray(dd.varOps)) dd.varOps.splice(tag.idx, 1); // varOps 是扁平数组,直接按序号删
         return;
       }
-      const group = (dd as Record<string, Record<string, unknown[]>>)[cat === 'item' ? 'items' : cat === 'npc' ? 'npcs' : cat === 'scene' ? 'scenes' : cat === 'secret' ? 'secrets' : 'plans'];
+      const field = ({ item: 'items', npc: 'npcs', scene: 'scenes', secret: 'secrets', plan: 'plans', life: 'lifeDetails' } as Record<string, string>)[cat];
+      if (!field) return;
+      const group = (dd as Record<string, Record<string, unknown[]>>)[field];
       const arr = group?.[bucket];
       if (Array.isArray(arr)) arr.splice(tag.idx, 1);
     });

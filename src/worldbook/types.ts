@@ -16,8 +16,11 @@ export interface WorldbookSettings {
   auto: { enabled: boolean; interval: number };
   /** 新条目的插入位置（ST 的 position 数值）、顺序和 @深度时的深度。 */
   newEntry: { position: number; order: number; depth: number };
-  /** maxFloors/maxChars：新楼层的楼层数和字数上限；entryChars：相关条目全文上限；refChars：参考世界书上限。 */
-  read: { maxFloors: number; maxChars: number; entryChars: number; refChars: number };
+  /**
+   * maxFloors/maxChars：新楼层的楼层数和字数上限（单层正文也最多读到 maxChars）；entryChars：相关条目全文上限；
+   * refChars：参考世界书上限；indexChars：目标书条目索引的上限（放不下的条目只列 uid 和标题）。旧设置没有 indexChars，按默认 10000。
+   */
+  read: { maxFloors: number; maxChars: number; entryChars: number; refChars: number; indexChars: number };
 }
 
 /** 建议依据的楼层范围；hash 为范围内每层指纹的合并指纹。 */

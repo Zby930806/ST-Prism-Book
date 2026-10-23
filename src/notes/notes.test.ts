@@ -11,8 +11,8 @@ import { clampToTimeTags, cleanBody } from '@/memory/timeTag';
 import { ORIGINAL_NOTES_PROMPT, ORIGINAL_NOTES_PROMPT_SHA256, EXECUTABLE_NOTES_PROMPT, TIDY_NOTES_PROMPT } from './prompt';
 import { stripAftertalk, extractAftertalk, parseQuestions, noteText, fingerprint } from './protocol';
 import { notesSettings, settingsIssue, hydrateNotesSettings, saveNotesSettings, validateNotesChannel, NOTES_SETTINGS_KEY } from './settings';
-import { sourceHash, latestStoryFloor } from './source';
-import { notesState, NOTES_DATA_KEY, loadNotes, addNote, confirmQuestion, rejectQuestion, setDecisionStatus, activeDecisions, recordIsCurrent, recordSourceIsCurrent, importLegacyNotes, deleteNote } from './store';
+import { sourceHash, latestStoryFloor, floorHash } from './source';
+import { notesState, NOTES_DATA_KEY, loadNotes, addNote, confirmQuestion, rejectQuestion, setDecisionStatus, activeDecisions, recordIsCurrent, recordSourceIsCurrent, importLegacyNotes, deleteNote, decisionSourceChanged } from './store';
 import { buildNotesContext } from './context';
 import { notesRun, generateNotes, cancelNotes, buildConfirmedInjection, refreshNotesInjection, bindNotesLifecycle, unbindNotesLifecycle, NOTES_INJECT_KEY } from './service';
 
@@ -64,7 +64,12 @@ let ctx: STContext;
 let current: STContext;
 function record(id = 'note-1', floor = 1): NoteRecord {
   return { id, createdAt: 123, floor, swipe: ctx.chat[floor].swipe_id ?? 0,
-    sourceHash: sourceHash(ctx, floor), text: proposed, questions: parseQuestions(proposed) };
+    sourceHash: sourceHash(ctx, floor), floorHash: floorHash(ctx.chat[floor]), text: proposed, questions: parseQuestions(proposed) };
+}
+/** 旧版本保存的札记没有 floorHash，仍按从第 0 楼起的整段指纹核对。 */
+function legacyRecord(id = 'legacy-1', floor = 1): NoteRecord {
+  const { floorHash: _floorHash, ...rest } = record(id, floor);
+  return rest;
 }
 function enable() {
   notesSettings.enabled = true;
@@ -302,15 +307,34 @@ describe('store 只读保护、事务与确认绑定', () => {
     await seeded(); await confirmQuestion('note-1', 'Q1', '批准'); await rejectQuestion('note-1', 'Q1');
     expect(notesState.decisions).toHaveLength(1); expect(notesState.decisions[0].status).toBe('rejected'); expect(activeDecisions()).toEqual([]);
   });
-  it.each(['earlier-edit', 'body-edit', 'swipe', 'delete'] as const)('来源 %s 变化使旧确认失效，不能重新激活', async mode => {
-    const r = await seeded(); await confirmQuestion(r.id, 'Q1', '批准');
-    if (mode === 'earlier-edit') ctx.chat[0].mes += '改变前文';
+  it.each(['body-edit', 'swipe', 'delete'] as const)('札记所在楼 %s 后札记失效、提案不能再确认；已确认的安排照常注入，可以停用后重新启用', async mode => {
+    enable(); const r = await seeded(); await confirmQuestion(r.id, 'Q1', '批准');
     if (mode === 'body-edit') ctx.chat[1].mes += '改变正文';
     if (mode === 'swipe') ctx.chat[1].swipe_id = 1;
     if (mode === 'delete') ctx.chat.splice(1, 1);
-    expect(recordSourceIsCurrent(r)).toBe(false); expect(activeDecisions()).toEqual([]);
-    await expect(confirmQuestion(r.id, 'Q1', '迟到确认')).rejects.toThrow();
-    await expect(setDecisionStatus(notesState.decisions[0].id, 'in_progress')).rejects.toThrow('正文已变化');
+    expect(recordSourceIsCurrent(r)).toBe(false); expect(recordIsCurrent(r)).toBe(false);
+    expect(decisionSourceChanged(notesState.decisions[0])).toBe(true);
+    await expect(confirmQuestion(r.id, 'Q2', '迟到确认')).rejects.toThrow();
+    expect(activeDecisions()).toHaveLength(1); expect(buildConfirmedInjection()).toContain('批准');
+    await setDecisionStatus(notesState.decisions[0].id, 'cancelled');
+    expect(activeDecisions()).toEqual([]); expect(buildConfirmedInjection()).toBe('');
+    await setDecisionStatus(notesState.decisions[0].id, 'in_progress');
+    expect(activeDecisions()).toHaveLength(1); expect(buildConfirmedInjection()).toContain('[进行中] 批准');
+  });
+  it('更早楼层的改动、改名和原生隐藏不算札记所在楼的改动：札记仍有效，提案仍可确认', async () => {
+    const r = await seeded(); await confirmQuestion(r.id, 'Q1', '批准');
+    ctx.chat[0].mes += '改变前文'; ctx.chat[1].name = '另一个说话人'; ctx.chat[1].is_system = true;
+    expect(recordSourceIsCurrent(r)).toBe(true); expect(recordIsCurrent(r)).toBe(true);
+    expect(decisionSourceChanged(notesState.decisions[0])).toBe(false);
+    await confirmQuestion(r.id, 'Q2', '仍可确认');
+    expect(activeDecisions().map(d => d.text)).toEqual(['批准', '仍可确认']);
+  });
+  it('旧版本保存的札记（没有 floorHash）仍按从第 0 楼起的整段指纹判断失效；它确认过的安排同样照常注入', async () => {
+    enable(); const r = legacyRecord(); await addNote(r); await confirmQuestion(r.id, 'Q1', '旧札记的安排');
+    ctx.chat[0].mes += '改变前文';
+    expect(recordSourceIsCurrent(r)).toBe(false);
+    await expect(confirmQuestion(r.id, 'Q2', '迟到确认')).rejects.toThrow();
+    expect(activeDecisions()).toHaveLength(1); expect(buildConfirmedInjection()).toContain('旧札记的安排');
   });
   it('修改戏外札记不使正文来源变化，追加新楼也不使旧确认失效', async () => {
     const r = await seeded(); await confirmQuestion(r.id, 'Q1', '批准');
@@ -515,7 +539,9 @@ describe('自动触发严格时序与摘要隐藏兼容', () => {
     expect(sourceHash(ctx, 1)).toBe(hash); expect(recordSourceIsCurrent(r)).toBe(true); expect(recordIsCurrent(r)).toBe(true);
     expect(activeDecisions()).toHaveLength(1); expect(buildConfirmedInjection()).toContain('已确认计划');
     ctx.chat[1].extra.bbs_hidden = false;
-    expect(sourceHash(ctx, 1)).not.toBe(hash); expect(recordSourceIsCurrent(r)).toBe(false);
+    // 整段指纹（规划用）把原生隐藏算作说话方变化；札记只核对所在楼的页码和正文，原生隐藏不算改动。
+    expect(sourceHash(ctx, 1)).not.toBe(hash); expect(recordSourceIsCurrent(r)).toBe(true);
+    expect(activeDecisions()).toHaveLength(1);
   });
   it('摘要隐藏触发 MESSAGE_UPDATED 不取消正在生成的札记', async () => {
     bindNotesLifecycle(); const wait = deferred<string>(); completion.mockReturnValueOnce(wait.promise);
@@ -525,11 +551,12 @@ describe('自动触发严格时序与摘要隐藏兼容', () => {
     expect(signal?.aborted).toBe(false); expect(notesRun.busy).toBe(true);
     wait.resolve(reply); await pending; expect(notesState.records).toHaveLength(1);
   });
-  it.each(['MESSAGE_EDITED', 'MESSAGE_UPDATED', 'MESSAGE_SWIPED', 'MESSAGE_DELETED', 'MESSAGE_SENT'])('%s 遇到真实来源变化取消请求、清空旧确认注入', async event => {
+  it.each(['MESSAGE_EDITED', 'MESSAGE_UPDATED', 'MESSAGE_SWIPED', 'MESSAGE_DELETED', 'MESSAGE_SENT'])('%s 遇到真实来源变化取消请求；已确认的安排照常注入', async event => {
     await seeded(); await confirmQuestion('note-1', 'Q1', '批准'); bindNotesLifecycle();
     const wait = deferred<string>(); completion.mockReturnValueOnce(wait.promise); const pending = generateNotes(true);
     ctx.chat[1].mes += '真实变化'; ctx.eventSource.emit!(event, 1);
-    expect(completion.mock.calls[0][2]!.signal?.aborted).toBe(true); expect(buildConfirmedInjection()).toBe('');
+    expect(completion.mock.calls[0][2]!.signal?.aborted).toBe(true); expect(buildConfirmedInjection()).toContain('批准');
+    expect(decisionSourceChanged(notesState.decisions[0])).toBe(true);
     wait.resolve(reply); await pending; expect(notesState.records).toHaveLength(1);
   });
 });
@@ -577,11 +604,11 @@ describe('最新后端修复回归', () => {
     expect(activeDecisions()).toEqual([]); expect(buildConfirmedInjection()).toBe('');
     loadNotes(); expect(notesState.decisions[0].text).toBe(expected);
   });
-  it.each([0, 1])('说话人第 %s 楼姓名变化使来源指纹与旧确认失效', async floor => {
+  it.each([0, 1])('说话人第 %s 楼姓名变化改变整段指纹，但不使札记和已确认的安排失效', async floor => {
     enable(); const r = await seeded(); await confirmQuestion(r.id, 'Q1', '已确认'); const hash = sourceHash(ctx, 1);
     ctx.chat[floor].name = '另一个说话人';
-    expect(sourceHash(ctx, 1)).not.toBe(hash); expect(recordSourceIsCurrent(r)).toBe(false);
-    expect(activeDecisions()).toEqual([]); expect(buildConfirmedInjection()).toBe('');
+    expect(sourceHash(ctx, 1)).not.toBe(hash); expect(recordSourceIsCurrent(r)).toBe(true);
+    expect(activeDecisions()).toHaveLength(1); expect(buildConfirmedInjection()).toContain('已确认');
   });
   it('托管物品/变量旁注引发 MESSAGE_UPDATED 不取消在途请求、不改变正文指纹', async () => {
     enable(); ctx.chat[1].mes = '<bbs_start>上午</bbs_start>她走进房间。<bbs_end>中午</bbs_end>';

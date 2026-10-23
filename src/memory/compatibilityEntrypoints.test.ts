@@ -141,16 +141,43 @@ describe('保护态入口在读取快照/修改/外发之前停止', () => {
 describe('Horae 候选、失败恢复及异步归属', () => {
   it('正常迁移保留其他插件与原文，明确等待聊天及 metadata 保存', async () => {
     const before = clone(source.chat);
+    expect(computeMigrationPlan()).toMatchObject({ hasData: true, leafFloors: 3, pendingFloors: 0 });
     expect(await runHoraeMigration()).toBe(true);
     expect(source.chat.map(m => m.mes)).toEqual(before.map(m => m.mes));
     expect(source.chat[0].extra!.otherPlugin).toEqual(before[0].extra!.otherPlugin);
     expect(source.chat[0].extra!.bbs_leaf!.text).toBe('Horae叙事-0');
+    // 最终状态单独存在最后一片叶子的 migratedDelta 上,不并入 delta(重新摘要这一楼时不丢)
+    const seed = source.chat[2].extra!.bbs_leaf as LeafExtra & { migratedDelta?: unknown };
+    expect(seed.delta).toEqual({});
+    expect(seed.migratedDelta).toMatchObject({ items: { add: [{ name: '苹果', qty: 3 }] } });
     expect(memory.items).toEqual(expect.arrayContaining([expect.objectContaining({ name: '苹果', qty: 3 })]));
     expect(source.chatMetadata[MEMORY_KEY]).toMatchObject({ version: 3, customTop: '保留' });
     expect(source.saveChat).toHaveBeenCalledTimes(1);
     expect(source.saveMetadata).toHaveBeenCalledTimes(1);
     expect(source.saveMetadataDebounced).not.toHaveBeenCalled();
     expect(engine.syncHiddenNow).toHaveBeenCalledTimes(1);
+  });
+  it('子总结范围内没有叙事楼层时，父总结不留悬空引用，子总结存为导入历史；预览写明待补摘的楼层', async () => {
+    const plain = (i: number, events = true): STMessage => ({ name: '角色', is_user: false, is_system: false, mes: '原正文-' + i, swipe_id: 0, extra: {},
+      ...(events ? { horae_meta: { events: [{ summary: 'Horae叙事-' + i }] } } : {}) } as STMessage);
+    const chat = [plain(0), plain(1), plain(2, false), plain(3, false), plain(4, false)];
+    (chat[0] as unknown as { horae_meta: Record<string, unknown> }).horae_meta.autoSummaries = [
+      { id: 'top', range: [0, 3], summaryText: '整段总结', depth: 2, mergedSummaries: [{ id: 'child', range: [2, 3], summaryText: '后半段总结', depth: 1 }] },
+    ];
+    source = host('source', chat, { version: 3, summaries: [] });
+    current = source;
+    loadMemory();
+    // #4 没有 Horae 记录、也不在任何总结范围内:迁移后需要补摘
+    expect(computeMigrationPlan()).toMatchObject({ hasData: true, leafFloors: 2, summaryCount: 2, pendingFloors: 1 });
+    expect(await runHoraeMigration()).toBe(true);
+    const forest = memory.summaries;
+    const child = forest.find(s => s.id === 'child');
+    const top = forest.find(s => s.id === 'top');
+    expect(child).toMatchObject({ imported: true, importedFloorStart: 2, importedFloorEnd: 3, childIds: [], text: '后半段总结' });
+    expect(top?.childIds).toEqual(['child', chat[0].extra!.bbs_leaf!.id, chat[1].extra!.bbs_leaf!.id]);
+    expect(compatibilityState.mode).toBe('ready');
+    expect(engine.pendingAiFloors(source.chat)).toEqual([4]);
+    expect(notices.toast).toHaveBeenLastCalledWith(expect.stringContaining('另有 1 层没有 Horae 记录'), 'warning');
   });
   it('造第二片叶子失败时第一片也不泄漏到源聊天', async () => {
     const before = view(source);
@@ -223,6 +250,51 @@ describe('carryover 快照、外发和新聊天提交', () => {
     expect(await createNewChatWithCarryover()).toBe(true);
     expect(target.chatMetadata.bbs_bundles).toEqual(['parent-hash']);
     expect(target.chat[0].extra!.bbs_leaf!.delta.items!.add).toEqual(expect.arrayContaining([expect.objectContaining({ name: '地图', qty: 2 })]));
+  });
+  it('种子叶子带上角色的曾用名；窗口前未摘要的楼层在预览里写明', async () => {
+    source.chat[0].extra!.bbs_leaf!.delta = { npcs: { add: [{ name: '酒保A', title: '酒保' }] } };
+    source.chat[1].extra!.bbs_leaf!.delta = { npcs: { rename: [{ from: '酒保A', to: '老周' }] } };
+    loadMemory();
+    expect(computeCarryoverPlan()).toMatchObject({ pendingBefore: 0 });
+    expect(await createNewChatWithCarryover()).toBe(true);
+    expect(target.chat[0].extra!.bbs_leaf!.delta.npcs!.add).toEqual([expect.objectContaining({ name: '老周', formerNames: ['酒保A'] })]);
+    // 窗口前有一层没有摘要(总结也一并去掉,免得引用缺失的楼层)
+    current = source;
+    delete source.chat[1].extra!.bbs_leaf;
+    source.chatMetadata[MEMORY_KEY] = { version: 3, summaries: [] };
+    loadMemory();
+    expect(computeCarryoverPlan()).toMatchObject({ pendingBefore: 1 });
+  });
+  it('窗口内叶子上单独保存的手动修改,对窗口前条目的引用同样改挂到种子叶', async () => {
+    // 窗口前(#0)记下计划、生活档案、信息差;窗口内(#2)在页面上编辑计划、沉降档案、结案信息差
+    Object.assign(source.chat[0].extra!.bbs_leaf!.delta, {
+      lifeDetails: { add: [{ subject: 'user', text: '喝茶不加糖' }] },
+      secrets: { add: [{ content: '地图是借来的', unaware: ['角色'] }] },
+    });
+    (source.chat[2].extra!.bbs_leaf as LeafExtra).manualOps = {
+      plans: { update: [{ id: 'plan:old-0#0', content: '明天归还地图' }] },
+      lifeDetails: { archive: ['detail:old-0#0'] },
+      secrets: { resolve: ['secret:old-0#0'] },
+    };
+    // 另一页回复上的叶子同样改写(翻到那一页时引用仍然对得上)
+    Object.assign(source.chat[2], { swipe_info: [{ extra: {} }, { extra: { bbs_leaf: { ...leaf(2), id: 'old-2-alt', swipe: 1, manualOps: { plans: { remove: ['plan:old-0#0'] } } } } }] });
+    loadMemory();
+    expect(memory.plans.find(p => p.id === 'plan:old-0#0')?.content).toBe('明天归还地图');
+    expect(await createNewChatWithCarryover()).toBe(true);
+    const seedId = target.chat[0].extra!.bbs_leaf!.id;
+    expect((target.chat[1].extra!.bbs_leaf as LeafExtra).manualOps).toEqual({
+      plans: { update: [{ id: `plan:${seedId}#0`, content: '明天归还地图' }] },
+      lifeDetails: { archive: [`detail:${seedId}#0`] },
+      secrets: { resolve: [`secret:${seedId}#0`] },
+    });
+    const altPage = (target.chat[1] as unknown as { swipe_info: Array<{ extra: { bbs_leaf: LeafExtra } }> }).swipe_info[1];
+    expect(altPage.extra.bbs_leaf.manualOps?.plans?.remove).toEqual([`plan:${seedId}#0`]);
+    const derived = apply.deriveMemory(target.chat);
+    expect(derived.plans).toEqual([expect.objectContaining({ id: `plan:${seedId}#0`, content: '明天归还地图', status: 'open' })]);
+    expect(derived.lifeDetails).toEqual([expect.objectContaining({ text: '喝茶不加糖', tier: 'archive' })]);
+    expect(derived.secrets).toEqual([expect.objectContaining({ content: '地图是借来的', status: 'resolved' })]);
+    // 源聊天的叶子不受影响
+    expect((source.chat[2].extra!.bbs_leaf as LeafExtra).manualOps?.plans?.update?.[0].id).toBe('plan:old-0#0');
   });
   for (const boundary of ['interface', 'available', 'bundle', 'sourceSave'] as const) {
     it.each(axes)(boundary + ' 挂起期间仅源 %s 变化，禁止后续外发/建聊', async axis => {

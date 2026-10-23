@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as host from '@/st/context';
 import { makeTavern } from './testEnv';
+import { makeRange } from './source';
 import {
   WORLDBOOK_DATA_KEY, commitBatch, loadWorldbookData, recordApplied, saveSuggestionEdit, setCursor, setSuggestionStatus, setTarget,
   validWorldbookData, worldbookState, worldbookWriteIssue,
@@ -101,14 +102,31 @@ describe('世界书建议的存储', () => {
     await expect(saveSuggestionEdit('b1', 's1', { title: 'x', keys: ['xx'], content: 'y', find: '' })).rejects.toThrow('已经处理过');
   });
 
-  it('超出上限时先删已处理的批次，保留有待处理建议的批次', async () => {
-    for (let i = 0; i < 20; i++) await commitBatch(batch('b' + i, [suggestion('s' + i, { status: i === 0 ? 'pending' : 'ignored' })]), null);
-    await commitBatch(batch('new', [suggestion('sn')]), null);
-    const ids = worldbookState.batches.map(b => b.id);
+  it('超出上限时先删依据楼层已失效的批次，再删已处理完的批次，保留有待处理建议的批次', async () => {
+    const live = makeRange(tavern.ctx, 0, 1);
+    for (let i = 0; i < 20; i++) await commitBatch({ ...batch('b' + i, [suggestion('s' + i, { status: i === 0 ? 'pending' : 'ignored' })]), source: live }, null);
+    await commitBatch({ ...batch('new', [suggestion('sn')]), source: live }, null);
+    let ids = worldbookState.batches.map(b => b.id);
     expect(ids).toHaveLength(20);
-    expect(ids).toContain('b0');
-    expect(ids).not.toContain('b1');
-    expect(ids).toContain('new');
+    expect(ids).toContain('b0'); expect(ids).not.toContain('b1'); expect(ids).toContain('new');
+    expect(worldbookState.pruneNotice).toBe('');
+    // 失效的批次（依据范围的指纹对不上）即使还有待审核建议，也先于已处理完的批次删除
+    const stale = worldbookState.batches.map(b => (b.id === 'b0' ? { ...b, source: { from: 0, to: 1, hash: 'stale' } } : b));
+    tavern.ctx.chatMetadata[WORLDBOOK_DATA_KEY] = JSON.parse(JSON.stringify({ version: 1, target: null, cursor: null, batches: stale, applied: [] }));
+    loadWorldbookData();
+    await commitBatch({ ...batch('newer', [suggestion('sx')]), source: live }, null);
+    ids = worldbookState.batches.map(b => b.id);
+    expect(ids).not.toContain('b0'); expect(ids).toContain('b2'); expect(ids).toContain('newer');
+    expect(worldbookState.pruneNotice).toBe('');
+  });
+
+  it('每批都还有有效的待审核建议时删最早的一批，并在页面状态里说明删了哪一批', async () => {
+    const live = makeRange(tavern.ctx, 0, 1);
+    for (let i = 0; i < 20; i++) await commitBatch({ ...batch('b' + i, [suggestion('s' + i)]), source: live }, null);
+    await commitBatch({ ...batch('new', [suggestion('sn')]), source: live }, null);
+    expect(worldbookState.batches.map(b => b.id)).not.toContain('b0');
+    expect(worldbookState.pruneNotice).toBe('建议批次超过 20 批，删除了最早的第 0–1 楼的一批（1 条待审核）。请及时处理待审核的建议。');
+    loadWorldbookData(); expect(worldbookState.pruneNotice).toBe('');
   });
 
   it('切换聊天后重新载入，不把旧聊天的数据写进新聊天', async () => {

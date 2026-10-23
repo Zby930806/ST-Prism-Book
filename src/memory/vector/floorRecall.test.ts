@@ -16,7 +16,7 @@ vi.mock('../engine', () => ({
 }));
 
 import { armFloorRecall, attachFloorRecall, beginGenerationRecall, floorRecallFromDebug, readFloorRecall } from './floorRecall';
-import { recallDebugWrites, resetRecallDebug, setRecallRerank, setRecallStatus, snapshotRecallDebug } from './debug';
+import { recallDebugWrites, resetRecallDebug, setRecallIndexNote, setRecallRerank, setRecallRerankIssue, setRecallStatus, snapshotRecallDebug } from './debug';
 
 const ai = (mes: string, extra: Record<string, unknown> = {}): STMessage => ({ name: 'AI', is_user: false, is_system: false, mes, extra });
 const user = (mes: string): STMessage => ({ name: 'User', is_user: true, is_system: false, mes });
@@ -72,6 +72,22 @@ describe('楼层召回记录：读写格式', () => {
     expect(rec).toMatchObject({ cut: 1, items: [{ source: '#3', tier: 'brief', preview: '改发摘要' }] });
     expect(readFloorRecall(ai('回复', { bbs_recall: rec }))?.cut).toBe(1);
     expect(readFloorRecall(ai('回复', { bbs_recall: { ...rec, cut: -3 } }))).not.toHaveProperty('cut');
+  });
+
+  it('记下没有重排和索引方面的说明，读回时保留；非文字或空白的说明丢弃', () => {
+    resetRecallDebug();
+    setRecallRerank([{ leafId: 'a', rerankScore: 0.9, similarity: 0.9, tier: 'brief', source: '#3', storyTime: '', preview: '旧事', reranked: false }]);
+    setRecallRerankIssue('未填写 Rerank 模型，已按 embedding 相似度分档，只发送摘要。');
+    setRecallIndexNote('向量索引还在补建（剩余 2 条），本次先用已建好的部分召回，补建在后台继续。');
+    setRecallStatus('召回完成');
+    const rec = floorRecallFromDebug(snapshotRecallDebug(), 0);
+    expect(rec).toMatchObject({ rerankIssue: '未填写 Rerank 模型，已按 embedding 相似度分档，只发送摘要。', indexNote: '向量索引还在补建（剩余 2 条），本次先用已建好的部分召回，补建在后台继续。' });
+    const back = readFloorRecall(ai('回复', { bbs_recall: rec }));
+    expect(back?.rerankIssue).toBe(rec.rerankIssue);
+    expect(back?.indexNote).toBe(rec.indexNote);
+    const bad = readFloorRecall(ai('回复', { bbs_recall: { ...rec, rerankIssue: 3, indexNote: '   ' } }));
+    expect(bad).not.toHaveProperty('rerankIssue');
+    expect(bad).not.toHaveProperty('indexNote');
   });
 
   it('页码对不上、格式不对时不显示；坏条目跳过', () => {

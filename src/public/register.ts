@@ -112,6 +112,10 @@ function createApi(): STBaiBaiBookApi {
     get capabilities() {
       return clonePublic(capabilities);
     },
+    // 全局对象先挂上,斜杠命令和宏注册完成后才为 true(此后 capabilities 不再变化)
+    get ready() {
+      return ready;
+    },
     getVar: (path: string, options?: SnapshotOptions) => getVar(path, options),
     getSnapshot: (options?: SnapshotOptions) => getSnapshot(options),
     getHistory: (options?: HistoryOptions) => getHistory(options),
@@ -380,7 +384,7 @@ async function registerMacros(): Promise<{ macros: boolean; parameterized: boole
         }],
         ['bbsInjectedHistory', {
           category: categoryChat,
-          description: '返回与正常记忆注入相同、已跳过滑动窗口的历史剧情文本；兼容保护/转换期间返回空串，原因见 bbsSnapshot。',
+          description: '返回正常记忆注入选用的历史剧情文本，已跳过仍以全文发送的楼层；不受记忆注入预算影响。兼容保护/转换期间返回空串，原因见 bbsSnapshot。',
           exampleUsage: ['{{bbsInjectedHistory}}'],
           handler: () => macroSafe(() => getInjectedHistory().relativeText),
         }],
@@ -432,7 +436,7 @@ async function registerMacros(): Promise<{ macros: boolean; parameterized: boole
       ['bbsState', () => macroSafe(() => getSnapshot().state), '返回棱镜宝书当前状态 JSON。'],
       ['bbsSnapshot', () => macroSafe(() => getSnapshot()), '返回棱镜宝书当前完整状态快照 JSON。'],
       ['bbsHistory', () => macroSafe(() => getHistory().relativeText), '返回棱镜宝书带相对时间的压缩历史剧情文本。'],
-      ['bbsInjectedHistory', () => macroSafe(() => getInjectedHistory().relativeText), '返回与正常记忆注入相同、已跳过滑动窗口的历史剧情文本；兼容保护/转换期间返回空串，原因见 bbsSnapshot。'],
+      ['bbsInjectedHistory', () => macroSafe(() => getInjectedHistory().relativeText), '返回正常记忆注入选用的历史剧情文本，已跳过仍以全文发送的楼层；不受记忆注入预算影响。兼容保护/转换期间返回空串，原因见 bbsSnapshot。'],
     ];
     for (const [name, handler, description] of stableMacros) {
       legacyModule.MacrosParser.registerMacro(name, handler, description);

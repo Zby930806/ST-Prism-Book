@@ -1,9 +1,9 @@
 <script setup lang="ts">
 /**
  * 主角档案：分组标签行、主角卡（身份、外貌、着装、状态）与编辑弹窗。
- * 主角与 NPC 名册分开记录；编辑写入最新一条有效摘要，没有摘要时编辑键禁用。
+ * 主角与 NPC 名册分开记录；编辑作为手动修改单独保存在最新一条有效摘要上，没有摘要时编辑键禁用。
+ * 是否随正文发送看「仅注入剧情摘要」和注入设置里的「主角信息」（见 sendScope.ts）。
  */
-import { apiSettings } from '@/api/settings';
 import IconButton from '@/components/IconButton.vue';
 import ModalShell from '@/components/ModalShell.vue';
 import { setProtagonist } from '@/memory/apply';
@@ -12,8 +12,12 @@ import { computed, ref } from 'vue';
 import NpcCardBase from './NpcCardBase.vue';
 import NpcTierHead from './NpcTierHead.vue';
 import { conditionTitle, personChips, type CardField } from './npcView';
+import { blockLocalNote } from './sendScope';
 
 const props = defineProps<{ name: string; hasLeaf: boolean }>();
+
+const localNote = computed(() => blockLocalNote('protagonist'));
+const tierHint = computed(() => (localNote.value ? `只记录用户操控的角色本人；${localNote.value}。` : '只记录用户操控的角色本人，档案随正文完整发送。'));
 
 // 只看文字字段;伤情锚点等派生数字不算「有记录」
 const hasData = computed(() => (['gender', 'age', 'identity', 'appearance', 'outfit', 'condition'] as const).some(key => !!memory.protagonist[key]?.trim()));
@@ -74,8 +78,8 @@ function saveEdit() {
     <NpcTierHead
       title="主角"
       heading-id="bbs-tier-protagonist"
-      :hint="apiSettings.summaryOnlyMode ? '只记录用户操控的角色本人；仅供棱镜宝书记录，不发送给主对话 AI。' : '只记录用户操控的角色本人，档案始终完整发送。'"
-      :local-only="apiSettings.summaryOnlyMode"
+      :hint="tierHint"
+      :local-only="!!localNote"
     />
     <NpcCardBase
       variant="protagonist"

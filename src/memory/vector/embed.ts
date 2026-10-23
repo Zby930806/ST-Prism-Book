@@ -12,13 +12,28 @@
 import type { VectorEndpoint } from '@/api/settings';
 import { resolveVectorModel } from '@/api/settings';
 import { classifyHttpFailure, describeFailure, networkFailure, timeoutFailure, type ApiError } from '@/api/errors';
+import { runtimeEndpoint } from './params';
 
-export class EmbedError extends Error {}
+/**
+ * 向量接口的错误。message 是给用户看的完整说明;kind/status 来自错误分类,
+ * 供调用方判断要不要逐条重试、要不要在本次会话内跳过重排等。
+ * kind 除了 api/errors 的分类,还有 'config'(没有填写地址或模型)和 'unsupported'(本会话已判定接口不支持重排)。
+ */
+export class EmbedError extends Error {
+  kind?: string;
+  status?: number;
+  constructor(message: string, info: { kind?: string; status?: number } = {}) {
+    super(message);
+    this.name = 'EmbedError';
+    if (info.kind) this.kind = info.kind;
+    if (typeof info.status === 'number') this.status = info.status;
+  }
+}
 
-/** 向量接口由浏览器直连,出错时写成一句完整说明,附上脱敏后的细节,供召回详情和索引提示直接显示。 */
+/** 向量接口由浏览器直连,出错时写成一句完整说明,附上脱敏后的细节,供召回调试和索引提示直接显示。 */
 export function vectorFailure(label: string, error: ApiError): EmbedError {
   const view = describeFailure(error, '', '设置 → 向量记忆');
-  return new EmbedError(`${label}：${view.message}${view.detail ? `（${view.detail}）` : ''}`);
+  return new EmbedError(`${label}：${view.message}${view.detail ? `（${view.detail}）` : ''}`, { kind: error.kind, status: error.status });
 }
 
 /** 读取失败响应并分类;向量接口是浏览器直连,网络类错误要提示跨域。 */
@@ -34,24 +49,30 @@ const RETRY_BACKOFF_MS = 800;
 
 /**
  * 带超时 + 自动重试的 fetch。向量上游常挂住不返回,裸 fetch 会一直干等——
- * 每次尝试都套一个 AbortController + 定时器,超时即中断;失败按类型决定是否重试:
+ * 每次尝试都套一个 AbortController + 定时器,超时即中断;读取响应正文也计入同一次超时。
+ * 失败按类型决定是否重试:
  *  - 内部超时 / 网络异常 / 服务端 5xx / 限流 429 → 重试(还有次数时);
+ *    retryOnTimeout=false 时超时不再重试(查询重写在生成前阻塞,超时多半是服务商卡住,重试只会让正文再等一轮);
  *  - 4xx(鉴权/格式错等)→ 直接返回 resp,由调用方走既有 !resp.ok 抛错分支(重试无意义);
  *  - 外部 signal(用户取消生成)触发的中断 → 立即抛出,绝不重试(重试是浪费额度与时间)。
- * 返回 Response(可能 4xx,交调用方处理);重试耗尽仍失败则抛最后一次错误。
+ * 返回 Response(正文已读完,可能 4xx,交调用方处理);重试耗尽仍失败则抛最后一次错误。
  */
 export async function fetchWithTimeoutRetry(
   url: string,
   init: RequestInit,
-  opts: { timeoutSec: number; retries: number; label: string; externalSignal?: AbortSignal },
+  opts: { timeoutSec: number; retries: number; label: string; externalSignal?: AbortSignal; retryOnTimeout?: boolean },
 ): Promise<Response> {
-  const { timeoutSec, retries, label, externalSignal } = opts;
-  const maxAttempts = Math.max(1, 1 + Math.max(0, retries));
+  const { label, externalSignal } = opts;
+  // 设置页的输入框可能暂时为空或越界:超时按至少 1 秒,重试按非负整数
+  const timeoutSec = typeof opts.timeoutSec === 'number' && Number.isFinite(opts.timeoutSec) && opts.timeoutSec > 0 ? opts.timeoutSec : 10;
+  const retries = typeof opts.retries === 'number' && Number.isFinite(opts.retries) ? Math.max(0, Math.floor(opts.retries)) : 0;
+  const retryOnTimeout = opts.retryOnTimeout !== false;
+  const maxAttempts = 1 + retries;
   let lastErr: unknown;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     // 外部已取消:不再尝试,直接抛(用户主动取消生成)
-    if (externalSignal?.aborted) throw new EmbedError(`${label}已取消`);
+    if (externalSignal?.aborted) throw new EmbedError(`${label}已取消`, { kind: 'cancelled' });
 
     const ctrl = new AbortController();
     let timedOut = false;
@@ -69,14 +90,18 @@ export async function fetchWithTimeoutRetry(
       if ((resp.status >= 500 || resp.status === 429) && attempt < maxAttempts - 1) {
         lastErr = vectorFailure(label, classifyHttpFailure({ status: resp.status, statusText: resp.statusText, direct: true }));
       } else {
-        return resp;
+        // 正文在超时计时内读完:服务商发了响应头却迟迟不发正文时,同样按超时处理
+        const body = await resp.text();
+        const nullBody = resp.status === 204 || resp.status === 205 || resp.status === 304;
+        return new Response(nullBody ? null : body, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
       }
     } catch (e) {
       // 外部取消触发的 abort:立即抛,不重试
-      if (externalSignal?.aborted && !timedOut) throw new EmbedError(`${label}已取消`);
+      if (externalSignal?.aborted && !timedOut) throw new EmbedError(`${label}已取消`, { kind: 'cancelled' });
       lastErr = timedOut
         ? vectorFailure(label, timeoutFailure('请求', timeoutSec))
         : vectorFailure(label, networkFailure(e instanceof Error ? e.message : String(e), { direct: true }));
+      if (timedOut && !retryOnTimeout) throw lastErr;
     } finally {
       clearTimeout(timer);
       externalSignal?.removeEventListener('abort', onExternalAbort);
@@ -175,8 +200,8 @@ function buildEmbeddingRequest(ep: VectorEndpoint, model: string, texts: string[
 
 /* ============ 对外:embed / rerank ============ */
 
-/** 单次 embedding 请求最多塞几条文本(多数上游 batch 上限 ≤64,取保守值分批)。 */
-const EMBED_BATCH = 64;
+/** 单次 embedding 请求最多塞几条文本(多数上游 batch 上限 ≤64,取保守值分批)。索引按这个大小逐批写入。 */
+export const EMBED_BATCH = 64;
 
 /** 发一批(≤EMBED_BATCH)文本的 embedding 请求,返回向量数组(顺序对应)。 */
 async function embedBatch(ep: VectorEndpoint, model: string, texts: string[], signal?: AbortSignal): Promise<Float32Array[]> {
@@ -189,10 +214,15 @@ async function embedBatch(ep: VectorEndpoint, model: string, texts: string[], si
   if (!resp.ok) {
     throw await vectorHttpFailure('Embedding', resp);
   }
-  const json = await resp.json();
+  const json = await resp.json().catch(() => {
+    throw new EmbedError('Embedding 接口返回的不是有效数据，请确认地址指向 embedding 接口（OpenAI 兼容接口的地址通常以 /v1 结尾）。', { kind: 'format' });
+  });
   const vectors = req.parse(json);
   if (!Array.isArray(vectors) || vectors.some((v) => !Array.isArray(v))) {
-    throw new EmbedError('Embedding 接口返回的向量格式不对，请确认地址和模型是 embedding 接口。');
+    throw new EmbedError('Embedding 接口返回的向量格式不对，请确认地址和模型是 embedding 接口。', { kind: 'format' });
+  }
+  if (vectors.length !== texts.length) {
+    throw new EmbedError(`Embedding 接口返回了 ${vectors.length} 个向量，请求的是 ${texts.length} 条文本，请确认地址和模型是 embedding 接口。`, { kind: 'format' });
   }
   return vectors.map((v) => Float32Array.from(v));
 }
@@ -203,9 +233,9 @@ async function embedBatch(ep: VectorEndpoint, model: string, texts: string[], si
  */
 export async function embedTexts(texts: string[], signal?: AbortSignal): Promise<Float32Array[]> {
   if (!texts.length) return [];
-  const ep = resolveVectorModel('embedding');
-  if (!ep.url) throw new EmbedError('向量记忆还没有填写 Embedding 地址，请到设置 → 向量记忆里补全。');
-  if (!ep.model) throw new EmbedError('向量记忆还没有填写 Embedding 模型，请到设置 → 向量记忆里补全。');
+  const ep = runtimeEndpoint(resolveVectorModel('embedding'), 'embedding');
+  if (!ep.url) throw new EmbedError('向量记忆还没有填写 Embedding 地址，请到「设置 → 向量记忆」里补全。', { kind: 'config' });
+  if (!ep.model) throw new EmbedError('向量记忆还没有填写 Embedding 模型，请到「设置 → 向量记忆」里补全。', { kind: 'config' });
 
   if (texts.length <= EMBED_BATCH) return embedBatch(ep, ep.model, texts, signal);
 
@@ -220,7 +250,7 @@ export async function embedTexts(texts: string[], signal?: AbortSignal): Promise
 /** 向量化单条文本 → base64,索引/检索时用。 */
 export async function embedToBase64(text: string, signal?: AbortSignal): Promise<string> {
   const [v] = await embedTexts([text], signal);
-  if (!v) throw new EmbedError('Embedding 接口没有返回向量。');
+  if (!v) throw new EmbedError('Embedding 接口没有返回向量。', { kind: 'format' });
   return encodeFloat32Base64(v);
 }
 
@@ -322,17 +352,38 @@ async function rerankBatch(
   if (!resp.ok) {
     throw await vectorHttpFailure('Rerank', resp);
   }
-  const json = await resp.json();
+  const json = await resp.json().catch(() => {
+    throw new EmbedError('Rerank 接口返回的不是有效数据，请确认地址和模型是 rerank 接口。', { kind: 'format' });
+  });
   const results = json?.results ?? json?.data;
-  if (!Array.isArray(results)) throw new EmbedError('Rerank 接口返回的数据里没有打分结果（缺少 results），请确认地址和模型是 rerank 接口。');
+  if (!Array.isArray(results)) throw new EmbedError('Rerank 接口返回的数据里没有打分结果（缺少 results），请确认地址和模型是 rerank 接口。', { kind: 'format' });
   return results.map((r: any) => ({ index: r.index, score: r.relevance_score ?? r.score ?? 0 }));
+}
+
+/* ============ 重排不可用时的会话记忆 ============ */
+
+/**
+ * 重排接口返回 400/404/405/422/501 这类「接口不支持或拒绝」的错误时,同样的设置每轮再请求也只会失败。
+ * 记下这一组设置(地址、模型、密钥),本次会话内不再请求;改动其中任一项后会重新尝试。
+ */
+const RERANK_UNSUPPORTED_STATUS = new Set([400, 404, 405, 422, 501]);
+let rerankUnsupported: { sig: string; reason: string } | null = null;
+
+function rerankSignature(endpoint: string, model: string, key: string): string {
+  return `${endpoint}\n${model}\n${key}`;
+}
+
+/** 清掉「接口不支持重排」的记忆(测试用;正常情况下改设置即自动失效)。 */
+export function resetRerankSupport(): void {
+  rerankUnsupported = null;
 }
 
 /**
  * 重排:把候选文档(全文精排时即楼层原文)按与 query 的相关度打分。
  * 返回按 score 降序的 {index, score}(index = 输入 documents 的全局下标)。
  * 文档总量超 rerank 上下文预算时自动按 token 分批、超长单条截断,各批结果按全局下标合并。
- * rerank 渠道未配齐时抛错(由调用方决定降级:跳过 rerank、直接用 embedding 序)。
+ * rerank 渠道未配齐时抛 kind='config' 的错误;本会话已判定接口不支持时抛 kind='unsupported' 的错误
+ * (由调用方降级为按 embedding 相似度分档)。
  */
 export async function rerankDocuments(
   query: string,
@@ -341,14 +392,16 @@ export async function rerankDocuments(
   signal?: AbortSignal,
 ): Promise<RerankResult[]> {
   if (!documents.length) return [];
-  const ep = resolveVectorModel('rerank');
-  if (!ep.url) throw new EmbedError('向量记忆还没有填写 Rerank 地址，请到设置 → 向量记忆里补全。');
-  if (!ep.model) throw new EmbedError('向量记忆还没有填写 Rerank 模型，请到设置 → 向量记忆里补全。');
+  const ep = runtimeEndpoint(resolveVectorModel('rerank'), 'rerank');
+  if (!ep.url) throw new EmbedError('未填写 Rerank 地址（也没有可沿用的 Embedding 地址）', { kind: 'config' });
+  if (!ep.model) throw new EmbedError('未填写 Rerank 模型', { kind: 'config' });
 
   const endpoint = `${embeddingBase(ep.url)}/rerank`;
-  const batches = buildRerankBatches(query, documents);
   const key = ep.key || '';
   const model = ep.model;
+  const sig = rerankSignature(endpoint, model, key);
+  if (rerankUnsupported?.sig === sig) throw new EmbedError(rerankUnsupported.reason, { kind: 'unsupported' });
+  const batches = buildRerankBatches(query, documents);
 
   // worker 池并发:批次再多也只同时打 RERANK_BATCH_CONCURRENCY 个请求,各批结果按全局下标合并。
   const merged: RerankResult[] = [];
@@ -367,7 +420,17 @@ export async function rerankDocuments(
     }
   };
   const poolSize = Math.min(RERANK_BATCH_CONCURRENCY, batches.length);
-  await Promise.all(Array.from({ length: poolSize }, () => worker()));
+  try {
+    await Promise.all(Array.from({ length: poolSize }, () => worker()));
+  } catch (e) {
+    if (e instanceof EmbedError && typeof e.status === 'number' && RERANK_UNSUPPORTED_STATUS.has(e.status)) {
+      rerankUnsupported = {
+        sig,
+        reason: `${e.message.replace(/[\s。.]+$/, '')}。本次会话内不再请求重排；修改 Rerank 的地址、密钥或模型后会重新尝试。`,
+      };
+    }
+    throw e;
+  }
 
   return merged.sort((a, b) => b.score - a.score);
 }

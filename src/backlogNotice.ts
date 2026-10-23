@@ -11,6 +11,8 @@
  *    - 只删带标记、正文仍是提示原文的消息（用户改写过内容的不动）。
  * 2. 发给正文模型前过滤：生成拦截器拿到的消息列表是这次请求用的副本，从里面去掉这类提示，
  *    即使提示还留在聊天里（中间的旧提示、来不及删除时），正文模型也看不到。不改聊天本身。
+ *    插件停用（总开关关闭或角色被排除）后同样过滤：被拦截后关掉插件继续聊天时，残留的提示不能当作发言发出去。
+ *    这是「停用后不碰聊天」的例外，只改这次请求的副本，聊天记录不变。
  */
 import { watch } from 'vue';
 import { engineActiveHere } from '@/api/settings';
@@ -82,9 +84,12 @@ export function planBacklogCleanup(input: CleanupInput): CleanupPlan {
   return floors.length ? { action: 'delete', floors, kept, keptReason } : { action: 'keep', kept, keptReason };
 }
 
-/** 生成前从发给正文模型的消息副本里去掉拦截提示；返回去掉的条数。 */
+/**
+ * 生成前从发给正文模型的消息副本里去掉拦截提示；返回去掉的条数。
+ * 不看插件是否在当前聊天生效：只认带标记、正文仍是提示原文的消息，误删的风险很小。
+ */
 export function stripBacklogNoticesFromPrompt(promptChat: unknown): number {
-  if (!Array.isArray(promptChat) || !engineActiveHere()) return 0;
+  if (!Array.isArray(promptChat)) return 0;
   let removed = 0;
   for (let i = promptChat.length - 1; i >= 0; i--) {
     if (!isMarkedBacklogNotice(promptChat[i])) continue;

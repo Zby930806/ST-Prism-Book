@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { apiSettings } from '@/api/settings';
 import {
+  BATCH_SUMMARY_PROMPT,
   buildResummaryPrompt,
   buildSummaryPrompt,
   buildSummaryThinking,
+  NPC_ENRICH_PROMPT,
   RESUMMARY_PROMPT,
   RESUMMARY2_PROMPT,
   RESUMMARY_THINKING_CHECKLIST,
@@ -19,6 +21,7 @@ import {
   RULE_SUMMARY_FIDELITY,
   RULE_SUMMARY_EXAMPLES,
   RULE_HEALTH_STATE,
+  RULE_LIFE_DETAILS,
   RULE_PROTAGONIST,
   RULE_SUMMARY_WRITE,
   MEMORY_BRIEFING_END,
@@ -339,6 +342,8 @@ describe.each(['detailed', 'concise'] as const)('prompt assembly (%s)', verbosit
       apiSettings.prompts.resummary = 'CUSTOM L1 {{content}} {{resummary_words}}';
       apiSettings.prompts.resummary2 = 'CUSTOM L2 {{content}} {{target_min}} {{target_max}} {{target}}';
     }
+    // 摘要字数取各档位的默认值(详细 300、精简 150),L1 篇幅即档位基准
+    apiSettings.summaryMaxChars = verbosity === 'detailed' ? 300 : 150;
     const parts = buildResummaryPrompt({ ...args, content: 'x'.repeat(1000), level });
     const prompt = combined(parts);
     expectFactWorkflow(RESUMMARY_THINKING_CHECKLIST);
@@ -422,6 +427,24 @@ describe('instruction and material boundaries', () => {
     expect(parts.system).not.toContain(args.content);
     expect(parts.system).toContain('【棱镜宝书主角档案兼容协议】');
     expect(parts.system).not.toMatch(/\{\{\w+\}\}/);
+  });
+
+  it('自定义模板逐字带有当前内置规则时不再重复补发;旧版措辞照常补发', () => {
+    apiSettings.prompts.summary = `CUSTOM {{content}}\n${RULE_PROTAGONIST}\n${RULE_SCENE_FOCUS}\n${RULE_ABSOLUTE_TIME_LANGUAGE}\n{{lifedetails_rule}}`;
+    const parts = buildSummaryPrompt(args);
+    const all = `${parts.system}\n${parts.user}`;
+    const filled = (rule: string) => rule.replaceAll('{{user}}', args.user).replaceAll('{{char}}', args.char);
+    for (const rule of [RULE_ABSOLUTE_TIME_LANGUAGE, RULE_LIFE_DETAILS, filled(RULE_PROTAGONIST), filled(RULE_SCENE_FOCUS)]) expect(all.split(rule)).toHaveLength(2);
+    for (const supplement of ['【棱镜宝书主角档案兼容协议】', '【棱镜宝书互动局势卡兼容协议】', '【棱镜宝书生活小档案兼容协议】']) {
+      expect(parts.system).not.toContain(supplement);
+    }
+    expect(parts.system).not.toContain(RULE_ABSOLUTE_TIME_LANGUAGE);
+    // 模板里是旧版措辞(与当前内置不同)时照常补发,让它拿到更新
+    apiSettings.prompts.summary = 'CUSTOM {{content}}\n═══ 【主角当前档案规则】(旧版) ═══\n只记主角。\n═══ 【生活小档案规则】 ═══\n只记主角的偏好。';
+    const old = buildSummaryPrompt(args).system;
+    expect(old).toContain('【棱镜宝书主角档案兼容协议】');
+    expect(old).toContain('【棱镜宝书生活小档案兼容协议】');
+    expect(old).toContain(RULE_ABSOLUTE_TIME_LANGUAGE);
   });
 
   it('preserves custom prose ordering even when a template contains a built-in heading', () => {
@@ -652,11 +675,23 @@ describe('每楼摘要字数要求', () => {
     }
   });
 
-  it('总结和二次总结的篇幅仍随字数档位切换，不受摘要字数影响', () => {
-    apiSettings.summaryMaxChars = 800;
-    for (const [verbosity, words, max] of [['detailed', '300-500', '500'], ['concise', '150-300', '400']] as const) {
+  it('L1 总结篇幅随摘要字数等比放大(1–3 倍),默认值不变;二次总结仍按输入比例', () => {
+    for (const [verbosity, chars, words] of [
+      ['detailed', 300, '300-500'], ['detailed', 50, '300-500'], ['detailed', 450, '450-750'], ['detailed', 800, '800-1333'], ['detailed', 2000, '900-1500'],
+      ['concise', 150, '150-300'], ['concise', 300, '150-300'], ['concise', 800, '400-800'], ['concise', 1200, '450-900'],
+    ] as const) {
       apiSettings.verbosity = verbosity;
-      expect(buildResummaryPrompt({ ...args, level: 1 }).system).toContain(words);
+      apiSettings.summaryMaxChars = chars;
+      const system = buildResummaryPrompt({ ...args, level: 1 }).system;
+      expect(system).toContain(`${words} 字为参考范围`);
+      expect(system).toContain('信息少可更短');
+      apiSettings.prompts.resummary = 'CUSTOM {{content}} {{resummary_words}}';
+      expect(buildResummaryPrompt({ ...args, level: 1 }).user).toContain(`CUSTOM ${args.content} ${words}`);
+      apiSettings.prompts.resummary = '';
+    }
+    apiSettings.summaryMaxChars = 800;
+    for (const [verbosity, max] of [['detailed', '500'], ['concise', '400']] as const) {
+      apiSettings.verbosity = verbosity;
       expect(buildResummaryPrompt({ ...args, content: 'x'.repeat(1000), level: 2 }).system).toContain(`summary 不得超过 ${max} 字`);
     }
   });
@@ -667,5 +702,27 @@ describe('每楼摘要字数要求', () => {
       expect(text).toContain('篇幅是上限而非填满任务');
     }
     expect(RULE_SUMMARY_WRITE).toContain('没有最低篇幅任务');
+  });
+});
+
+describe('提示词细节修订', () => {
+  it('带时间标签时 JSON 示意里没有注释行;无标签时照常给出两端时间字段', () => {
+    const withTags = buildSummaryPrompt({ ...args, hasTimeTags: true }).system;
+    expect(withTags).not.toMatch(/^\s*\/\//m);
+    expect(withTags).toContain('无需输出 time / timeStart / timeEnd 字段');
+    expect(withTags).toMatch(/"vars"\],\n\n {2}"location"/);
+    const noTags = buildSummaryPrompt({ ...args, hasTimeTags: false }).system;
+    expect(noTags).toMatch(/"vars"\],\n {2}"timeStart": "本段开始时的故事内时间/);
+    expect(noTags).toMatch(/"timeEnd": "本段结束时的故事内时间,见下方【时间规则】。",\n {2}"location"/);
+  });
+  it('合并摘要写明 floor 填标题里的楼层编号,不是段落编号里的消息序号', () => {
+    expect(BATCH_SUMMARY_PROMPT).toContain('floor 填该层标题「═══ 楼层 #编号 ═══」里的楼层编号,不是段落编号 [M消息序号-P段号] 里的消息序号');
+  });
+  it('核查清单的时间口径与无标签时的时间规则一致,保留「回忆不推进主线」', () => {
+    expect(THINKING_CHECKLIST).toContain('时间沿用证据与精度,没有新依据时沿用当前锚点,不补造未知部分,回忆不推进主线');
+    expect(THINKING_CHECKLIST).not.toContain('未知留空');
+  });
+  it('回看原文补档案写明各字段的长度上限', () => {
+    for (const rule of ['不超过 60 字', '不超过 240 字', '不超过 160 字', '外貌 240 字、性格 160 字、身份 60 字']) expect(NPC_ENRICH_PROMPT).toContain(rule);
   });
 });

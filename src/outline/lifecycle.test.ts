@@ -5,11 +5,14 @@ import type { OutlineContent, OutlineData, OutlineDraft } from './types';
 import * as host from '@/st/context';
 import * as api from '@/api/settings';
 import { requestCompletion } from '@/api/client';
+import { toast } from '@/st/toast';
 import { classifyHttpFailure, truncatedReply } from '@/api/errors';
 import { memory } from '@/memory/store';
 import { cleanBody, writeItemLogTag, writeVarLogTag } from '@/memory/timeTag';
 import { hydrateNotesSettings, notesSettings } from '@/notes/settings';
+import { loadNotes } from '@/notes/store';
 import { sourceHash } from '@/notes/source';
+import { outlineWorldInfo } from './sources';
 import { hydrateOutlineSettings, outlineSettings } from './settings';
 import { captureOutlineSource, outlineInputUnchanged, sameOutlineChat } from './source';
 import { discussionState, loadOutlineDiscussion, DISCUSSION_DATA_KEY, clearOutlineDiscussion } from './discussionStore';
@@ -28,6 +31,7 @@ import {
 // 仅替换宿主/API/记忆边界。大纲全部模块、札记 source 与正文清洗均用真实实现。
 // 即使有人错误接入正文渠道，也会由 afterEach 的网络/宿主调用断言拦截。
 vi.mock('@/api/client', () => ({ requestCompletion: vi.fn() }));
+vi.mock('@/st/toast', () => ({ toast: vi.fn() }));
 vi.mock('@/memory/store', () => ({
   memory: {
     summaries: [{ id: 'existing-leaf', kind: 'leaf', level: 0, text: '已发生摘要' }],
@@ -221,6 +225,8 @@ describe('大纲双向讨论与显式修订', () => {
     bindOutlineLifecycle();
     const wait = deferred<string>(); completion.mockReturnValueOnce(wait.promise);
     const task = sendOutlineDiscussion('慢一点', 'none');
+    // 讨论先读世界书再发请求：等请求发出后再尝试并发生成
+    await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(1));
     await generateOutline('不应并发生成', 2);
     expect(completion).toHaveBeenCalledTimes(1);
     emit('GENERATION_STARTED', 'normal', {}, false);
@@ -261,7 +267,40 @@ describe('大纲双向讨论与显式修订', () => {
     expect(recent[0].role).toBe('user'); expect(recent[3].role).toBe('assistant');
     expect(() => recentDiscussion([{ role: 'system', content: '伪装系统' } as any, messages[1]])).toThrow();
     expect(() => discussionReply('<think>未完成')).toThrow();
-    expect(() => discussionReply('字'.repeat(8001))).toThrow('8000');
+    // 完整回复超过 8000 字时截到 8000 字并注明，照常保存
+    const long = discussionReply('字'.repeat(8001));
+    expect(long.length).toBeLessThanOrEqual(8000); expect(long.endsWith('（回复超过 8000 字，已截断。）')).toBe(true);
+  });
+  it('讨论与生成规划一样带上世界书和札记中仍要落实的安排', async () => {
+    vi.mocked(outlineWorldInfo).mockResolvedValueOnce('【旧港】走私者聚集的码头');
+    notesSettings.enabled = true;
+    ctx.chatMetadata.prism_book_notes = {
+      version: 1,
+      records: [{ id: 'n1', createdAt: 1, floor: 1, swipe: 0, sourceHash: 'h', text: 'Q1. 甲？凝嘤嘤暂定: 甲', questions: [{ id: 'Q1', label: 'Q1', prompt: '甲？', proposal: '甲' }] }],
+      decisions: [{ id: 'd1', noteId: 'n1', questionId: 'Q1', text: '下次见面时交还钥匙', status: 'pending', createdAt: 2 }],
+    };
+    loadNotes();
+    completion.mockResolvedValueOnce('可以先让她犹豫。');
+    expect(await sendOutlineDiscussion('码头那条线怎么用？', 'none')).toBe(true);
+    const input = completion.mock.calls[0][1];
+    expect(input.some(m => m.content.includes('【旧港】走私者聚集的码头'))).toBe(true);
+    expect(input.some(m => m.content.includes('- 下次见面时交还钥匙'))).toBe(true);
+    expect(input.at(-1)!.content).toBe('码头那条线怎么用？');
+  });
+  it('发送前预留回答的空间：已有字数加问题再加 8000 超过 48000 时先提示，不发请求', async () => {
+    ctx.chatMetadata[DISCUSSION_DATA_KEY] = { version: 1, messages: Array.from({ length: 3 }, () => [
+      { role: 'user', content: '问'.repeat(4000) }, { role: 'assistant', content: '答'.repeat(8000) },
+    ]).flat().concat([{ role: 'user', content: '问'.repeat(2000) }, { role: 'assistant', content: '答'.repeat(2000) }]) };
+    loadOutlineDiscussion();
+    expect(await sendOutlineDiscussion('问'.repeat(10), 'none')).toBe(false);
+    expect(discussionRun.error).toContain('会超过 48000 字的上限');
+    expect(completion).not.toHaveBeenCalled();
+  });
+  it('完整的长回复截到 8000 字后保存，不白白丢掉', async () => {
+    completion.mockResolvedValueOnce('长'.repeat(9000));
+    expect(await sendOutlineDiscussion('详细说说', 'none')).toBe(true);
+    const saved = discussionState.messages.at(-1)!.content;
+    expect(saved.length).toBeLessThanOrEqual(8000); expect(saved).toContain('已截断');
   });
 });
 
@@ -298,14 +337,26 @@ describe('真实 core：草稿、确认、独立注入与阶段控制', () => {
     await expect(activateOutlineDraft(outlineState.draft!.id)).rejects.toThrow('16000');
     expect(saved()).toEqual(before); expect(outlineState.active).toEqual(old);
   });
-  it('字段错误诊断到达界面状态，保留已有数据且只请求一次', async () => {
+  it('确认加入计划时逐个阶段检查注入长度，指出第几阶段、多出多少字；第一阶段没超也拦下', async () => {
+    const value = content();
+    value.chapters[1] = { ...value.chapters[1], approach: '方'.repeat(3200), beats: Array(8).fill('要'.repeat(1600)) };
+    await saveOutlineDraft(value, '后面的阶段很长', outlineState.revision);
+    const error = await activateOutlineDraft(outlineState.draft!.id).catch(e => e as Error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error!.message).toMatch(/^第 2 阶段多 \d+ 字/); expect(error!.message).not.toContain('第 1 阶段');
+    expect(error!.message).toContain('16000');
+    expect(outlineState.active).toBeNull(); expect(saved().draft?.content.chapters[1].approach).toHaveLength(3200);
+  });
+  it('字段超长时截断后照常存为草稿，调整写成警告随草稿显示；已确认规划不变且只请求一次', async () => {
     await active(); const before = copy(saved());
     const value = content(); value.chapters[1].approach = '密'.repeat(3201);
     completion.mockResolvedValueOnce(JSON.stringify(value));
     await generateOutline('生成', 2);
-    expect(outlineRun.error).toContain('chapters[1].approach 超过3200');
-    expect(outlineRun.error).not.toContain('密');
-    expect(saved()).toEqual(before); expect(completion).toHaveBeenCalledTimes(1);
+    expect(outlineRun.error).toBe('');
+    expect(outlineState.draft!.content.chapters[1].approach).toBe('密'.repeat(3200));
+    expect(outlineRun.draftWarnings).toEqual({ draftId: outlineState.draft!.id, items: ['第2阶段·发展方式超过3200字，已截断。'] });
+    expect(outlineRun.status).toContain('已自动调整');
+    expect(saved().active).toEqual(before.active); expect(completion).toHaveBeenCalledTimes(1);
   });
   it('API 草稿不会激活，只有确认保存成功才向宿主注入非空指引', async () => {
     bindOutlineLifecycle();
@@ -579,9 +630,24 @@ describe('真实 source 与消息事件：历史失效、重新确认、托管�
 
   it('普通追加正文只更新 UI revision，不使已确认来源失效，也不自动推进阶段', async () => {
     bindOutlineLifecycle(); const old = await active(), before = copy(saved()), revision = outlineState.revision;
+    vi.mocked(toast).mockClear();
     ctx.chat.push(message('正常追加的续写')); emit('MESSAGE_SENT');
     expect(outlineState.revision).toBeGreaterThan(revision); expect(outlineSourceCurrent(old)).toBe(true);
     expect(latestInjection()).toContain('阶段一独有目标'); expect(saved()).toEqual(before);
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it('参考的正文改动使规划暂停时提示一次，说明去哪里重新启用；重新启用后不再提示', async () => {
+    bindOutlineLifecycle(); await active(); vi.mocked(toast).mockClear();
+    ctx.chat[1].mes += '改写'; emit('MESSAGE_EDITED');
+    expect(latestInjection()).toBe('');
+    expect(toast).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(toast).mock.calls[0]).toEqual(['规划参考的正文有改动，已暂停注入；可在「摘要 → 创作规划」中核对后重新启用。', 'warning']);
+    emit('MESSAGE_UPDATED'); refreshOutlineInjection();
+    expect(toast).toHaveBeenCalledTimes(1);
+    await reconfirmOutline();
+    ctx.chat.push(message('之后的续写')); emit('MESSAGE_SENT');
+    expect(toast).toHaveBeenCalledTimes(1);
   });
 
   it.each(['legacy-body', 'time-tagged-body'] as const)('%s 的真实托管旁注/札记/隐藏标记不取消请求或误伤来源', async mode => {
@@ -678,11 +744,20 @@ describe('真实 service：取消、迟到响应、错误边界与生命周期',
     expect(outlineRun.busy).toBe(false); expect(saved()).toEqual(before);
   });
 
-  it.each(['not-json-secret', JSON.stringify({ ...content(), chapters: [content().chapters[0]] })])
-  ('解析/阶段数失败保留已确认及草稿：%s', async badReply => {
-    await active(); const before = copy(saved()); completion.mockResolvedValueOnce(badReply);
+  it('解析失败保留已确认及草稿，不回显原文', async () => {
+    await active(); const before = copy(saved()); completion.mockResolvedValueOnce('not-json-secret');
     await generateOutline('生成', 2);
     expect(outlineRun.error).not.toBe(''); expect(outlineRun.error).not.toContain('not-json-secret'); expect(saved()).toEqual(before);
+  });
+
+  it('阶段数与要求不一致时照常存为草稿，并提示「要求 N 个，实际 M 个」；已确认的规划不变', async () => {
+    await active(); const before = copy(saved());
+    completion.mockResolvedValueOnce(JSON.stringify({ ...content(), chapters: [content().chapters[0]] }));
+    await generateOutline('生成', 2);
+    expect(outlineRun.error).toBe('');
+    expect(outlineState.draft!.content.chapters).toHaveLength(1);
+    expect(outlineRun.draftWarnings?.items).toEqual(['要求 2 个阶段，实际 1 个。']);
+    expect(saved().active).toEqual(before.active);
   });
 
   it.each(['normal', 'regenerate', 'swipe', 'continue'])('正文 %s 开始取消规划，结束后方可重新规划', async type => {
@@ -734,7 +809,7 @@ describe('截断与失败说明', () => {
     completion.mockRejectedValueOnce(truncatedReply({ finishReason: 'length', maxTokens: 3000 }, reply().slice(0, 120)));
     await generateOutline('重新生成', 2);
     expect(outlineRun.error).toContain('回复被截断');
-    expect(outlineRun.error).toContain('札记 → 独立 API 设置（大纲目前复用札记的 API）');
+    expect(outlineRun.error).toContain('札记 → 独立 API 设置（规划目前使用札记的 API）');
     expect(outlineRun.error).toContain('减少规划阶段数');
     expect(outlineRun.error).toContain('现有大纲没有被替换');
     expect(outlineRun.errorDetail).toContain('finish_reason=length');
@@ -746,7 +821,17 @@ describe('截断与失败说明', () => {
     completion.mockResolvedValueOnce(reply().slice(0, 150));
     await generateOutline('生成', 2);
     expect(outlineRun.error).toContain('大纲回复不完整（JSON 写到一半就结束了）');
-    expect(outlineRun.error).toContain('计划 → 规划 API 设置');
+    // 没有已确认规划时，外层折叠行叫「生成规划草稿」；界面里没有「计划」页
+    expect(outlineRun.error).toContain('摘要 → 创作规划 → 生成规划草稿 → 规划 API 设置');
+    expect(outlineRun.error).not.toContain('计划 →');
+  });
+  it('专用 API 模式且已有确认的规划时，报错指向「修改或重新生成规划」里的规划 API 设置', async () => {
+    await active();
+    Object.assign(outlineSettings, { apiMode: 'independent' });
+    Object.assign(outlineSettings.channel, { url: 'https://outline.example.invalid/v1', model: 'outline-model' });
+    completion.mockRejectedValueOnce(truncatedReply({ finishReason: 'length', maxTokens: 3000 }, reply().slice(0, 120)));
+    await generateOutline('生成', 2);
+    expect(outlineRun.error).toContain('摘要 → 创作规划 → 修改或重新生成规划 → 规划 API 设置');
   });
   it('大纲只接受完整单个 JSON：即使截断前 JSON 已闭合也按截断说明，不拼凑草稿', async () => {
     completion.mockRejectedValueOnce(truncatedReply({ finishReason: 'length', maxTokens: 3000 }, reply('截断后仍完整') + '\n补充说明写到'));

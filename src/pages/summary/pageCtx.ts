@@ -6,7 +6,7 @@
 import { apiSettings, normalizeBatchFullRecent, normalizeBatchMaxFloors } from '@/api/settings';
 import { batchBackfill, batchState, engineState, planBatchBackfill } from '@/memory/engine';
 import { refreshInjection } from '@/memory/inject';
-import { compatibilityState, convertLegacyMemory, derivedMeta, memoryWriteIssue, recomputeDerived } from '@/memory/store';
+import { compatibilityState, convertLegacyMemory, derivedMeta, LegacyBackupConflictError, memoryWriteIssue, recomputeDerived, repairBrokenSummaries } from '@/memory/store';
 import { getContext } from '@/st/context';
 import { toast } from '@/st/toast';
 import { computed, inject, onMounted, onUnmounted, ref, watch, type InjectionKey } from 'vue';
@@ -29,7 +29,13 @@ export function createSummaryPage() {
   const convertConfirmOpen = ref(false);
   const conversionPending = ref(false);
   const conversionError = ref('');
-  const conversionBusy = computed(() => conversionPending.value || compatibilityState.converting);
+  /** 上次转换留下的备份与当前旧记录不同:要用户导出核对后确认替换 */
+  const backupConflict = ref(false);
+  const replaceBackupConfirmOpen = ref(false);
+  /** 只读保护里可清理的残缺总结:先导出,再确认清理 */
+  const repairConfirmOpen = ref(false);
+  const repairPending = ref(false);
+  const conversionBusy = computed(() => conversionPending.value || repairPending.value || compatibilityState.converting);
   const editingBlocked = computed(() => compatibilityState.mode !== 'ready' || conversionBusy.value);
   let chatEpoch = 0;
   let pageActive = true;
@@ -57,33 +63,84 @@ export function createSummaryPage() {
     if (compatibilityState.mode !== 'convert') return;
     conversionChat = captureChat();
     conversionError.value = '';
+    backupConflict.value = false;
     convertConfirmOpen.value = true;
   }
-  async function confirmConversion() {
+  async function runConversion(replaceBackup: boolean) {
     if (conversionBusy.value || engineState.running) return;
     const target = conversionChat;
     if (!target || !isSameChat(target)) {
       convertConfirmOpen.value = false;
+      replaceBackupConfirmOpen.value = false;
       toast('聊天已切换，请回到要转换的聊天再确认。', 'warning');
       return;
     }
     conversionPending.value = true;
     conversionError.value = '';
     try {
-      await convertLegacyMemory();
+      await convertLegacyMemory({ replaceBackup });
       // store 负责原聊天的保存保护；页面不把旧任务结果应用到新聊天。
       if (!isSameChat(target)) return;
       recomputeDerived();
       refreshInjection();
       convertConfirmOpen.value = false;
+      replaceBackupConfirmOpen.value = false;
+      backupConflict.value = false;
       toast('旧记忆已转换并保存，原数据另有备份。', 'success');
     } catch (error) {
       if (!isSameChat(target)) return;
       conversionError.value = error instanceof Error ? error.message : String(error);
-      toast('转换没有成功：' + conversionError.value + ' 请先导出聊天检查，不要反复转换或重建。', 'error');
+      backupConflict.value = error instanceof LegacyBackupConflictError;
+      toast(backupConflict.value
+        ? '没有转换：' + conversionError.value
+        : '转换没有成功：' + conversionError.value + ' 可重新载入聊天后再试；仍失败时先导出聊天检查，不要重建。', 'error');
       convertConfirmOpen.value = false;
+      replaceBackupConfirmOpen.value = false;
     } finally {
       conversionPending.value = false;
+    }
+  }
+  function confirmConversion() { return runConversion(false); }
+  /** 已有一份不同的旧格式备份:用户导出核对后,用当前旧记录替换那份备份再转换。 */
+  function openReplaceBackupConfirm() {
+    if (conversionBusy.value || engineState.running || !backupConflict.value) return;
+    memoryWriteIssue();
+    if (compatibilityState.mode !== 'convert') return;
+    conversionChat = captureChat();
+    replaceBackupConfirmOpen.value = true;
+  }
+  function confirmReplaceBackup() { return runConversion(true); }
+
+  /* —— 只读保护:清理引用了缺失楼层的残缺总结(先导出,再确认) —— */
+  let repairChat: ChatSnapshot | null = null;
+  function openRepairConfirm() {
+    if (conversionBusy.value || engineState.running) return;
+    memoryWriteIssue();
+    if (compatibilityState.mode !== 'protected' || !compatibilityState.repairable.length) return;
+    repairChat = captureChat();
+    repairConfirmOpen.value = true;
+  }
+  async function confirmRepair() {
+    if (conversionBusy.value || engineState.running) return;
+    const target = repairChat;
+    if (!target || !isSameChat(target)) {
+      repairConfirmOpen.value = false;
+      toast('聊天已切换，请回到要清理的聊天再确认。', 'warning');
+      return;
+    }
+    repairPending.value = true;
+    try {
+      const removed = await repairBrokenSummaries();
+      if (!isSameChat(target)) return;
+      repairConfirmOpen.value = false;
+      refreshInjection();
+      toast(removed ? `已清理 ${removed} 条残缺的总结；逐楼摘要保留，之后会按设置重新合并。` : '没有需要清理的总结。', removed ? 'success' : 'info');
+    } catch (error) {
+      if (!isSameChat(target)) return;
+      repairConfirmOpen.value = false;
+      toast('清理没有完成：' + (error instanceof Error ? error.message : String(error)), 'error');
+    } finally {
+      repairPending.value = false;
     }
   }
 
@@ -174,8 +231,12 @@ export function createSummaryPage() {
   function resetViewStates() {
     chatEpoch++;
     convertConfirmOpen.value = false;
+    replaceBackupConfirmOpen.value = false;
+    repairConfirmOpen.value = false;
     conversionChat = null;
+    repairChat = null;
     conversionError.value = '';
+    backupConflict.value = false;
     closeEditors();
     for (const fn of resetHooks) fn();
   }
@@ -199,7 +260,11 @@ export function createSummaryPage() {
 
   return {
     editingBlocked, conversionBusy, allowMemoryEdit, hasLeaf, isTouch, pendingFloors,
-    conversion: { convertConfirmOpen, conversionError, openConversionConfirm, confirmConversion },
+    conversion: {
+      convertConfirmOpen, conversionError, openConversionConfirm, confirmConversion,
+      backupConflict, replaceBackupConfirmOpen, openReplaceBackupConfirm, confirmReplaceBackup,
+      repairConfirmOpen, repairPending, openRepairConfirm, confirmRepair,
+    },
     batch: { batchConfirmOpen, batchScope, batchFloors, batchCanMerge, batchMode, batchRecentInput, batchGroupInput, batchLiteText, batchEta, openBatchConfirm, runBatchBackfill },
     /** 只读保护开启、切换聊天时调用：关闭本区块的弹窗与编辑态。 */
     onCloseEditors: (fn: () => void) => register(closeHooks, fn),

@@ -8,7 +8,8 @@
  */
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, useId, watch } from 'vue';
 import BbsSelect from '@/components/BbsSelect.vue';
-import BrandMark from '@/components/BrandMark.vue';
+import { QIHENG_NAME } from '@/outline/qiheng';
+import { QIHENG_AVATAR } from '@/outline/qihengAvatar';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import Icon from '@/components/Icon.vue';
 import IconButton from '@/components/IconButton.vue';
@@ -20,7 +21,7 @@ import { copyText } from '@/st/clipboard';
 import { toast } from '@/st/toast';
 import { modalHost } from '@/state/ui';
 import { outlineState } from '@/outline/store';
-import { discussionState, clearOutlineDiscussion } from '@/outline/discussionStore';
+import { discussionState, clearOutlineDiscussion, removeOldestDiscussionTurn, discussionRoom, DISCUSSION_LIMITS } from '@/outline/discussionStore';
 import { captureOutlineSource, sameOutlineChat, type OutlineSource } from '@/outline/source';
 import type { DiscussionTarget } from '@/outline/discussionContext';
 import { discussionTimeLabel, discussionTranscript, plainPreview } from '@/outline/discussionView';
@@ -30,7 +31,7 @@ import DiscussionMessages from './DiscussionMessages.vue';
 const props = defineProps<{ disabled: boolean; unsaved: boolean; configurationIssue: string; apiDirty: boolean }>();
 const emit = defineEmits<{ (e: 'view-draft'): void; (e: 'open-api'): void }>();
 
-const MAX_ROUNDS = 12;
+const MAX_ROUNDS = DISCUSSION_LIMITS.rounds;
 // 发给规划模型的修订指令（提示词），不随界面文案改动。
 const REFINE_INSTRUCTION = '根据所选大纲与讨论生成修订草稿。以讨论中用户最新明确意见为准，模型建议不等于已被采纳；保留未要求改动的合理内容与人物边界。没有现有大纲时按讨论整理初稿。不要把讨论当成剧情事实。';
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : '操作未完成，请重试。';
@@ -47,13 +48,15 @@ onBeforeUnmount(() => { mounted = false; });
 const rounds = computed(() => discussionState.messages.length / 2);
 const lastAt = computed(() => discussionState.messages[discussionState.messages.length - 1]?.at);
 const full = computed(() => rounds.value >= MAX_ROUNDS);
-const totalChars = computed(() => discussionState.messages.reduce((sum, message) => sum + message.content.length, 0));
+/** 发送前预留一条最长回答（8000 字）的空间：本轮问题最多还能写多长。 */
+const room = computed(() => discussionRoom(discussionState.messages));
+const totalChars = computed(() => room.value.used);
 const record = computed(() => target.value === 'draft' ? outlineState.draft : target.value === 'active' ? outlineState.active : null);
 const protectedData = computed(() => /只读|版本|格式/.test(discussionState.issue));
 const locked = computed(() => props.disabled || discussionRun.busy || discussionState.saving || outlineRun.busy || protectedData.value);
 const engineOn = computed(() => engineActiveHere());
 const available = computed(() => !locked.value && engineOn.value && !props.configurationIssue);
-const canSend = computed(() => available.value && !full.value && !!question.value.trim() && question.value.length <= 4000);
+const canSend = computed(() => available.value && !full.value && !!question.value.trim() && question.value.length <= room.value.question);
 const canRefine = computed(() => available.value && rounds.value > 0);
 const stageValid = computed(() => Number.isInteger(stageCount.value) && stageCount.value >= 1 && stageCount.value <= 12);
 // 等待回复、生成草稿时仍可先写下一条；只读保护或页面锁定时不可输入。
@@ -67,12 +70,13 @@ const targetOptions = computed(() => [
 const roundsLabel = computed(() => !rounds.value ? '暂无讨论'
   : full.value ? `已满 ${MAX_ROUNDS} 轮` : rounds.value >= MAX_ROUNDS - 2 ? `${rounds.value} 轮讨论 · 上限 ${MAX_ROUNDS} 轮` : `${rounds.value} 轮讨论`);
 const placeholder = computed(() => !engineOn.value ? '当前角色未启用棱镜宝书'
-  : full.value ? `讨论已满 ${MAX_ROUNDS} 轮，清空后可继续` : '输入想法或问题…');
+  : full.value ? `讨论已满 ${MAX_ROUNDS} 轮，删除最早的一轮或清空后可继续`
+    : room.value.question <= 0 ? `讨论已接近 ${DISCUSSION_LIMITS.total} 字，删除最早的一轮或清空后可继续` : '输入想法或问题…');
 const entryText = computed(() => {
-  if (discussionRun.busy) return '规划模型正在回复…';
+  if (discussionRun.busy) return QIHENG_NAME + ' 正在输入…';
   if (generatingDraft.value) return '正在按讨论生成草稿…';
   const messages = discussionState.messages;
-  return messages.length ? '规划模型：' + plainPreview(messages[messages.length - 1].content, 90) : '讨论仅用于构思，生成草稿后再确认生效。';
+  return messages.length ? QIHENG_NAME + '：' + plainPreview(messages[messages.length - 1].content, 90) : '讨论仅用于构思，生成草稿后再确认生效。';
 });
 // 等待中的状态显示在等待气泡里；其余结果（保存、取消、清空）显示在列表末尾。
 const listNote = computed(() => discussionRun.busy ? '' : discussionRun.status);
@@ -201,6 +205,33 @@ async function confirmClear() {
   }
 }
 
+/* —— 删除最早的一轮：满 12 轮或接近字数上限时腾出空间，其余讨论保留；确认弹窗叠在对话界面之上 —— */
+const trimOpen = ref(false);
+let trimRequest: { source: OutlineSource; revision: number } | null = null;
+function requestTrim() {
+  closeMenu(true);
+  const ctx = getContext();
+  if (locked.value || !rounds.value || !ctx?.getCurrentChatId()) return;
+  trimRequest = { source: captureOutlineSource(ctx), revision: discussionState.revision };
+  nextTick(() => { trimOpen.value = true; });
+}
+async function confirmTrim() {
+  const request = trimRequest;
+  trimOpen.value = false; trimRequest = null;
+  if (!request || locked.value) return;
+  if (!sameOutlineChat(request.source) || request.revision !== discussionState.revision) {
+    error.value = '讨论已有变化，请核对后重新操作。'; return;
+  }
+  try {
+    await removeOldestDiscussionTurn(request.revision);
+    if (mounted && sameOutlineChat(request.source)) {
+      discussionRun.error = ''; discussionRun.errorDetail = ''; discussionRun.status = '已删除最早的一轮讨论。'; result.value = null;
+    }
+  } catch (cause) {
+    if (mounted && sameOutlineChat(request.source)) error.value = errorText(cause);
+  }
+}
+
 /* —— 发送：先显示待回复的问题；失败时把原文放回输入框 —— */
 async function send() {
   if (!canSend.value) return;
@@ -301,9 +332,9 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
 
 <template>
   <section class="oc-entry" :aria-labelledby="ids.entry">
-    <span class="oc-entry-avatar" aria-hidden="true"><BrandMark :size="30" /></span>
+    <img class="oc-entry-avatar" :src="QIHENG_AVATAR" alt="" width="40" height="40" />
     <div class="oc-entry-main">
-      <h4 :id="ids.entry" class="oc-entry-title">规划讨论<span v-if="rounds" class="oc-entry-count">{{ rounds }} 轮{{ lastAt ? ' · ' + discussionTimeLabel(lastAt) : '' }}</span></h4>
+      <h4 :id="ids.entry" class="oc-entry-title">和 {{ QIHENG_NAME }} 讨论规划<span v-if="rounds" class="oc-entry-count">{{ rounds }} 轮{{ lastAt ? ' · ' + discussionTimeLabel(lastAt) : '' }}</span></h4>
       <p class="oc-entry-text">{{ entryText }}</p>
     </div>
     <button type="button" class="bbs-btn oc-entry-open" :class="{ 'bbs-btn-primary': !rounds }" @click="openPanel">{{ rounds ? '继续讨论' : '开始讨论' }}<Icon name="navigate" /></button>
@@ -317,16 +348,17 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
           <div class="oc-grabber" aria-hidden="true" @pointerdown="onGrabDown" @pointermove="onGrabMove" @pointerup="onGrabUp" @pointercancel="onGrabUp"><span></span></div>
           <header class="oc-head" :inert="!!sheet">
             <IconButton icon="back" label="返回规划" @click="close" />
-            <span class="oc-avatar" aria-hidden="true"><BrandMark :size="28" /></span>
+            <img class="oc-avatar" :src="QIHENG_AVATAR" alt="" width="38" height="38" />
             <div class="oc-titles">
-              <h2 :id="ids.title">规划讨论</h2>
-              <p>棱镜宝书</p>
+              <h2 :id="ids.title">{{ QIHENG_NAME }}</h2>
+              <p :class="{ 'is-typing': discussionRun.busy }">{{ discussionRun.busy ? '正在输入…' : '规划讨论' }}</p>
             </div>
             <IconButton class="oc-expand" :icon="maximized ? 'minimize' : 'maximize'" :label="maximized ? '还原窗口' : '放大窗口'" @click="maximized = !maximized" />
             <div ref="menuWrap" class="oc-more" @keydown="onMenuKeydown">
               <IconButton ref="moreButton" icon="more" label="更多操作" aria-haspopup="menu" :aria-expanded="menuOpen" @click="menuOpen ? closeMenu(true) : openMenu()" />
               <div v-if="menuOpen" class="oc-menu" role="menu" aria-label="更多操作">
                 <button type="button" role="menuitem" class="oc-menu-item" :disabled="!rounds" @click="copyAll"><Icon name="copy" />复制全部讨论</button>
+                <button type="button" role="menuitem" class="oc-menu-item" :disabled="locked || !rounds" @click="requestTrim"><Icon name="trash" />删除最早的一轮</button>
                 <button type="button" role="menuitem" class="oc-menu-item is-danger" :disabled="locked || !rounds" @click="requestClear"><Icon name="trash" />清空讨论</button>
               </div>
             </div>
@@ -365,10 +397,20 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
                 <button type="button" class="bbs-btn bbs-btn-sm bbs-btn-primary" @click="viewDraft">查看草稿</button>
               </div>
               <div v-if="full" class="bbs-callout is-warning oc-alert-row">
-                <span>讨论已满 {{ MAX_ROUNDS }} 轮，清空讨论后可继续；规划不受影响。</span>
-                <button type="button" class="bbs-btn bbs-btn-sm" :disabled="locked" @click="requestClear">清空讨论</button>
+                <span>讨论已满 {{ MAX_ROUNDS }} 轮。删除最早的一轮或清空讨论后可继续；规划不受影响。</span>
+                <span class="oc-alert-actions">
+                  <button type="button" class="bbs-btn bbs-btn-sm" :disabled="locked" @click="requestTrim">删除最早的一轮</button>
+                  <button type="button" class="bbs-btn bbs-btn-sm" :disabled="locked" @click="requestClear">清空讨论</button>
+                </span>
               </div>
-              <p v-else-if="totalChars >= 44000" class="oc-hint">讨论记录已有 {{ totalChars }} 字，上限 48000 字。</p>
+              <div v-else-if="room.question < DISCUSSION_LIMITS.question" class="bbs-callout is-warning oc-alert-row">
+                <span>{{ room.question > 0
+                  ? `讨论记录已有 ${totalChars} 字。为回答预留 ${DISCUSSION_LIMITS.answer} 字后，本轮问题最多还能写 ${room.question} 字（总上限 ${DISCUSSION_LIMITS.total} 字）。`
+                  : `讨论记录已有 ${totalChars} 字，再加一轮会超过 ${DISCUSSION_LIMITS.total} 字的上限。删除最早的一轮或清空讨论后可继续。` }}</span>
+                <span class="oc-alert-actions">
+                  <button type="button" class="bbs-btn bbs-btn-sm" :disabled="locked" @click="requestTrim">删除最早的一轮</button>
+                </span>
+              </div>
               <p v-if="unsaved && target === 'draft'" class="oc-hint">草稿有未保存的修改，讨论只参考已保存的版本。</p>
               <p v-if="apiDirty" class="oc-hint">规划 API 设置尚未保存，使用上次保存的设置。</p>
             </div>
@@ -384,7 +426,7 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
               <button v-if="discussionRun.busy" type="button" class="oc-send is-stop" :disabled="discussionState.saving" aria-label="停止等待回复" title="停止等待回复" @click="cancelOutlineDiscussion"><Icon name="stop" /></button>
               <button v-else type="button" class="oc-send" :disabled="!canSend" aria-label="发送" title="发送（Ctrl+Enter）" @click="send"><Icon name="send" /></button>
             </div>
-            <p class="oc-caption">发送仅用于讨论<span class="oc-shortcut"> · Ctrl+Enter 发送</span><span v-if="question.length > 3600" class="oc-count"> · {{ question.length }} / 4000</span></p>
+            <p class="oc-caption">发送仅用于讨论<span class="oc-shortcut"> · Ctrl+Enter 发送</span><span v-if="question.length > Math.min(3600, room.question - 400)" class="oc-count"> · {{ question.length }} / {{ room.question }}</span></p>
           </footer>
 
           <Transition name="oc-sheet">
@@ -426,12 +468,15 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
   <ConfirmDialog v-model:open="clearOpen" title="清空讨论" confirm-text="清空" tone="danger" confirm-icon="trash" top-layer @confirm="confirmClear">
     只清空当前聊天的讨论记录，草稿、规划、札记和摘要均不受影响。
   </ConfirmDialog>
+  <ConfirmDialog v-model:open="trimOpen" title="删除最早的一轮" confirm-text="删除" tone="danger" confirm-icon="trash" top-layer @confirm="confirmTrim">
+    删除最早的一轮问答（你的提问和规划模型的回答），其余讨论保留，删除后无法恢复。草稿、规划、札记和摘要均不受影响。
+  </ConfirmDialog>
 </template>
 
 <style scoped>
 /* —— 页面内的入口卡片 —— */
 .oc-entry { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; min-width: 0; margin: 12px 0; padding: 12px 14px; border: 1px solid var(--bbs-line); border-radius: var(--bbs-radius); background: var(--bbs-surface); }
-.oc-entry-avatar, .oc-avatar { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; border-radius: 50%; background: var(--bbs-accent-soft); }
+.oc-entry-avatar, .oc-avatar { flex: 0 0 auto; border-radius: 50%; object-fit: cover; box-shadow: 0 0 0 1px var(--bbs-line); }
 .oc-entry-avatar { width: 40px; height: 40px; }
 .oc-entry-main { flex: 1 1 220px; min-width: 0; }
 .oc-entry-title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 650; line-height: 1.5; color: var(--bbs-ink); }
@@ -451,6 +496,7 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
 .oc-titles { flex: 1 1 auto; min-width: 0; }
 .oc-titles h2 { margin: 0; font: 600 16px/1.4 var(--bbs-font-reading); letter-spacing: .04em; color: var(--bbs-ink); }
 .oc-titles p { margin: 0; font-size: 12px; line-height: 1.4; color: var(--bbs-ink-muted); }
+.oc-titles p.is-typing { color: var(--bbs-accent); }
 .oc-more { position: relative; }
 .oc-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 3; display: flex; flex-direction: column; min-width: 168px; padding: 4px; border: 1px solid var(--bbs-line); border-radius: var(--bbs-radius); background: var(--bbs-surface); box-shadow: var(--bbs-shadow); }
 .oc-menu-item { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 10px; border: 0; border-radius: var(--bbs-radius-sm); background: transparent; color: var(--bbs-ink); font-size: 13px; text-align: left; cursor: pointer; }
@@ -472,6 +518,7 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
 .oc-alerts .bbs-callout { margin: 0; font-size: 12.5px; }
 .oc-alert-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
 .oc-alert-row > span { flex: 1 1 200px; min-width: 0; }
+.oc-alert-row > .oc-alert-actions { flex: 0 0 auto; display: inline-flex; flex-wrap: wrap; gap: 6px; }
 .oc-hint { margin: 0; font-size: 12px; line-height: 1.6; color: var(--bbs-ink-muted); }
 .oc-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
 .oc-rounds { flex: 1 1 auto; font-size: 12px; color: var(--bbs-ink-muted); }

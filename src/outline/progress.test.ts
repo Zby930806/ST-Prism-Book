@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   request: vi.fn(),
   toast: vi.fn(),
   setChapter: vi.fn(),
+  channelIssue: '',
   state: { active: null as OutlineActive | null },
   settings: { apiMode: 'notes', progressCheck: { auto: false, interval: 2, autoAdvance: false } },
 }));
@@ -16,10 +17,18 @@ vi.mock('@/st/toast', () => ({ toast: mocks.toast }));
 vi.mock('@/api/settings', () => ({ engineActiveHere: () => true }));
 vi.mock('@/memory/engine', () => ({ isAiFloor: (m: { is_user: boolean }) => !m.is_user }));
 vi.mock('@/memory/timeTag', () => ({ cleanBody: (s: string) => s }));
-vi.mock('./settings', () => ({ outlineSettings: mocks.settings, resolveOutlineChannel: () => ({ url: 'https://x.example/v1', model: 'm' }) }));
+vi.mock('@/memory/apply', () => ({
+  getLeaf: (m: { extra?: { bbs_leaf?: unknown } }) => m?.extra?.bbs_leaf,
+  leafValid: (m: { extra?: { bbs_leaf?: unknown } }) => !!m?.extra?.bbs_leaf,
+}));
+vi.mock('./settings', () => ({
+  outlineSettings: mocks.settings,
+  resolveOutlineChannel: () => { if (mocks.channelIssue) throw new Error(mocks.channelIssue); return { url: 'https://x.example/v1', model: 'm' }; },
+  outlineApiPath: () => '摘要 → 创作规划 → 修改或重新生成规划 → 规划 API 设置',
+}));
 vi.mock('./store', () => ({ outlineState: mocks.state, outlineSourceCurrent: () => true, outlineStorageCurrent: () => true, setOutlineChapter: mocks.setChapter }));
 
-import { autoAdvanceForCurrentStage, buildProgressContext, checkOutlineProgress, maybeAutoCheckProgress, outlineProgress, parseProgressReply, progressForCurrentStage } from './progress';
+import { autoAdvanceForCurrentStage, buildProgressContext, checkOutlineProgress, maybeAutoCheckProgress, outlineProgress, parseProgressReply, progressForCurrentStage, progressMinMessages, PROGRESS_LIMITS } from './progress';
 
 const active = (): OutlineActive => ({
   id: 'o1', createdAt: 1, sourceFloor: 0, sourceHash: 'h', brief: '', enabled: true, currentChapter: 0,
@@ -39,9 +48,10 @@ function useChat(extra: Array<{ is_user: boolean; mes: string; extra?: Record<st
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.state.active = active();
+  mocks.channelIssue = '';
   mocks.settings.progressCheck = { auto: false, interval: 2, autoAdvance: false };
   useChat();
-  Object.assign(outlineProgress, { busy: false, outlineId: '', chapter: -1, met: null, reason: '', floor: -1, auto: false, dismissed: false, error: '', errorDetail: '', advanced: null });
+  Object.assign(outlineProgress, { busy: false, outlineId: '', chapter: -1, met: null, reason: '', floor: -1, auto: false, dismissed: false, error: '', errorDetail: '', advanced: null, autoNote: '' });
 });
 
 describe('推进条件检查（全部本地 mock）', () => {
@@ -158,5 +168,69 @@ describe('满足推进条件时自动切换阶段（全部本地 mock）', () =>
     expect(await checkOutlineProgress({ auto: true })).toBe(true);
     expect(outlineProgress.advanced).toBeNull();
     expect(mocks.toast.mock.calls[0]).toEqual([expect.stringContaining('可在「摘要 → 创作规划」中切换阶段'), 'info']);
+  });
+});
+
+describe('检查材料的范围（全部本地 mock）', () => {
+  const turns = (count: number, size = 20) => Array.from({ length: count }, (_, k) => ({ is_user: k % 2 === 0, mes: `第${k + 2}段`.padEnd(size, '文') }));
+
+  it('至少看最近 max(6, 间隔×2) 条；上次检查以来的消息更多时全部带上', () => {
+    expect(progressMinMessages(2)).toBe(6); expect(progressMinMessages(10)).toBe(20);
+    useChat(turns(20));
+    const recent = String(buildProgressContext(mocks.context, active(), { minMessages: 6 })[1].content);
+    expect(recent).toContain('第21楼'); expect(recent).toContain('第16楼'); expect(recent).not.toContain('第15楼');
+    const since = String(buildProgressContext(mocks.context, active(), { since: 5, minMessages: 6 })[1].content);
+    expect(since).toContain('第6楼'); expect(since).not.toContain('第5楼'); expect(since).toContain('第21楼');
+  });
+
+  it('原文合计不超过 2 万字；放不下的较早楼层改用逐楼摘要，并注明只作辅助证据', () => {
+    const chat = turns(12, 3000).map((m, k) => ({ ...m, extra: { bbs_leaf: { text: `第${k + 2}楼的摘要` } } }));
+    useChat(chat);
+    const user = String(buildProgressContext(mocks.context, active(), { since: 1, minMessages: 6 })[1].content);
+    const original = user.slice(user.indexOf('[本阶段最近的正文'));
+    expect(original.length).toBeLessThanOrEqual(PROGRESS_LIMITS.text + 100);
+    expect(user).toContain('[较早楼层的逐楼摘要：原文放不下时的压缩记录，只作辅助证据]');
+    expect(user).toContain('第2楼摘要：第2楼的摘要');
+    expect(user).toContain('第13楼 ');
+  });
+
+  it('第二次检查从上次检查时的最后一楼之后开始（仍至少带最近 max(6, 间隔×2) 条）', async () => {
+    mocks.request.mockResolvedValue('{"met": false, "reason": "还没到"}');
+    useChat(turns(4));
+    await checkOutlineProgress();
+    useChat(turns(14));
+    await checkOutlineProgress();
+    const second = String(mocks.request.mock.calls[1][1][1].content);
+    expect(second).toContain('第6楼'); expect(second).not.toContain('第5楼 ');
+    expect(second).toContain('第15楼');
+  });
+});
+
+describe('自动检查没有完成时留下说明（全部本地 mock）', () => {
+  it('规划 API 没填好时自动检查不发请求，在卡片留下原因；手动检查照常报错', async () => {
+    mocks.channelIssue = '请在下方「规划 API 设置」里填写专用 API 的地址和模型';
+    expect(await checkOutlineProgress({ auto: true })).toBe(false);
+    expect(mocks.request).not.toHaveBeenCalled();
+    expect(outlineProgress.autoNote).toContain('自动检查推进条件没有运行');
+    expect(outlineProgress.autoNote).toContain('规划 API 设置');
+    expect(outlineProgress.error).toBe('');
+  });
+
+  it('自动检查请求失败时留下说明，下次检查成功后清除', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mocks.request.mockRejectedValueOnce(new Error('上游原文 sk-secret'));
+    expect(await checkOutlineProgress({ auto: true })).toBe(false);
+    expect(outlineProgress.autoNote).toContain('自动检查推进条件没有完成');
+    expect(outlineProgress.autoNote).not.toContain('sk-secret');
+    mocks.request.mockResolvedValueOnce('{"met": false, "reason": "还缺值班簿"}');
+    expect(await checkOutlineProgress()).toBe(true);
+    expect(outlineProgress.autoNote).toBe('');
+  });
+
+  it('关闭自动检查后不再显示旧的说明', () => {
+    outlineProgress.autoNote = '旧说明';
+    mocks.settings.progressCheck = { auto: false, interval: 2, autoAdvance: false };
+    maybeAutoCheckProgress();
+    expect(outlineProgress.autoNote).toBe('');
   });
 });

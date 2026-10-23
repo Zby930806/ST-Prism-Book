@@ -1,9 +1,9 @@
 /**
  * 世界书建议的请求内容。不发整本书：
- * - 目标书：条目索引（uid、标题、关键词、内容开头），关键词出现在本次正文里的条目和常驻条目附全文，有字数上限；
+ * - 目标书：条目索引（uid、标题、关键词、内容开头），放不下的条目只列 uid 和标题（另有上限）；关键词出现在本次正文里的条目和常驻条目附全文，有字数上限；
  * - 参考书：当前聊天启用的其他世界书中被本次正文触发的条目和常驻条目，只读，有字数上限；
- * - 角色卡描述（只读）和本次读取的新楼层正文。
- * 只读输入，不修改任何数据。
+ * - 角色卡描述（只读）和本次读取的新楼层正文（单层最多读到「正文字数上限」）。
+ * 只读输入，不修改任何数据。返回全文完整发送（没有截断）的条目 uid，只有这些条目允许整段改写。
  */
 import type { ChatMsg } from '@/api/client';
 import type { STContext } from '@/st/context';
@@ -13,6 +13,7 @@ import { entryConstant, entryContent, entryDisabled, entryKeys, entryTitle, list
 import { buildWorldbookSystem } from './prompt';
 import { PERMISSION_LABELS } from './protocol';
 import type { ReadPlan } from './source';
+import { cleanLength } from './source';
 import type { WorldData, WorldEntry, WorldbookPermission, WorldbookSettings } from './types';
 
 export interface BookSnapshot { name: string; data: WorldData }
@@ -26,7 +27,11 @@ export interface ContextInput {
   permission: WorldbookPermission;
   contentBoundary: boolean;
 }
-export interface ContextStats { floors: number; chars: number; indexed: number; omitted: number; related: number; references: number }
+/**
+ * omitted：索引里没有完整列出的条目数；compact：其中只列了 uid 和标题的条目数；
+ * truncatedFloors：超过单层上限、后半段没有读取的楼层。
+ */
+export interface ContextStats { floors: number; chars: number; indexed: number; omitted: number; compact: number; related: number; references: number; truncatedFloors: number[] }
 
 const TRUNCATED = '…（以下截断）';
 function clip(value: string, max: number): string {
@@ -50,11 +55,11 @@ function fullEntry(e: WorldEntry, max: number): string {
     + '\n关键词：' + (entryKeys(e).join('、') || '（无）') + '\n内容：\n' + clip(entryContent(e), max);
 }
 
-/** 本次正文：楼号 + 说话方 + 清洗后的正文（单层上限 floorText 字）。 */
-export function floorBlocks(ctx: STContext, floors: number[]): string[] {
+/** 本次正文：楼号 + 说话方 + 清洗后的正文（单层上限 floorText 字，默认跟随「正文字数上限」）。 */
+export function floorBlocks(ctx: STContext, floors: number[], floorText: number = L.floorText): string[] {
   return floors.map(i => {
     const m = ctx.chat[i];
-    return '第' + i + '楼 ' + (m.is_user ? '用户' : '正文') + '：\n' + clip(cleanBody(m.mes ?? ''), L.floorText);
+    return '第' + i + '楼 ' + (m.is_user ? '用户' : '正文') + '：\n' + clip(cleanBody(m.mes ?? ''), floorText);
   });
 }
 
@@ -67,20 +72,24 @@ export function relatedEntries(entries: WorldEntry[], scan: string): WorldEntry[
   return [...hit, ...constant];
 }
 
-export function buildWorldbookContext(input: ContextInput): { messages: ChatMsg[]; stats: ContextStats } {
+export function buildWorldbookContext(input: ContextInput): { messages: ChatMsg[]; stats: ContextStats; fullUids: Set<number> } {
   const { ctx, target, references, plan, read } = input;
-  const blocks = floorBlocks(ctx, plan.floors);
+  // 单层正文跟随「正文字数上限」：超长的楼最多占满整个预算，不再固定截在 8000 字
+  const floorText = Math.max(1, read.maxChars);
+  const blocks = floorBlocks(ctx, plan.floors, floorText);
+  const truncatedFloors = plan.floors.filter(i => !!ctx.chat[i] && cleanLength(ctx.chat[i]) > floorText);
   const scan = blocks.join('\n');
   const entries = listEntries(target.data);
   const related = relatedEntries(entries, scan);
 
   // 目标书索引：放得下就全部按 uid 列出；放不下时相关条目优先，其余按 uid 补足
   const lines = new Map(entries.map(e => [e, indexLine(e)]));
+  const indexBudget = read.indexChars ?? L.index;
   let chosen = entries;
   const total = entries.reduce((n, e) => n + lines.get(e)!.length + 1, 0);
-  if (total > L.index) {
+  if (total > indexBudget) {
     const picked = new Set<WorldEntry>();
-    let budget = L.index;
+    let budget = indexBudget;
     for (const e of [...related, ...entries]) {
       if (picked.has(e)) continue;
       const cost = lines.get(e)!.length + 1;
@@ -91,19 +100,37 @@ export function buildWorldbookContext(input: ContextInput): { messages: ChatMsg[
   }
   const omitted = entries.length - chosen.length;
   const index = chosen.map(e => lines.get(e)!).join('\n');
+  // 没列进索引的条目：按「[uid] 标题」紧凑列出（另有上限），让模型知道它们存在，避免新建重复的条目
+  const compactLines: string[] = [];
+  const chosenSet = new Set(chosen);
+  let compactBudget: number = L.compactIndex;
+  for (const e of entries) {
+    if (chosenSet.has(e)) continue;
+    const line = '[uid ' + e.uid + '] ' + (clip(oneLine(entryTitle(e)), 40) || '（无标题）');
+    if (line.length + 1 > compactBudget) break;
+    compactLines.push(line); compactBudget -= line.length + 1;
+  }
+  const hidden = omitted - compactLines.length;
 
   const fullTexts: string[] = [];
+  const fullUids = new Set<number>();
   let entryBudget = read.entryChars;
   for (const e of related) {
     if (entryBudget <= 0) break;
-    const textBlock = fullEntry(e, Math.min(L.entryFull, Math.max(200, entryBudget - 80)));
+    const max = Math.min(L.entryFull, Math.max(200, entryBudget - 80));
+    const textBlock = fullEntry(e, max);
     if (fullTexts.length && textBlock.length > entryBudget) continue;
     fullTexts.push(textBlock); entryBudget -= textBlock.length;
+    if (entryContent(e).length <= max) fullUids.add(Number(e.uid));
   }
 
+  const compactPart = compactLines.length
+    ? '\n\n[其余条目：索引放不下，只列 uid 和标题，内容没有发送]\n' + compactLines.join('；')
+      + '\n（对其余条目只能用 flag 提醒，或按 uid 追加内容、关键词；不要为它们新建同名或主题重复的条目。）'
+    : '';
   const targetPart = '[目标世界书：' + target.name + '，共 ' + entries.length + ' 条]\n'
-    + (entries.length ? '条目索引：\n' + index + (omitted ? '\n（索引超出预算，另有 ' + omitted + ' 条没有列出；不要为没有列出的条目提建议。）' : '') : '（这本世界书还没有条目。）')
-    + '\n\n[相关条目全文：关键词出现在本次正文里的条目和常驻条目]\n'
+    + (entries.length ? '条目索引：\n' + index + compactPart + (hidden > 0 ? '\n（另有 ' + hidden + ' 条连标题也没有列出；不要为没有列出的条目提建议。）' : '') : '（这本世界书还没有条目。）')
+    + '\n\n[相关条目全文：关键词出现在本次正文里的条目和常驻条目；末尾标「以下截断」的只发送了开头]\n'
     + (fullTexts.length ? fullTexts.join('\n\n') : '（没有）');
 
   const refLines: string[] = [];
@@ -137,6 +164,7 @@ export function buildWorldbookContext(input: ContextInput): { messages: ChatMsg[
   messages.push({ role: 'user', content: '请分析上面的新剧情正文，按系统说明只输出 JSON。当前修改权限：' + PERMISSION_LABELS[input.permission] + '。' });
   return {
     messages,
-    stats: { floors: plan.floors.length, chars: blocks.reduce((n, b) => n + b.length, 0), indexed: chosen.length, omitted, related: fullTexts.length, references: refLines.length },
+    stats: { floors: plan.floors.length, chars: blocks.reduce((n, b) => n + b.length, 0), indexed: chosen.length, omitted, compact: compactLines.length, related: fullTexts.length, references: refLines.length, truncatedFloors },
+    fullUids,
   };
 }

@@ -2,8 +2,8 @@
 /* 召回调试：把上一次召回各阶段的中间结果可视化，便于调参与排障。纯只读展示 recallDebug，响应式自动刷新。
    五个步骤用行式折叠（details.bbs-disclosure），不再卡片套卡片。 */
 import EmptyState from '@/components/EmptyState.vue';
-import { recallDebug } from '@/memory/vector/debug';
-import { recallStatusText } from '@/memory/vector/recallView';
+import { RECALL_DONE_NONE_PASSED, RECALL_DONE_OVER_BUDGET, recallDebug, type RecallDebugRerankHit, type RecallDropReason } from '@/memory/vector/debug';
+import { recallPhase, recallStatusText } from '@/memory/vector/recallView';
 import { computed } from 'vue';
 
 function fmtRecallTime(at: number): string {
@@ -17,19 +17,40 @@ function qLabel(queryIndex: number): string {
   return queryIndex >= 0 ? `Q${queryIndex + 1}` : '—';
 }
 const TIER_LABEL: Record<'full' | 'brief' | 'drop' | 'cut', string> = { full: '全文', brief: '摘要', drop: '丢弃', cut: '超出预算' };
+// 没有注入的原因:徽标上的短说明 + 悬停时的完整说明;旧快照没有原因时只显示「丢弃」
+const DROP_LABEL: Record<RecallDropReason, string> = {
+  threshold: '未达阈值',
+  limit: '超出条数',
+  history: '已在历史摘要中',
+  'keyword-cap': '关键词已收满',
+};
+const DROP_TITLE: Record<RecallDropReason, string> = {
+  threshold: '两档都没有达到阈值',
+  limit: '达到阈值，但「最终召回条数」已满',
+  history: '只够摘要档，而这条摘要已在[历史剧情摘要]中原样发送，不再重复',
+  'keyword-cap': '本轮没有重排，只由关键词命中的段落最多收 2 条',
+};
 // 候选来自哪一路(向量一路不标)
 const ROUTE_LABEL: Record<'vector' | 'keyword' | 'both' | 'sticky', string> = { vector: '向量', keyword: '关键词', both: '向量+关键词', sticky: '上轮保留' };
+// 本轮是否重排:第 4 步的标题和分数含义随之不同(旧快照没有这些字段,按已重排处理)
+const reranked = computed(() => !recallDebug.rerankIssue && !recallDebug.rerank.some(h => h.reranked === false && h.route !== 'sticky'));
 // 状态语气:决定横幅左侧圆点的配色(成功/警示/失败/进行中)
 const recallStatusKind = computed<'ok' | 'warn' | 'fail' | 'pending'>(() => {
-  const s = recallDebug.status;
-  if (s.includes('失败')) return 'fail';
-  if (s.includes('进行中')) return 'pending';
-  if (s.includes('未召回') || s.includes('未注入')) return 'warn';
-  return 'ok';
+  const phase = recallPhase(recallDebug);
+  if (phase === 'failed') return 'fail';
+  if (phase === 'running') return 'pending';
+  if (phase === 'skipped' || phase === 'none') return 'warn';
+  const base = recallDebug.status.replace(/\(复用缓存\)$/, '');
+  if (base === RECALL_DONE_OVER_BUDGET || base === RECALL_DONE_NONE_PASSED) return 'warn';
+  return recallDebug.rerankIssue || recallDebug.indexNote ? 'warn' : 'ok';
 });
 // 分数(0~1)→ 进度条宽度百分比;负分(如未知)按 0 处理
 function scorePct(score: number): number {
   return Math.max(0, Math.min(1, score)) * 100;
+}
+// 没有重排且只由关键词命中的段落没有分数可显示
+function hasScore(h: RecallDebugRerankHit): boolean {
+  return h.reranked !== false || h.similarityKnown !== false;
 }
 </script>
 
@@ -56,6 +77,7 @@ function scorePct(score: number): number {
       <p v-if="recallDebug.intent" class="bbs-dbg-intent">
         <span class="bbs-dbg-tag">INTENT</span><span class="bbs-dbg-intent-text">{{ recallDebug.intent }}</span>
       </p>
+      <p v-else-if="recallDebug.queries.length" class="bbs-dbg-empty bbs-dbg-note">没有可用的 INTENT（缺失或过长），重排改用下列全部检索语句。</p>
       <ul v-if="recallDebug.queries.length" class="bbs-dbg-qlist">
         <li v-for="(q, i) in recallDebug.queries" :key="i" class="bbs-dbg-qitem">
           <span class="bbs-dbg-qno">Q{{ i + 1 }}</span><span class="bbs-dbg-qtext">{{ q }}</span>
@@ -98,22 +120,25 @@ function scorePct(score: number): number {
     </details>
 
     <details class="bbs-disclosure bbs-dbg-step">
-      <summary>4 · Rerank 分档<span class="bbs-disclosure-meta">{{ recallDebug.rerank.length }} 条</span></summary>
+      <summary>{{ reranked ? '4 · Rerank 分档' : '4 · 分档（未重排）' }}<span class="bbs-disclosure-meta">{{ recallDebug.rerank.length }} 条</span></summary>
+      <p v-if="!reranked" class="bbs-dbg-empty bbs-dbg-note">{{ recallDebug.rerankIssue || '本轮没有重排。' }}以下分数为 embedding 相似度。</p>
       <ul v-if="recallDebug.rerank.length" class="bbs-dbg-cards">
         <li v-for="(h, i) in recallDebug.rerank" :key="i" class="bbs-dbg-card" :class="{ 'is-dropped': h.tier === 'drop' }">
           <div class="bbs-dbg-card-top">
             <span class="bbs-dbg-tier" :class="`is-${h.tier}`">{{ TIER_LABEL[h.tier] }}</span>
+            <span v-if="h.tier === 'drop' && h.dropReason" class="bbs-dbg-src" :title="DROP_TITLE[h.dropReason]">{{ DROP_LABEL[h.dropReason] }}</span>
             <span class="bbs-dbg-from" :class="{ 'is-bundle': h.source === '旧档' }">{{ h.source }}</span>
             <span v-if="h.route && h.route !== 'vector'" class="bbs-dbg-src">{{ ROUTE_LABEL[h.route] }}</span>
             <span v-if="h.downgraded" class="bbs-dbg-src" title="达到全文档，原文放不进召回预算，改发摘要">原文超出预算</span>
+            <span v-if="h.inHistory && h.dropReason !== 'history'" class="bbs-dbg-src" title="这条摘要已在[历史剧情摘要]中原样发送">已在历史摘要中</span>
             <span v-if="h.storyTime" class="bbs-dbg-when">【{{ h.storyTime }}】</span>
-            <span class="bbs-dbg-num">{{ h.rerankScore.toFixed(3) }}</span>
+            <span class="bbs-dbg-num">{{ hasScore(h) ? h.rerankScore.toFixed(3) : '—' }}</span>
           </div>
-          <div class="bbs-dbg-bar" :class="`tier-${h.tier}`"><i :style="{ width: scorePct(h.rerankScore) + '%' }"></i></div>
+          <div class="bbs-dbg-bar" :class="`tier-${h.tier}`"><i :style="{ width: scorePct(hasScore(h) ? h.rerankScore : 0) + '%' }"></i></div>
           <p class="bbs-dbg-prev">{{ h.preview }}</p>
         </li>
       </ul>
-      <p v-else class="bbs-dbg-empty">无（未执行 rerank，或没有候选）</p>
+      <p v-else class="bbs-dbg-empty">无（没有候选）</p>
     </details>
 
     <details class="bbs-disclosure bbs-dbg-step">
@@ -126,7 +151,7 @@ function scorePct(score: number): number {
 </template>
 
 <style scoped>
-/* —— 上次召回详情(调试面板):状态横幅 + 步骤分区 + 分数条卡片 —— */
+/* —— 召回调试:状态横幅 + 步骤分区 + 分数条卡片 —— */
 .bbs-dbg {
   display: flex;
   flex-direction: column;
@@ -202,6 +227,11 @@ function scorePct(score: number): number {
   margin: 0;
   font-size: 12px;
   color: var(--bbs-ink-muted);
+}
+/* 步骤内的补充说明(没有 INTENT、本轮没有重排):与下方列表留出间距 */
+.bbs-dbg-note {
+  margin-bottom: 10px;
+  line-height: 1.6;
 }
 
 /* 重写:INTENT 高亮 + Q 列表 */
