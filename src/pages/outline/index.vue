@@ -1,16 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue';
 import OutlineDiscussion from './OutlineDiscussion.vue';
+import BbsSelect from '@/components/BbsSelect.vue';
 import IconButton from '@/components/IconButton.vue';
 import ModalShell from '@/components/ModalShell.vue';
 import { getContext } from '@/st/context';
 import type { ApiChannel } from '@/api/settings';
 import { engineActiveHere } from '@/api/settings';
-import type { OutlineContent, OutlineDraft, OutlineSettings } from '@/outline/types';
+import type { OutlineContent, OutlineDraft, OutlinePace, OutlineSettings } from '@/outline/types';
 import { OUTLINE_LIMITS as L } from '@/outline/limits';
 import { validateOutlineContent } from '@/outline/protocol';
 import { outlineSettings, outlineSettingsIssue, resolveOutlineChannel, saveOutlineSettings } from '@/outline/settings';
-import { outlineRun, generateOutline, generateOutlineAuto, cancelOutline, discussionRun } from '@/outline/service';
+import { outlineRun, generateOutline, generateOutlineAuto, cancelOutline, discussionRun, refreshOutlineInjection } from '@/outline/service';
 import { autoAdvanceForCurrentStage, checkOutlineProgress, clearOutlineProgressResult, dismissOutlineProgress, outlineProgress, progressForCurrentStage, progressMinMessages } from '@/outline/progress';
 import { discussionState } from '@/outline/discussionStore';
 import { outlineStageOverflows } from '@/outline/injection';
@@ -297,6 +298,30 @@ function commitProgressInterval() {
   saveProgressSetting({ interval: n });
 }
 
+/* —— 推进节奏:写进正文注入的规则,改了立即保存,从下一次生成起生效 —— */
+const PACE_OPTIONS: Array<{ value: OutlinePace; label: string }> = [
+  { value: 'slow', label: '慢' },
+  { value: 'normal', label: '适中' },
+  { value: 'fast', label: '快' },
+];
+const PACE_HINT: Record<OutlinePace, string> = {
+  slow: '每轮回复最多推进一个剧情要点，也可以不推进；先把当前场景写充分，回复停在等你回应的地方。',
+  normal: '每轮回复最多推进一到两个剧情要点，不在一轮写完所有要点，回复停在等你回应的地方。',
+  fast: '每轮回复可以推进多个剧情要点，但不在一轮写完整个阶段。',
+};
+function savePace(value: OutlinePace) {
+  if (protectedSettings.value || value === outlineSettings.pace) return;
+  const previous = outlineSettings.pace;
+  try {
+    outlineSettings.pace = value;
+    saveOutlineSettings();
+    refreshOutlineInjection();
+  } catch (cause) {
+    outlineSettings.pace = previous;
+    error.value = errorText(cause);
+  }
+}
+
 const apiDraft = reactive(copy(outlineSettings.channel));
 const apiMode = ref(outlineSettings.apiMode);
 const apiBaseline = ref(JSON.stringify([apiMode.value, apiDraft]));
@@ -455,6 +480,11 @@ async function startAutoGeneration(confirmed = false, fromEmpty = false) {
         <div class="actions">
           <button type="button" class="bbs-btn" :disabled="locked" @click="undoAutoAdvance">退回第 {{ autoAdvanced.from + 1 }} 阶段</button>
         </div>
+      </div>
+      <div v-if="currentStage" class="planner-pace">
+        <span class="planner-pace-label">推进节奏</span>
+        <div class="planner-pace-select"><BbsSelect :model-value="outlineSettings.pace" :options="PACE_OPTIONS" aria-label="推进节奏" @update:model-value="savePace" /></div>
+        <p class="hint">{{ PACE_HINT[outlineSettings.pace] }}修改后从下一次生成起生效。</p>
       </div>
       <div v-if="currentStage" class="planner-progress">
         <div class="actions">
@@ -645,6 +675,10 @@ async function startAutoGeneration(confirmed = false, fromEmpty = false) {
 .planner-row > .bbs-btn { margin-bottom:10px; }
 .planner-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,140px),1fr)); gap:0 12px; }
 .planner-api { margin-top:10px; border-top:1px solid var(--bbs-line); }
+.planner-pace { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; margin-top:4px; padding-top:8px; border-top:1px dashed var(--bbs-line); }
+.planner-pace-label { font-size:13px; font-weight:600; color:var(--bbs-ink); }
+.planner-pace-select { flex:0 0 auto; min-width:96px; }
+.planner-pace .hint { flex:1 1 100%; margin:0; }
 .planner-progress { margin-top:4px; padding-top:4px; border-top:1px dashed var(--bbs-line); }
 .planner-progress .actions { align-items:center; }
 .outline-planner .planner-progress-auto { margin:0; flex-wrap:wrap; gap:6px; min-height:38px; }

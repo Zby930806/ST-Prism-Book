@@ -5,6 +5,7 @@ import { BUDGET_NOTICE, estimateTokens, slotBudget } from '../budget';
  * 管线(全程阻塞,对齐既定方案,不做预取/异步):
  *  0. 补索引:召回前补齐缺失的向量;最多等 Embedding 端点「超时 ×(重试次数+1)」,到时先用已有索引,补建在后台继续。
  *  1. 查询重写(必需):小模型把当前剧情重写成 INTENT + 多条检索 Q;失败则清空召回槽,不阻断正文生成。
+ *     补索引与查询重写互不依赖,同时进行;检索等两者都结束后再开始。各步用时记进召回调试。
  *  2. 各 query 各自 embed → vec/search(scopes = 当前 chat + 各 bundle,后端多路融合),
  *     纯按 embedding 得分取前 rerankCandidates 条(不套阈值)。
  *  3. rerank 候选(用 INTENT 作 query;INTENT 为空时用全部 Q 拼接)。没有重排(未填模型、接口不支持或请求失败)时
@@ -52,7 +53,9 @@ import {
   setRecallRerank,
   setRecallRerankIssue,
   setRecallRewrite,
+  setRecallRewriteStats,
   setRecallStatus,
+  setRecallTiming,
   snapshotRecallDebug,
   type RecallDebug,
   type RecallDebugRerankHit,
@@ -517,6 +520,8 @@ async function executeRecall(run: RecallRun, cfg: typeof apiSettings.vector.reca
     // 宿主回调也可能触发切换/清槽,后续 debug/cache 同样不得写入。
     assertRecallCurrent(run);
   };
+  // 本次实算开始的时刻(复用缓存或没走到实算时为 0),失败时同样记下整次用时
+  let started = 0;
   try {
     assertRecallCurrent(run);
     if (!recallWorthRunning(chat, cfg)) {
@@ -534,13 +539,22 @@ async function executeRecall(run: RecallRun, cfg: typeof apiSettings.vector.reca
       return;
     }
     resetRecallDebug();
-    // 0. 补索引:最多等 Embedding 端点「超时 ×(重试次数+1)」;到时先用已建好的部分召回,补建在后台继续
-    const index = await awaitRecall(run, () => ensureRecallIndex(signal, {
+    started = Date.now();
+    // 0. 补索引与 1. 查询重写同时进行:两者互不依赖,重写往往是最慢的一步,先后执行要白等补索引。
+    // 补索引最多等 Embedding 端点「超时 ×(重试次数+1)」;到时先用已建好的部分召回,补建在后台继续。
+    // 检索要等补索引结束:刚滚出全文窗口的楼要先进索引。
+    const indexTask = awaitRecall(run, () => ensureRecallIndex(signal, {
       maxWaitMs: endpointBudgetMs(apiSettings.vector?.embedding, 'embedding'),
       onPending: n => {
         if (ownsRecallContext(run) && !signal.aborted) setRecallIndexPending(n);
       },
-    }));
+    })).finally(() => {
+      if (ownsRecallContext(run)) setRecallTiming('index', Date.now() - started);
+    });
+    // 重写先失败时本次召回直接结束,补建照常在后台继续;这里只防止留下未处理的拒绝
+    indexTask.catch(() => {});
+    const { queryVectors, rerankQuery, intent, queries, queryDim } = await resolveQueryVectors(run);
+    const index = await indexTask;
     assertRecallCurrent(run);
     setRecallIndexPending(0);
     const indexNotes: string[] = [];
@@ -550,7 +564,6 @@ async function executeRecall(run: RecallRun, cfg: typeof apiSettings.vector.reca
       indexNotes.push(`补建向量索引失败：${index.error}本次只用已有索引召回。`);
     }
     setRecallIndexNote(indexNotes.join(''));
-    const { queryVectors, rerankQuery, intent, queries, queryDim } = await resolveQueryVectors(run);
     assertRecallCurrent(run);
     if (!queryVectors.length) {
       setRecallStatus('未召回:查询重写未产出 query');
@@ -568,10 +581,12 @@ async function executeRecall(run: RecallRun, cfg: typeof apiSettings.vector.reca
       setRecallIndexNote(indexNotes.join(''));
     }
     const topK = cfg.rerankCandidates;
+    const searchStarted = Date.now();
     const { results: found } = await awaitRecall(run, () => vecSearch(database, scopes, queryVectors, {
       topK, excludeLeafIds: excludeIds,
     }));
     assertRecallCurrent(run);
+    setRecallTiming('search', Date.now() - searchStarted);
     // 本聊天命中的楼层号按当前聊天重新定位(删掉更早的楼层后,索引里记的楼层号会过期)
     const floors = selfScope ? leafFloorMap(chat) : new Map<string, number>();
     const results = found.map(h => relocateHit(h, selfScope, floors));
@@ -592,14 +607,17 @@ async function executeRecall(run: RecallRun, cfg: typeof apiSettings.vector.reca
       storyTime: compactTimeLabel(k.leaf.storyTime.trim()), preview: previewOf(k.leaf.document),
     })));
     if (!results.length && !keyword.length) {
+      setRecallTiming('total', Date.now() - started);
       setRecallStatus('未召回:检索无候选');
       inject('');
       return;
     }
     const present = cfg.presentBoost === true ? presentNames() : [];
     const candidates = fuseRecallRoutes(results, keyword, selfScope ?? '', present, topK);
+    const rerankStarted = Date.now();
     const { ranked, issue } = await rerankCandidates(rerankQuery, candidates, run);
     assertRecallCurrent(run);
+    setRecallTiming('rerank', Date.now() - rerankStarted);
     setRecallRerankIssue(issue);
     // 在场角色加权:rerank 成功时在 rerank 分上加一点排序加成;降级时融合顺序里已经计入
     if (present.length && ranked[0]?.reranked) {
@@ -614,6 +632,7 @@ async function executeRecall(run: RecallRun, cfg: typeof apiSettings.vector.reca
     const { text, tiers, cut } = result;
     assertRecallCurrent(run);
     recordRerankDebug(pool, result, selfScope, inHistory);
+    setRecallTiming('total', Date.now() - started);
     inject(text);
     setRecallInjected(text);
     setRecallStatus(text ? '召回完成' : cut.size ? RECALL_DONE_OVER_BUDGET : RECALL_DONE_NONE_PASSED);
@@ -624,6 +643,7 @@ async function executeRecall(run: RecallRun, cfg: typeof apiSettings.vector.reca
   } catch (e) {
     // 切聊天/被更新代次取代:失败收尾也不准动共享槽、debug 或缓存。
     if (!ownsRecallContext(run)) { run.controller.abort(); return; }
+    if (started) setRecallTiming('total', Date.now() - started);
     if (run.timedOut) {
       run.controller.abort();
       setRecallStatus(`失败:${recallTimeoutText(run.deadlineMs)}`);
@@ -685,13 +705,18 @@ function recordRerankDebug(
 async function resolveQueryVectors(
   run: RecallRun,
 ): Promise<{ queryVectors: string[]; rerankQuery: string; intent: string; queries: string[]; queryDim: number }> {
-  const { intent, queries } = await awaitRecall(run, () => rewriteQuery(run.controller.signal));
+  const rewriteStarted = Date.now();
+  const { intent, queries, stats } = await awaitRecall(run, () => rewriteQuery(run.controller.signal));
   assertRecallCurrent(run);
+  setRecallTiming('rewrite', Date.now() - rewriteStarted);
   setRecallRewrite(intent, queries);
+  setRecallRewriteStats(stats ?? null);
   if (!queries.length) throw new Error('查询重写未产出任何 query');
   // 检索向量:多条 Q(INTENT 偏长偏全文,留给 rerank,不进检索向量以免稀释)
+  const embedStarted = Date.now();
   const vecs = await awaitRecall(run, () => embedTexts(queries, run.controller.signal));
   assertRecallCurrent(run);
+  setRecallTiming('embed', Date.now() - embedStarted);
   const queryVectors = vecs.map(v => encodeFloat32Base64(v));
   return { queryVectors, rerankQuery: intent || queries.join('；'), intent, queries, queryDim: vecs[0]?.length ?? 0 };
 }

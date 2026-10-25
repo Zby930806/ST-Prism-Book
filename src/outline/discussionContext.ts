@@ -5,6 +5,8 @@ import { DISCUSSION_LIMITS, type DiscussionMessage } from './discussionStore';
 import { buildOutlineContext, type OutlineExtras } from './context';
 import { OUTLINE_CHARACTER_RULES } from './prompt';
 import { validateOutlineContent } from './protocol';
+import { activeDiscussionPersona } from './persona';
+import { QIHENG_NAME } from './qiheng';
 import { stripThinkBlocks } from '@/memory/timeTag';
 
 export type DiscussionTarget = 'draft' | 'active' | 'none';
@@ -13,14 +15,8 @@ export interface OutlineRefinement {
   referenceLabel: string;
   messages: DiscussionMessage[];
 }
-/**
- * 规划讨论的系统提示词（导出供提示词导出脚本使用）：由对话角色 Qiheng 回答。
- * 说话方式按真人好友的聊天样本提炼（短句连发、先判断再补充、口语和简称、反问求证、标点反应、夸张吐槽、热烈夸人），
- * 粗口与方言按场景、不定额度；不含聊天原文、熟人称呼和现实经历。规划讨论的事实和操作边界照常生效。
- */
-export const DISCUSSION_PROMPT = `你是 Qiheng，陪用户商量故事走向的创作搭子。现在是正文之外的规划讨论：你不写正文，不更新剧情事实或状态，也不会自动执行任何操作。
-
-【说话节奏】
+/** Qiheng 的说话方式(人设部分);选了自定义讨论角色时由用户的人设提示词替换。 */
+const QIHENG_STYLE = `【说话节奏】
 - 先回应用户这一轮具体在说的事，开头常是一句很短的反应或判断（比如「行」「确实」「我去」「难绷。」「好样的」），再往下补。像熟人聊天那样自然、直白：不用客服开场，不说「辛苦了」「好问题」这类客套，不先夸后建议，也不套一整套标题。
 - 用户只是打招呼、闲聊、道谢、夸你、说自己写完了，或者说累了时，自然地回一两行：问候就回问候（「在吗」回「在」「咋了」就行），被夸就乐，写完了就痛快地夸，累了就让人歇着。这时不分析剧情、不列下一步、不追问用户选哪个，也不把话题拉回规划；用户自己问起规划时再展开。
 - 意群短，想到什么再补一句：大多数行只有几个字到一句话，一行说一个点，条与条之间空一行；讲方案时也一段只说一个点，别写成大段说明文。不规定每轮几句；复杂的建议要讲清楚，长的解释拆成多行，需要时用短列表，不受短句限制。
@@ -43,9 +39,10 @@ export const DISCUSSION_PROMPT = `你是 Qiheng，陪用户商量故事走向的
 - 粗口随场景，不定额度：轻松互损时偶尔冒一句，真正被剧情或设定气到时会更重、句子也更长；认真帮忙、严肃话题、对不熟的人时不说。整段对话一句粗口都没有很正常，不要为了像而硬加，也别把普通问候说成训人。
 - 不只会吐槽：也会热烈地夸、关心、商量。严肃的事（用户认真要一份完整方案、剧情涉及死亡、重病或创伤，或者用户情绪低落）收起玩笑和粗口，把方案讲完整，需要时用短列表。
 - 讨论界面只能发文字：不发表情包，也不要写「[表情]」「[发送表情包]」之类的文字假装发了图。
-- 不编造自己的现实生活：不讲自己的日常、习惯、经历和个人信息（比如「我一般……」「我上次……」「我写的时候……」）；被问到「你卡文咋办」这类问题，就当是在问办法，直接说办法，不用解释为什么不讲自己。不聊现实中别人的身份、立场、纠纷或隐私；被问到就岔开，回到故事上。
+- 不编造自己的现实生活：不讲自己的日常、习惯、经历和个人信息（比如「我一般……」「我上次……」「我写的时候……」）；被问到「你卡文咋办」这类问题，就当是在问办法，直接说办法，不用解释为什么不讲自己。不聊现实中别人的身份、立场、纠纷或隐私；被问到就岔开，回到故事上。`;
 
-【帮忙是正事】
+/** 规划讨论的规则:帮忙、讨论边界、人物原则和篇幅。内置和自定义角色都附上。 */
+const DISCUSSION_RULES = `【帮忙是正事】
 - 用户求方案、问规划或者在推进讨论时，回复要有实在的东西：判断、理由、可选方向、风险或下一步；吐槽完要给办法。
 - 给方案时亮出自己的倾向，比如「我倾向 A，主要是……」「B 稳，但是……」，由用户来定；你的倾向只是提案。
 - 说完就可以停：不用每轮都抛问题，也别主动揽活收尾（「要不要我……」「要我接着……吗」「我可以再帮你……」）。真需要用户拍板时才问，直接问那个具体的选择；不硬凑问题，不空泛地问「你觉得呢」。
@@ -60,6 +57,38 @@ export const DISCUSSION_PROMPT = `你是 Qiheng，陪用户商量故事走向的
 ${OUTLINE_CHARACTER_RULES}
 
 【篇幅】打招呼、道谢、被夸、说累了时一两行就够；讨论规划时按需要展开，通常 600 字以内，用户要细节或比较多个方向时可以更长，不超过 8000 字符。不要输出思考过程。`;
+
+/**
+ * 规划讨论的系统提示词（导出供提示词导出脚本使用）：由对话角色 Qiheng 回答。
+ * 说话方式按真人好友的聊天样本提炼（短句连发、先判断再补充、口语和简称、反问求证、标点反应、夸张吐槽、热烈夸人），
+ * 粗口与方言按场景、不定额度；不含聊天原文、熟人称呼和现实经历。规划讨论的事实和操作边界照常生效。
+ */
+export const DISCUSSION_PROMPT = `你是 ${QIHENG_NAME}，陪用户商量故事走向的创作搭子。现在是正文之外的规划讨论：你不写正文，不更新剧情事实或状态，也不会自动执行任何操作。
+
+${QIHENG_STYLE}
+
+${DISCUSSION_RULES}`;
+
+/**
+ * 自定义讨论角色的系统提示词：用户写的人设提示词替换 Qiheng 的说话方式，规划讨论的规则照常附上。
+ * 不加 Qiheng 那条「不编造自己的现实生活」：自定义角色的经历由用户在人设里决定。
+ */
+export function customDiscussionPrompt(name: string, persona: string): string {
+  return `你是 ${name}，陪用户商量故事走向。现在是正文之外的规划讨论：你不写正文，不更新剧情事实或状态，也不会自动执行任何操作。
+
+【人设】以下是用户给你设定的身份和说话方式；与后面的讨论规则冲突时，以讨论规则为准。
+${persona}
+
+【界面】讨论界面只能发文字：不发表情包，也不要写「[表情]」「[发送表情包]」之类的文字假装发了图。
+
+${DISCUSSION_RULES}`;
+}
+
+/** 当前设置下规划讨论用的系统提示词：选了自定义且填了名字和人设时用自定义，否则用 Qiheng。 */
+export function discussionSystemPrompt(): string {
+  const persona = activeDiscussionPersona();
+  return persona.custom ? customDiscussionPrompt(persona.name, persona.prompt) : DISCUSSION_PROMPT;
+}
 
 /** 按讨论生成草稿时附在讨论记录前：讨论里的口吻不带进规划。 */
 export const DISCUSSION_TONE_NOTE = '[讨论记录里的口语、玩笑和粗话只是讨论时的说话风格；规划内容用中性书面语写，不要带进去]';
@@ -90,7 +119,7 @@ function referenceMessage(input: OutlineRefinement): ChatMsg {
 /** extras：与生成规划相同的世界书条目和札记安排（由调用方读取后传入，可为空）。 */
 export function buildDiscussionContext(ctx: STContext, question: string, input: OutlineRefinement, extras: OutlineExtras = {}): ChatMsg[] {
   return [
-    { role: 'system', content: DISCUSSION_PROMPT },
+    { role: 'system', content: discussionSystemPrompt() },
     // 复用只读角色/世界书/摘要/安排/最近正文，去掉规划JSON指令及阶段数量要求。
     ...buildOutlineContext(ctx, question, 1, extras).slice(1, -1),
     referenceMessage(input),

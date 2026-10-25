@@ -91,6 +91,14 @@ export function withCacheBuster(path: string, stamp: number = Date.now()): strin
  *   GIF 用 format='gif' 原样上传(保留动画);其余压成 'webp'。
  */
 export async function uploadOrbImage(file: File): Promise<string> {
+  return uploadUserImage(file, 'orb');
+}
+
+/**
+ * 上传一张本地图片到 ST 服务器的 baibai_book 目录,文件名固定为 filename(扩展名随格式),
+ * 每次上传覆盖同一个文件,返回带版本参数的服务器路径串。规划讨论的自定义头像也用它(文件名 discussion-avatar)。
+ */
+export async function uploadUserImage(file: File, filename: string): Promise<string> {
   if (!file.type.startsWith('image/')) throw new Error('请选择图片文件');
 
   let base64: string;
@@ -119,7 +127,7 @@ export async function uploadOrbImage(file: File): Promise<string> {
       image: base64,
       format,
       ch_name: 'baibai_book',
-      filename: 'orb',
+      filename,
     }),
   });
   if (!res.ok) {

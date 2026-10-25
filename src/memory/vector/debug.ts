@@ -71,6 +71,41 @@ export interface RecallDebugKeywordHit {
   preview: string;
 }
 
+/** 召回各步用时(毫秒)。补索引与查询重写同时进行;没有执行的步骤不记。 */
+export interface RecallTimings {
+  /** 补建向量索引 */
+  index?: number;
+  /** 查询重写(一次对话请求) */
+  rewrite?: number;
+  /** 把检索语句向量化 */
+  embed?: number;
+  /** 向量库检索 */
+  search?: number;
+  /** 重排 */
+  rerank?: number;
+  /** 整次召回 */
+  total?: number;
+}
+
+/** 查询重写请求的规模:发送的字数、按上限精简的情况、token 用量(接口没返回时为空)、回复是否带思考内容。 */
+export interface RecallRewriteStats {
+  /** 发送的总字数(含提示词) */
+  inputChars: number;
+  /** 附带上下文(历史摘要、最近几楼全文、状态快照)精简前的字数 */
+  contextChars: number;
+  /** 实际附带的上下文字数 */
+  sentContextChars: number;
+  /** 是否按「附带上下文上限」精简过 */
+  trimmed: boolean;
+  /** 第一次请求太久没返回,补发过一次(先返回的那次算数) */
+  hedged?: boolean;
+  promptTokens?: number;
+  completionTokens?: number;
+  reasoningTokens?: number;
+  /** 回复里带了思考内容(思考型模型或没有关掉思考) */
+  thinking: boolean;
+}
+
 export interface RecallDebug {
   /** 记录时刻(Date.now);0 = 尚无记录 */
   at: number;
@@ -92,12 +127,16 @@ export interface RecallDebug {
   indexPending?: number;
   /** 索引方面的提示(补建超时、补建失败、换了 Embedding 模型等,已写成完整句子);没有时为空。旧快照没有此字段 */
   indexNote?: string;
+  /** 各步用时;复用缓存时为空。旧快照没有此字段 */
+  timings?: RecallTimings;
+  /** 查询重写请求的规模;没有执行重写时为空。旧快照没有此字段 */
+  rewriteStats?: RecallRewriteStats | null;
 }
 
 function empty(): RecallDebug {
   return {
     at: 0, status: '', intent: '', queries: [], embedding: [], keyword: [], rerank: [], injectedText: '',
-    rerankIssue: '', indexPending: 0, indexNote: '',
+    rerankIssue: '', indexPending: 0, indexNote: '', timings: {}, rewriteStats: null,
   };
 }
 
@@ -166,15 +205,26 @@ export function setRecallIndexNote(text: string): void {
   recallDebug.indexNote = text;
 }
 
+/** 记一步的用时(毫秒,取整)。 */
+export function setRecallTiming(step: keyof RecallTimings, ms: number): void {
+  recallDebug.timings = { ...(recallDebug.timings ?? {}), [step]: Math.max(0, Math.round(ms)) };
+}
+
+/** 记查询重写请求的规模。 */
+export function setRecallRewriteStats(stats: RecallRewriteStats | null): void {
+  recallDebug.rewriteStats = stats ? { ...stats } : null;
+}
+
 /** 快照当前调试结果(深拷贝),供召回缓存留存,命中时再 restore 回面板。 */
 export function snapshotRecallDebug(): RecallDebug {
   return JSON.parse(JSON.stringify(recallDebug));
 }
 
-/** 把缓存的调试快照还原到面板(命中缓存时用,免得 reset 后面板空白)。旧快照缺的字段按空值补齐。 */
+/** 把缓存的调试快照还原到面板(命中缓存时用,免得 reset 后面板空白)。旧快照缺的字段按空值补齐。
+ *  这次没有发出请求:用时和重写规模清空,免得把上次实算的用时当成这一次的。 */
 export function restoreRecallDebug(snap: RecallDebug): void {
   writes++;
-  Object.assign(recallDebug, empty(), snap);
+  Object.assign(recallDebug, empty(), snap, { timings: {}, rewriteStats: null });
 }
 
 /** 清空快照(切聊天时用):「上次召回」只说当前聊天,不把别的聊天的召回留给面板和快捷回复按钮。 */

@@ -98,22 +98,27 @@ describe('召回上下文/代次隔离（全部本地 mock）', () => {
     expect(snapshotRecallDebug().status).toContain('复用缓存');
   });
 
-  it.each(['chat', 'metadata', 'id'] as const)('只替换 %s 也禁止索引后的重写外发', async kind => {
+  // 补索引与查询重写同时开始(重写在聊天未变时就已发出),聊天变化后两者结果都作废:不再检索、不写槽、debug 和缓存不变
+  it.each(['chat', 'metadata', 'id'] as const)('只替换 %s 后，补索引结束也不再检索或写槽', async kind => {
     const pending = deferred<void>();
     mocks.index.mockReturnValueOnce(pending.promise);
     const run = runVectorRecall();
     const signal = mocks.index.mock.calls[0][0] as AbortSignal;
+    expect(mocks.rewrite).toHaveBeenCalledTimes(1);
     if (kind === 'chat') mocks.context.chat = [...mocks.context.chat];
     if (kind === 'metadata') mocks.context.chatMetadata = {};
     if (kind === 'id') mocks.context.getCurrentChatId = () => 'B';
     const before = snapshot();
     pending.resolve();
     await run;
-    expect(mocks.rewrite).not.toHaveBeenCalled();
+    expect(mocks.embed).not.toHaveBeenCalled();
+    expect(mocks.search).not.toHaveBeenCalled();
     expect(signal.aborted).toBe(true);
     expect(snapshot()).toEqual(before);
   });
 
+  // 下一步:补索引与重写、向量化并行,补索引之后接的是检索
+  const nextStage = { index: 'search', rewrite: 'embed', embed: 'search', search: 'rerank' } as const;
   it.each(stages)('%s 恢复时已切聊天，旧成功不得继续外发/写槽/debug/cache', async (stage, value) => {
     const pending = deferred<unknown>();
     mocks[stage].mockReturnValueOnce(pending.promise);
@@ -123,8 +128,8 @@ describe('召回上下文/代次隔离（全部本地 mock）', () => {
     const before = snapshot();
     pending.resolve(value);
     await run;
-    const next = stages[stages.findIndex(([name]) => name === stage) + 1];
-    if (next) expect(mocks[next[0]]).not.toHaveBeenCalled();
+    const next = stage === 'rerank' ? null : nextStage[stage];
+    if (next) expect(mocks[next]).not.toHaveBeenCalled();
     expect(snapshot()).toEqual(before);
   });
 
@@ -203,7 +208,10 @@ describe('召回上下文/代次隔离（全部本地 mock）', () => {
     const inner = mocks.index.mock.calls[0][0] as AbortSignal;
     external.abort(); await old;
     expect(inner.aborted).toBe(true);
-    expect(mocks.rewrite).not.toHaveBeenCalled();
+    // 重写与补索引同时发出,外部取消后它的信号同样中止,之后的向量化和检索不再发出
+    expect((mocks.rewrite.mock.calls[0][0] as AbortSignal).aborted).toBe(true);
+    expect(mocks.embed).not.toHaveBeenCalled();
+    expect(mocks.search).not.toHaveBeenCalled();
     await runVectorRecall();
     const before = snapshot(); pending.resolve(); await Promise.resolve();
     expect(snapshot()).toEqual(before);

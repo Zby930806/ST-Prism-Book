@@ -9,7 +9,7 @@ import IconButton from '@/components/IconButton.vue';
 import { fetchModels } from '@/api/client';
 import { describeFailure } from '@/api/errors';
 import { apiSettings, resolveVectorModel } from '@/api/settings';
-import { normalizeEndpointRetries, normalizeEndpointTimeout, normalizeQueryRewriteMaxTokens } from '@/memory/vector/params';
+import { normalizeEndpointRetries, normalizeEndpointTimeout, normalizeQueryRewriteContextChars, normalizeQueryRewriteMaxTokens } from '@/memory/vector/params';
 import { ref, useId } from 'vue';
 import ModelCombo from '../ModelCombo.vue';
 import { TONE_CLASS, type Notice } from '../notice';
@@ -38,6 +38,9 @@ function onRetriesChange(): void {
 }
 function onMaxTokensChange(): void {
   apiSettings.vector.queryRewriteMaxTokens = normalizeQueryRewriteMaxTokens(apiSettings.vector.queryRewriteMaxTokens);
+}
+function onContextCharsChange(): void {
+  apiSettings.vector.queryRewriteContextChars = normalizeQueryRewriteContextChars(apiSettings.vector.queryRewriteContextChars);
 }
 
 /**
@@ -191,8 +194,21 @@ async function pullModels() {
                 @change="onMaxTokensChange"
               />
             </label>
+            <label v-if="role === 'queryRewrite'" class="bbs-vec-io-item">
+              <span class="bbs-modal-label">附带上下文上限（字）</span>
+              <input
+                v-model.number="apiSettings.vector.queryRewriteContextChars"
+                class="bbs-input bbs-num-sm"
+                type="number"
+                min="0"
+                step="1000"
+                :disabled="!apiSettings.vector.enabled"
+                @change="onContextCharsChange"
+              />
+            </label>
           </div>
           <p v-if="role === 'queryRewrite'" class="bbs-field-hint bbs-vec-io-hint">超时后不再重试，服务商出错或限流时按「失败重试次数」重试。思考过程也计入输出上限，设得太小会得到空回复。</p>
+          <p v-if="role === 'queryRewrite'" class="bbs-field-hint bbs-vec-io-hint">附带上下文上限：重写时一起发送的历史摘要、最近几楼全文和状态快照的总字数，默认 16000，最少 2000，填 0 不限制。长聊天的上下文常有两三万字，这时一次重写要十几秒。超出上限时先保留最近几楼（最新一楼一定带上），状态快照只带随身物品、在场的人和最近几楼提到名字的人和物，再从新到旧放入历史摘要。第一次请求 12 秒还没返回时会再发一次，先返回的那次算数。每一步的用时和实际发送的字数可在「召回调试」中查看。</p>
 
           <!-- 破限:仅 Query 重写(三角色里只有它生成文本)。 -->
           <SettingRow

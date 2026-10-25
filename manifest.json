@@ -3,10 +3,10 @@
   "loading_order": 100,
   "requires": [],
   "optional": [],
-  "js": "dist/index.js?ver=1.4.0",
+  "js": "dist/index.js?ver=1.4.1",
   "generate_interceptor": "bbs_generateInterceptor",
   "author": "原作：柏柏；维护：棱镜宝书",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "auto_update": true,
   "minimum_client_version": "1.12.13"
 }

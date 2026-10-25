@@ -6,10 +6,14 @@
  * 确认后按讨论生成草稿。讨论不修改规划，也不注入正文。
  * 对话界面 Teleport 到 modalHost（与其他弹窗相同，避开 iOS 滚动容器内的定位问题）。
  */
-import { computed, nextTick, onBeforeUnmount, ref, shallowRef, useId, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, reactive, ref, shallowRef, useId, watch } from 'vue';
 import BbsSelect from '@/components/BbsSelect.vue';
-import { QIHENG_NAME } from '@/outline/qiheng';
+import { activeDiscussionPersona, personaInitial } from '@/outline/persona';
 import { QIHENG_AVATAR } from '@/outline/qihengAvatar';
+import { outlineSettings, PERSONA_NAME_MAX, PERSONA_PROMPT_MAX, saveOutlineSettings } from '@/outline/settings';
+import type { DiscussionPersona } from '@/outline/types';
+import { uploadUserImage } from '@/st/upload';
+import PersonaAvatar from './PersonaAvatar.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import Icon from '@/components/Icon.vue';
 import IconButton from '@/components/IconButton.vue';
@@ -35,7 +39,9 @@ const MAX_ROUNDS = DISCUSSION_LIMITS.rounds;
 // 发给规划模型的修订指令（提示词），不随界面文案改动。
 const REFINE_INSTRUCTION = '根据所选大纲与讨论生成修订草稿。以讨论中用户最新明确意见为准，模型建议不等于已被采纳；保留未要求改动的合理内容与人物边界。没有现有大纲时按讨论整理初稿。不要把讨论当成剧情事实。';
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : '操作未完成，请重试。';
-const ids = { title: useId(), sheet: useId(), entry: useId() };
+const ids = { title: useId(), sheet: useId(), entry: useId(), persona: useId() };
+/** 当前回答讨论的角色（Qiheng 或自定义） */
+const persona = computed(() => activeDiscussionPersona());
 
 const question = ref(''), target = ref<DiscussionTarget>('none'), stageCount = ref(6), refining = ref(false);
 const error = ref(''), touchedTarget = ref(false);
@@ -73,10 +79,10 @@ const placeholder = computed(() => !engineOn.value ? '当前角色未启用棱�
   : full.value ? `讨论已满 ${MAX_ROUNDS} 轮，删除最早的一轮或清空后可继续`
     : room.value.question <= 0 ? `讨论已接近 ${DISCUSSION_LIMITS.total} 字，删除最早的一轮或清空后可继续` : '输入想法或问题…');
 const entryText = computed(() => {
-  if (discussionRun.busy) return QIHENG_NAME + ' 正在输入…';
+  if (discussionRun.busy) return persona.value.name + ' 正在输入…';
   if (generatingDraft.value) return '正在按讨论生成草稿…';
   const messages = discussionState.messages;
-  return messages.length ? QIHENG_NAME + '：' + plainPreview(messages[messages.length - 1].content, 90) : '讨论仅用于构思，生成草稿后再确认生效。';
+  return messages.length ? persona.value.name + '：' + plainPreview(messages[messages.length - 1].content, 90) : '讨论仅用于构思，生成草稿后再确认生效。';
 });
 // 等待中的状态显示在等待气泡里；其余结果（保存、取消、清空）显示在列表末尾。
 const listNote = computed(() => discussionRun.busy ? '' : discussionRun.status);
@@ -98,6 +104,7 @@ const { onDialogKeydown } = useDialogFocus(panelEl, () => open.value, () => clos
 useBackLayer(() => open.value, () => close());
 function openPanel() { open.value = true; }
 function close() {
+  if (personaOpen.value) { closePersona(); return; }
   if (sheet.value) { closeSheet(); return; }
   closeMenu();
   open.value = false;
@@ -260,6 +267,7 @@ function openSheet() {
   if (!canRefine.value) return;
   const ctx = getContext(); if (!ctx?.getCurrentChatId()) return;
   closeMenu();
+  if (personaOpen.value) closePersona();
   sheetError.value = ''; result.value = null;
   sheet.value = snapshot(ctx);
   nextTick(() => sheetEl.value?.focus({ preventScroll: true }));
@@ -319,6 +327,66 @@ function openApi() {
   emit('open-api');
 }
 
+/* —— 讨论角色：内置 Qiheng 或自定义（名字、人设提示词、头像）；底部面板编辑，保存后从下一条回复起按新角色回答 —— */
+const personaOpen = ref(false);
+const personaEl = ref<HTMLElement | null>(null);
+const avatarInput = ref<HTMLInputElement | null>(null);
+const personaDraft = reactive<DiscussionPersona>({ mode: 'qiheng', name: '', prompt: '', avatar: '' });
+const personaError = ref(''), personaSaving = ref(false), avatarUploading = ref(false), avatarFailed = ref(false);
+/** 下面的对话区在任一底部面板打开时不可操作 */
+const sheetOpen = computed(() => !!sheet.value || personaOpen.value);
+const personaValid = computed(() => personaDraft.mode === 'qiheng' || (!!personaDraft.name.trim() && !!personaDraft.prompt.trim()));
+function openPersona() {
+  closeMenu();
+  if (sheet.value) closeSheet();
+  Object.assign(personaDraft, outlineSettings.discussionPersona);
+  personaError.value = ''; avatarFailed.value = false;
+  personaOpen.value = true;
+  nextTick(() => personaEl.value?.focus({ preventScroll: true }));
+}
+function closePersona() {
+  personaOpen.value = false; personaError.value = '';
+  nextTick(() => moreEl()?.focus({ preventScroll: true }));
+}
+useBackLayer(() => personaOpen.value, closePersona);
+function onPersonaKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape') return;
+  event.preventDefault(); event.stopPropagation(); closePersona();
+}
+async function pickAvatar(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  avatarUploading.value = true; personaError.value = '';
+  try {
+    personaDraft.avatar = await uploadUserImage(file, 'discussion-avatar');
+    avatarFailed.value = false;
+  } catch (cause) {
+    personaError.value = '头像上传失败：' + errorText(cause);
+  } finally { avatarUploading.value = false; }
+}
+function savePersona() {
+  if (!personaValid.value || personaSaving.value || avatarUploading.value) return;
+  const previous = { ...outlineSettings.discussionPersona };
+  personaSaving.value = true;
+  try {
+    outlineSettings.discussionPersona = {
+      mode: personaDraft.mode,
+      name: personaDraft.name.trim().slice(0, PERSONA_NAME_MAX),
+      prompt: personaDraft.prompt.trim().slice(0, PERSONA_PROMPT_MAX),
+      avatar: personaDraft.avatar.trim(),
+    };
+    saveOutlineSettings();
+    personaOpen.value = false;
+    discussionRun.status = `讨论角色已改为 ${persona.value.name}，之后的回复按新的设定回答。`;
+    nextTick(() => moreEl()?.focus({ preventScroll: true }));
+  } catch (cause) {
+    outlineSettings.discussionPersona = previous;
+    personaError.value = errorText(cause);
+  } finally { personaSaving.value = false; }
+}
+
 // 切聊天时清掉未发送的输入、面板与结果；普通新回复、草稿保存不清空正在输入的内容。
 let chat = getContext() ? captureOutlineSource(getContext()!) : undefined;
 watch(() => [outlineState.revision, discussionState.revision], () => {
@@ -332,9 +400,9 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
 
 <template>
   <section class="oc-entry" :aria-labelledby="ids.entry">
-    <img class="oc-entry-avatar" :src="QIHENG_AVATAR" alt="" width="40" height="40" />
+    <PersonaAvatar class="oc-entry-avatar" :size="40" />
     <div class="oc-entry-main">
-      <h4 :id="ids.entry" class="oc-entry-title">和 {{ QIHENG_NAME }} 讨论规划<span v-if="rounds" class="oc-entry-count">{{ rounds }} 轮{{ lastAt ? ' · ' + discussionTimeLabel(lastAt) : '' }}</span></h4>
+      <h4 :id="ids.entry" class="oc-entry-title">和 {{ persona.name }} 讨论规划<span v-if="rounds" class="oc-entry-count">{{ rounds }} 轮{{ lastAt ? ' · ' + discussionTimeLabel(lastAt) : '' }}</span></h4>
       <p class="oc-entry-text">{{ entryText }}</p>
     </div>
     <button type="button" class="bbs-btn oc-entry-open" :class="{ 'bbs-btn-primary': !rounds }" @click="openPanel">{{ rounds ? '继续讨论' : '开始讨论' }}<Icon name="navigate" /></button>
@@ -346,17 +414,18 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
         <section ref="panelEl" class="oc-panel" :class="{ 'is-max': maximized }" :style="panelStyle" role="dialog" aria-modal="true"
           :aria-labelledby="ids.title" tabindex="-1" @keydown="onDialogKeydown">
           <div class="oc-grabber" aria-hidden="true" @pointerdown="onGrabDown" @pointermove="onGrabMove" @pointerup="onGrabUp" @pointercancel="onGrabUp"><span></span></div>
-          <header class="oc-head" :inert="!!sheet">
+          <header class="oc-head" :inert="sheetOpen">
             <IconButton icon="back" label="返回规划" @click="close" />
-            <img class="oc-avatar" :src="QIHENG_AVATAR" alt="" width="38" height="38" />
+            <PersonaAvatar class="oc-avatar" :size="38" />
             <div class="oc-titles">
-              <h2 :id="ids.title">{{ QIHENG_NAME }}</h2>
+              <h2 :id="ids.title">{{ persona.name }}</h2>
               <p :class="{ 'is-typing': discussionRun.busy }">{{ discussionRun.busy ? '正在输入…' : '规划讨论' }}</p>
             </div>
             <IconButton class="oc-expand" :icon="maximized ? 'minimize' : 'maximize'" :label="maximized ? '还原窗口' : '放大窗口'" @click="maximized = !maximized" />
             <div ref="menuWrap" class="oc-more" @keydown="onMenuKeydown">
               <IconButton ref="moreButton" icon="more" label="更多操作" aria-haspopup="menu" :aria-expanded="menuOpen" @click="menuOpen ? closeMenu(true) : openMenu()" />
               <div v-if="menuOpen" class="oc-menu" role="menu" aria-label="更多操作">
+                <button type="button" role="menuitem" class="oc-menu-item" @click="openPersona"><Icon name="characters" />讨论角色</button>
                 <button type="button" role="menuitem" class="oc-menu-item" :disabled="!rounds" @click="copyAll"><Icon name="copy" />复制全部讨论</button>
                 <button type="button" role="menuitem" class="oc-menu-item" :disabled="locked || !rounds" @click="requestTrim"><Icon name="trash" />删除最早的一轮</button>
                 <button type="button" role="menuitem" class="oc-menu-item is-danger" :disabled="locked || !rounds" @click="requestClear"><Icon name="trash" />清空讨论</button>
@@ -364,7 +433,7 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
             </div>
           </header>
 
-          <div class="oc-context" :inert="!!sheet">
+          <div class="oc-context" :inert="sheetOpen">
             <div class="oc-ref">
               <span class="oc-ref-label">参考</span>
               <div class="oc-ref-select"><BbsSelect :model-value="target" :options="targetOptions" aria-label="讨论参考的版本" @update:model-value="pickTarget" /></div>
@@ -372,10 +441,10 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
             <p class="oc-info"><Icon name="info" />讨论仅用于构思，生成草稿后再确认生效。</p>
           </div>
 
-          <DiscussionMessages :inert="!!sheet" :messages="discussionState.messages" :pending="discussionRun.busy ? pendingQuestion : null"
+          <DiscussionMessages :inert="sheetOpen" :messages="discussionState.messages" :pending="discussionRun.busy ? pendingQuestion : null"
             :busy="discussionRun.busy" :busy-text="discussionRun.status" :note="listNote" />
 
-          <footer class="oc-foot" :inert="!!sheet">
+          <footer class="oc-foot" :inert="sheetOpen">
             <div class="oc-alerts">
               <p v-if="!engineOn" class="bbs-callout is-warning">当前角色未启用棱镜宝书，讨论与生成草稿不可用。可在设置页顶部的总开关或角色设置中启用。</p>
               <div v-else-if="configurationIssue" class="bbs-callout is-warning oc-alert-row">
@@ -457,6 +526,57 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
                 <p v-if="sheetError" class="bbs-callout is-danger" role="alert">{{ sheetError }}</p>
                 <button type="button" class="bbs-btn bbs-btn-primary oc-sheet-primary" :disabled="!canRefine || !stageValid" @click="confirmRefine">生成草稿</button>
                 <button type="button" class="oc-sheet-back" @click="closeSheet">返回讨论</button>
+              </section>
+            </div>
+          </Transition>
+
+          <Transition name="oc-sheet">
+            <div v-if="personaOpen" class="oc-scrim" @mousedown.self="closePersona">
+              <section ref="personaEl" class="oc-sheet" role="dialog" aria-modal="true" :aria-labelledby="ids.persona" tabindex="-1" @keydown="onPersonaKeydown">
+                <header class="oc-sheet-head">
+                  <div>
+                    <h3 :id="ids.persona">讨论角色</h3>
+                    <p>选择回答规划讨论的角色。自定义角色只替换说话方式，讨论的规则照常生效。</p>
+                  </div>
+                  <IconButton icon="close" label="关闭" @click="closePersona" />
+                </header>
+                <div class="oc-persona-modes" role="radiogroup" aria-label="讨论角色">
+                  <label class="oc-persona-mode" :class="{ 'is-on': personaDraft.mode === 'qiheng' }">
+                    <input v-model="personaDraft.mode" type="radio" name="oc-persona-mode" value="qiheng" />
+                    <img class="oc-persona-avatar" :src="QIHENG_AVATAR" alt="" width="36" height="36" />
+                    <span class="oc-persona-text"><strong>Qiheng</strong><small>内置角色：口语化、短句连发，会吐槽也会夸人</small></span>
+                  </label>
+                  <label class="oc-persona-mode" :class="{ 'is-on': personaDraft.mode === 'custom' }">
+                    <input v-model="personaDraft.mode" type="radio" name="oc-persona-mode" value="custom" />
+                    <img v-if="personaDraft.avatar && !avatarFailed" class="oc-persona-avatar" :src="personaDraft.avatar" alt="" width="36" height="36" @error="avatarFailed = true" />
+                    <span v-else class="oc-persona-avatar is-mono" aria-hidden="true">{{ personaInitial(personaDraft.name || '自') }}</span>
+                    <span class="oc-persona-text"><strong>自定义</strong><small>自己写名字和人设提示词，可以上传头像</small></span>
+                  </label>
+                </div>
+                <div v-if="personaDraft.mode === 'custom'" class="oc-sheet-card oc-persona-card">
+                  <label class="oc-persona-field">
+                    <span class="oc-sheet-label">名字</span>
+                    <input v-model="personaDraft.name" class="bbs-input" type="text" :maxlength="PERSONA_NAME_MAX" placeholder="讨论界面和复制的讨论记录里显示的名字" />
+                  </label>
+                  <div class="oc-persona-field">
+                    <span class="oc-sheet-label">头像<small>可以不传，不传时显示名字的第一个字</small></span>
+                    <div class="oc-persona-upload">
+                      <button type="button" class="bbs-btn bbs-btn-sm" :disabled="avatarUploading" @click="avatarInput?.click()"><Icon name="upload" />{{ avatarUploading ? '上传中…' : personaDraft.avatar ? '换一张' : '上传图片' }}</button>
+                      <button v-if="personaDraft.avatar" type="button" class="bbs-btn bbs-btn-sm" :disabled="avatarUploading" @click="personaDraft.avatar = ''; avatarFailed = false"><Icon name="trash" />移除头像</button>
+                      <input ref="avatarInput" type="file" accept="image/*" hidden @change="pickAvatar" />
+                    </div>
+                  </div>
+                  <label class="oc-persona-field">
+                    <span class="oc-sheet-label">人设提示词<small>{{ personaDraft.prompt.length }} / {{ PERSONA_PROMPT_MAX }}</small></span>
+                    <textarea v-model="personaDraft.prompt" class="bbs-input oc-persona-prompt" rows="7" :maxlength="PERSONA_PROMPT_MAX"
+                      placeholder="写这个角色的身份、性格、说话方式、口头禅和怎么称呼你等。只讨论后续方向、不替你拍板、只依据资料这些规则会自动附上，不用写。" />
+                  </label>
+                </div>
+                <p class="oc-hint">已有的讨论记录不变，之后的回复按选定的角色回答。按讨论生成草稿时，讨论里的口吻不会带进规划。</p>
+                <p v-if="personaError" class="bbs-callout is-danger" role="alert">{{ personaError }}</p>
+                <p v-else-if="!personaValid" class="oc-hint">自定义角色需要填写名字和人设提示词。</p>
+                <button type="button" class="bbs-btn bbs-btn-primary oc-sheet-primary" :disabled="!personaValid || personaSaving || avatarUploading" @click="savePersona">保存</button>
+                <button type="button" class="oc-sheet-back" @click="closePersona">返回讨论</button>
               </section>
             </div>
           </Transition>
@@ -563,6 +683,23 @@ watch(() => [outlineState.revision, discussionState.revision], () => {
 .oc-sheet-primary { width: 100%; min-height: 42px; font-size: 14px; }
 .oc-sheet-back { align-self: center; min-height: 36px; padding: 4px 12px; border: 0; border-radius: var(--bbs-radius-sm); background: transparent; color: var(--bbs-ink-soft); font-size: 13px; cursor: pointer; }
 .oc-sheet-back:hover { color: var(--bbs-accent); }
+
+/* —— 讨论角色面板 —— */
+.oc-persona-modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 8px; }
+.oc-persona-mode { position: relative; display: flex; align-items: center; gap: 10px; min-width: 0; padding: 10px 12px; border: 1px solid var(--bbs-line); border-radius: var(--bbs-radius); background: var(--bbs-bg); cursor: pointer; }
+.oc-persona-mode.is-on { border-color: var(--bbs-accent); box-shadow: 0 0 0 1px var(--bbs-accent); background: var(--bbs-surface); }
+.oc-persona-mode input { position: absolute; opacity: 0; pointer-events: none; }
+.oc-persona-mode:focus-within { outline: 2px solid var(--bbs-accent); outline-offset: 2px; }
+.oc-persona-avatar { flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%; object-fit: cover; box-shadow: 0 0 0 1px var(--bbs-line); }
+.oc-persona-avatar.is-mono { display: inline-flex; align-items: center; justify-content: center; background: var(--bbs-accent-soft); color: var(--bbs-accent); font: 650 15px/1 var(--bbs-font-reading); }
+.oc-persona-text { display: flex; flex-direction: column; min-width: 0; }
+.oc-persona-text strong { font-size: 14px; font-weight: 600; color: var(--bbs-ink); }
+.oc-persona-text small { font-size: 12px; line-height: 1.5; color: var(--bbs-ink-muted); }
+.oc-persona-card { gap: 12px; padding: 12px 14px; }
+.oc-persona-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.oc-persona-field .oc-sheet-label { flex-direction: row; align-items: baseline; justify-content: space-between; gap: 8px; }
+.oc-persona-upload { display: flex; flex-wrap: wrap; gap: 6px; }
+.oc-persona-prompt { min-height: 132px; resize: vertical; font-size: 13.5px; line-height: 1.7; }
 
 .oc-mask :is(button, input, textarea):focus-visible { outline: 2px solid var(--bbs-accent); outline-offset: 2px; }
 

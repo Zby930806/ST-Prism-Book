@@ -13,7 +13,7 @@ import { parseOutlineReply, validateOutlineContent } from './protocol';
 import { buildOutlineContext } from './context';
 import { OUTLINE_PROMPT } from './prompt';
 import { OUTLINE_LIMITS as L } from './limits';
-import { renderOutlineGuidance } from './injection';
+import { outlineGuidanceLength, renderOutlineGuidance } from './injection';
 import type { OutlineActive } from './types';
 
 // 仅 mock 外部边界；四个大纲模块、札记设置和正文清洗均使用真实实现。
@@ -370,14 +370,33 @@ describe('放宽篇幅、角色连续性与安全诊断', () => {
     const value = content(); value.premise = '前'.repeat(L.premise);
     value.constraints = Array(8).fill('约'.repeat(L.constraint));
     const record = active(value);
-    const remaining = L.injection - renderOutlineGuidance(record).length;
+    // 按各推进节奏里最长的注入文字检查上限:切换节奏后也不会超出
+    const remaining = L.injection - outlineGuidanceLength(record);
     expect(remaining).toBeGreaterThan(0);
     value.chapters[0].goal += '目'.repeat(remaining);
     expect(() => validateOutlineContent(value)).not.toThrow();
-    expect(renderOutlineGuidance(record)).toHaveLength(L.injection);
+    expect(outlineGuidanceLength(record)).toBe(L.injection);
+    expect(() => renderOutlineGuidance(record, 'slow')).not.toThrow();
+    expect(renderOutlineGuidance(record, 'fast').length).toBeLessThanOrEqual(L.injection);
     value.chapters[0].goal += '目';
     expect(() => validateOutlineContent(value)).not.toThrow();
     expect(() => renderOutlineGuidance(record)).toThrow('16000');
+  });
+  it('推进节奏:默认适中;慢每轮最多一个要点,适中最多一到两个,快可以多个但不一轮写完整个阶段', () => {
+    const record = active(content());
+    const normal = renderOutlineGuidance(record);
+    expect(normal).toBe(renderOutlineGuidance(record, 'normal'));
+    expect(normal).toContain('每轮最多推进一到两个剧情要点，不在一轮写完所有要点，回复停在需要用户回应的地方');
+    expect(normal).toContain('剧情要点（尚未发生；按顺序分多轮展开，每轮最多推进一到两个）');
+    const slow = renderOutlineGuidance(record, 'slow');
+    expect(slow).toContain('每轮最多推进一个剧情要点，也可以一个都不推进');
+    expect(slow).toContain('每轮最多推进一个）');
+    const fast = renderOutlineGuidance(record, 'fast');
+    expect(fast).toContain('每轮可以推进多个剧情要点，但不在一轮写完整个阶段');
+    expect(fast).not.toContain('回复停在需要用户回应的地方');
+    for (const text of [slow, normal, fast]) expect(text).toContain('不提前执行后续阶段');
+    // 生成规划时要求阶段经过多轮回复展开
+    expect(OUTLINE_PROMPT).toContain('每个阶段要在正文中经过多轮回复才能逐步展开');
   });
 });
 

@@ -98,6 +98,22 @@ export function normalizeQueryRewriteMaxTokens(v: unknown): number {
   return n === null ? QUERY_REWRITE_MAX_TOKENS_DEFAULT : Math.max(QUERY_REWRITE_MAX_TOKENS_MIN, Math.floor(n));
 }
 
+/**
+ * 查询重写附带上下文(历史摘要、最近几楼全文、状态快照)的字数上限。0 = 不限制。
+ * 实测(硅基流动 Qwen3.5-27B,2026-10-25):约 2.5 万字的上下文要 10–14 秒,1.5 万字和 8000 字都在 4–10 秒之间、
+ * 差别被服务商排队的波动盖过。所以默认只把很长的上下文压到 16000 字,不再往下压,免得白白少带资料。
+ */
+export const QUERY_REWRITE_CONTEXT_DEFAULT = 16000;
+export const QUERY_REWRITE_CONTEXT_MIN = 2000;
+
+/** 附带上下文上限:0 = 不限制;其余为不小于 2000 的整数;非数字或负数回退默认 16000。 */
+export function normalizeQueryRewriteContextChars(v: unknown): number {
+  const n = finiteNumber(v);
+  if (n === null || n < 0) return QUERY_REWRITE_CONTEXT_DEFAULT;
+  if (n === 0) return 0;
+  return Math.max(QUERY_REWRITE_CONTEXT_MIN, Math.floor(n));
+}
+
 /** 端点的运行时副本:超时与重试按上面的规则收敛,地址、密钥、模型原样保留。 */
 export function runtimeEndpoint(ep: VectorEndpoint, role: VectorRole): VectorEndpoint {
   return {

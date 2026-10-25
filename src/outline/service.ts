@@ -145,7 +145,7 @@ export function buildOutlineInjection(): string {
   if (!engineActiveHere() || outlineState.saving || !outlineStorageCurrent()) return '';
   const active = outlineState.active;
   if (!active?.enabled || !outlineSourceCurrent(active)) return '';
-  try { return renderOutlineGuidance(active); }
+  try { return renderOutlineGuidance(active, outlineSettings.pace); }
   catch { outlineRun.status = '当前阶段太长，没有发给正文；请精简后重新确认。'; return ''; }
 }
 /** 正在生效的规划参考的正文是否还在；从「在」变为「不在」时提示一次（换了规划、重新启用或切换聊天不算）。 */

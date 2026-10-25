@@ -99,7 +99,7 @@ describe('查询重写请求', () => {
       .mockResolvedValueOnce(rejected(400, 'Unrecognized request argument supplied: enable_thinking'))
       .mockResolvedValueOnce(reply('INTENT: 意图\nQ: 查询'))
       .mockResolvedValueOnce(reply('INTENT: 意图\nQ: 第二次'));
-    await expect(rewriteQuery()).resolves.toEqual({ intent: '意图', queries: ['查询'] });
+    await expect(rewriteQuery()).resolves.toMatchObject({ intent: '意图', queries: ['查询'] });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(sentBody(fetchMock, 0)).toMatchObject({ enable_thinking: false, top_p: 0.8 });
     expect(sentBody(fetchMock, 1)).not.toHaveProperty('enable_thinking');
@@ -114,7 +114,7 @@ describe('查询重写请求', () => {
       .mockResolvedValueOnce(rejected(400, 'unknown parameter: enable_thinking'))
       .mockResolvedValueOnce(rejected(422, 'top_p is not supported for this model'))
       .mockResolvedValueOnce(reply('Q: 查询'));
-    await expect(rewriteQuery()).resolves.toEqual({ intent: '', queries: ['查询'] });
+    await expect(rewriteQuery()).resolves.toMatchObject({ intent: '', queries: ['查询'] });
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(sentBody(fetchMock, 2)).not.toHaveProperty('enable_thinking');
     expect(sentBody(fetchMock, 2)).not.toHaveProperty('top_p');
@@ -144,7 +144,7 @@ describe('查询重写请求', () => {
     fetchMock.mockResolvedValueOnce(new Response('busy', { status: 503 })).mockResolvedValueOnce(reply('Q: 查询'));
     const pending = rewriteQuery();
     await vi.advanceTimersByTimeAsync(1000);
-    await expect(pending).resolves.toEqual({ intent: '', queries: ['查询'] });
+    await expect(pending).resolves.toMatchObject({ intent: '', queries: ['查询'] });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -160,5 +160,61 @@ describe('查询重写请求', () => {
   it('正文为空、只有思考内容时说明原因', async () => {
     fetchMock.mockResolvedValueOnce(reply('', { reasoning_content: '想了很久' }));
     await expect(rewriteQuery()).rejects.toThrow(/只输出了思考过程/);
+  });
+
+  it('记下请求规模:发送字数、token 用量和是否带了思考内容', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: 'INTENT: 意图\nQ: 查询', reasoning_content: '先想想' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1200, completion_tokens: 80, completion_tokens_details: { reasoning_tokens: 40 } },
+    }), { status: 200 }));
+    const result = await rewriteQuery();
+    expect(result.stats).toMatchObject({ promptTokens: 1200, completionTokens: 80, reasoningTokens: 40, thinking: true, trimmed: false });
+    expect(result.stats!.inputChars).toBeGreaterThan(0);
+
+    fetchMock.mockResolvedValueOnce(reply('INTENT: 意图\nQ: 查询'));
+    const plain = (await rewriteQuery()).stats!;
+    expect(plain.thinking).toBe(false);
+    expect(plain.promptTokens).toBeUndefined();
+  });
+
+  const hangUntilAborted = (signals: AbortSignal[]) => (_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+    signals.push(init.signal!);
+    init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+  });
+
+  it('第一次请求 12 秒还没返回时补发一次,先返回的算数,另一个取消', async () => {
+    vi.useFakeTimers();
+    const signals: AbortSignal[] = [];
+    fetchMock.mockImplementationOnce(hangUntilAborted(signals)).mockResolvedValueOnce(reply('INTENT: 意图\nQ: 补发的查询'));
+    const pending = rewriteQuery();
+    await vi.advanceTimersByTimeAsync(11000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await pending;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.queries).toEqual(['补发的查询']);
+    expect(result.stats?.hedged).toBe(true);
+    expect(signals[0].aborted).toBe(true);
+  });
+
+  it('补发后两次都失败才报错;外部取消时两次都取消', async () => {
+    vi.useFakeTimers();
+    Object.assign(mocks.settings.vector.queryRewrite, { timeoutSec: 20, retries: 0 });
+    const signals: AbortSignal[] = [];
+    fetchMock.mockImplementation(hangUntilAborted(signals));
+    const pending = rewriteQuery();
+    const check = expect(pending).rejects.toThrow(/超时/);
+    await vi.advanceTimersByTimeAsync(20000); // 第一次超时,补发的那次还在等
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(12000); // 补发的那次也超时
+    await check;
+
+    const external = new AbortController();
+    const cancelled = rewriteQuery(external.signal);
+    const checkCancel = expect(cancelled).rejects.toThrow(/已取消/);
+    await vi.advanceTimersByTimeAsync(12000);
+    external.abort();
+    await checkCancel;
+    expect(signals.slice(-2).every(s => s.aborted)).toBe(true);
   });
 });

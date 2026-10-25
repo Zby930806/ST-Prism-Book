@@ -1,18 +1,18 @@
 <script setup lang="ts">
 /**
- * 规划讨论的消息列表：用户消息靠右；Qiheng 的回复靠左，带头像和名字，按空行拆成一条条气泡，像连发的消息。
+ * 规划讨论的消息列表：用户消息靠右；讨论角色（默认 Qiheng，可换成自定义角色）的回复靠左，带头像和名字，按空行拆成一条条气泡，像连发的消息。
  * 说话人旁显示时间（prism.15 之前的记录没有时间）。发送后先显示待回复的问题和「正在输入」，回复保存后由讨论记录替换。
  * 新消息出现时滚到底部。
  */
-import { nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import IconButton from '@/components/IconButton.vue';
 import type { DiscussionMessage } from '@/outline/discussionStore';
 import { discussionFullTime, discussionTimeLabel, splitReplyBubbles } from '@/outline/discussionView';
-import { QIHENG_GREETING, QIHENG_NAME } from '@/outline/qiheng';
-import { QIHENG_AVATAR, QIHENG_PORTRAIT } from '@/outline/qihengAvatar';
+import { activeDiscussionPersona } from '@/outline/persona';
 import { copyText } from '@/st/clipboard';
 import { toast } from '@/st/toast';
 import DiscussionText from './DiscussionText.vue';
+import PersonaAvatar from './PersonaAvatar.vue';
 
 const props = defineProps<{
   messages: DiscussionMessage[];
@@ -26,6 +26,7 @@ const props = defineProps<{
 }>();
 
 const isoTime = (at: number) => new Date(at).toISOString();
+const persona = computed(() => activeDiscussionPersona());
 const scroller = ref<HTMLElement | null>(null);
 function scrollToEnd() {
   const el = scroller.value;
@@ -48,9 +49,10 @@ async function copy(index: number, text: string) {
 <template>
   <div ref="scroller" class="dm" role="log" aria-label="讨论记录" tabindex="0">
     <div v-if="!messages.length && !pending" class="dm-empty">
-      <img class="dm-empty-portrait" :src="QIHENG_PORTRAIT" :alt="QIHENG_NAME" width="112" height="112" />
-      <div class="dm-empty-greeting" :aria-label="QIHENG_NAME + '：' + QIHENG_GREETING.join('，')">
-        <p v-for="line in QIHENG_GREETING" :key="line" class="dm-bubble dm-greeting-line" aria-hidden="true">{{ line }}</p>
+      <PersonaAvatar class="dm-empty-portrait" :size="112" portrait />
+      <p v-if="persona.custom" class="dm-empty-name">{{ persona.name }}</p>
+      <div v-if="persona.greeting.length" class="dm-empty-greeting" :aria-label="persona.name + '：' + persona.greeting.join('，')">
+        <p v-for="line in persona.greeting" :key="line" class="dm-bubble dm-greeting-line" aria-hidden="true">{{ line }}</p>
       </div>
       <p class="dm-empty-text">可以就人物动机、节奏或走向提问。讨论不修改规划，也不注入正文。</p>
     </div>
@@ -61,9 +63,9 @@ async function copy(index: number, text: string) {
           <div class="dm-bubble"><p class="dm-plain">{{ message.content }}</p></div>
         </template>
         <template v-else>
-          <img class="dm-avatar" :src="QIHENG_AVATAR" alt="" width="34" height="34" />
+          <PersonaAvatar class="dm-avatar" :size="34" />
           <div class="dm-body">
-            <p class="dm-who">{{ QIHENG_NAME }}<time v-if="message.at" class="dm-time" :datetime="isoTime(message.at)" :title="discussionFullTime(message.at)">{{ discussionTimeLabel(message.at) }}</time></p>
+            <p class="dm-who">{{ persona.name }}<time v-if="message.at" class="dm-time" :datetime="isoTime(message.at)" :title="discussionFullTime(message.at)">{{ discussionTimeLabel(message.at) }}</time></p>
             <div class="dm-stack">
               <div v-for="(part, k) in splitReplyBubbles(message.content)" :key="k" class="dm-bubble"><DiscussionText :text="part" /></div>
             </div>
@@ -79,9 +81,9 @@ async function copy(index: number, text: string) {
         <div class="dm-bubble"><p class="dm-plain">{{ pending.text }}</p></div>
       </li>
       <li v-if="busy" class="dm-msg is-model is-typing">
-        <img class="dm-avatar" :src="QIHENG_AVATAR" alt="" width="34" height="34" />
+        <PersonaAvatar class="dm-avatar" :size="34" />
         <div class="dm-body">
-          <p class="dm-who">{{ QIHENG_NAME }}</p>
+          <p class="dm-who">{{ persona.name }}</p>
           <div class="dm-bubble">
             <span class="dm-dots" aria-hidden="true"><i></i><i></i><i></i></span>
             <span class="dm-typing-text">{{ busyText || '正在输入…' }}</span>
@@ -98,6 +100,7 @@ async function copy(index: number, text: string) {
 .dm:focus-visible { outline: 2px solid var(--bbs-accent); outline-offset: -2px; }
 .dm-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 100%; padding: 24px 12px; text-align: center; }
 .dm-empty-portrait { width: 112px; height: 112px; border-radius: 28px; object-fit: cover; box-shadow: 0 0 0 1px var(--bbs-line); }
+.dm-empty-name { margin: 0; font: 600 16px/1.4 var(--bbs-font-reading); letter-spacing: .04em; color: var(--bbs-ink); }
 .dm-empty-greeting { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .dm-greeting-line { margin: 0; border: 1px solid var(--bbs-line); background: var(--bbs-surface); color: var(--bbs-ink); }
 .dm-empty-text { max-width: 30em; margin: 4px 0 0; font-size: 13px; line-height: 1.7; color: var(--bbs-ink-muted); text-wrap: balance; }

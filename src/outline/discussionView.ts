@@ -1,5 +1,5 @@
 import type { DiscussionMessage } from './discussionStore';
-import { QIHENG_NAME } from './qiheng';
+import { activeDiscussionPersona } from './persona';
 
 /**
  * 规划讨论的显示辅助。模型回复常带 Markdown（标题、列表、粗体等），这里解析成结构化数据，
@@ -145,7 +145,7 @@ export function discussionFullTime(at: number): string {
 /** 「复制全部讨论」的文本：按轮次排列，标明说话人；有时间的附上时间。 */
 export function discussionTranscript(messages: DiscussionMessage[]): string {
   return messages.map(message => {
-    const who = message.role === 'user' ? '你' : QIHENG_NAME;
+    const who = message.role === 'user' ? '你' : activeDiscussionPersona().name;
     const when = message.at ? `（${discussionFullTime(message.at)}）` : '';
     return `${who}${when}：\n${message.content.trim()}`;
   }).join('\n\n');

@@ -52,6 +52,34 @@ function scorePct(score: number): number {
 function hasScore(h: RecallDebugRerankHit): boolean {
   return h.reranked !== false || h.similarityKnown !== false;
 }
+/* 各步用时:毫秒 → 「1.2 秒」;没有记录的步骤不显示 */
+function sec(ms: number | undefined): string {
+  return typeof ms === 'number' ? `${(ms / 1000).toFixed(1)} 秒` : '';
+}
+const timings = computed(() => recallDebug.timings ?? {});
+const timingLine = computed(() => {
+  const t = timings.value;
+  const steps: Array<[string, number | undefined]> = [['补索引', t.index], ['重写', t.rewrite], ['向量化', t.embed], ['检索', t.search], ['重排', t.rerank]];
+  const parts = steps.filter(([, ms]) => typeof ms === 'number').map(([name, ms]) => `${name} ${sec(ms)}`);
+  if (!parts.length) return '';
+  return `${typeof t.total === 'number' ? `共用时 ${sec(t.total)}：` : ''}${parts.join('，')}${typeof t.index === 'number' && typeof t.rewrite === 'number' ? '（补索引与重写同时进行）' : ''}`;
+});
+const stepMeta = (count: string, ...ms: Array<number | undefined>) => {
+  const known = ms.filter((v): v is number => typeof v === 'number');
+  return known.length ? `${count} · ${sec(known.reduce((a, b) => a + b, 0))}` : count;
+};
+// 查询重写这次发了多少:字数、是否按上限精简、token 用量(接口返回了才显示)
+const rewriteLine = computed(() => {
+  const s = recallDebug.rewriteStats;
+  if (!s) return '';
+  const context = s.trimmed
+    ? `附带上下文按上限精简为 ${s.sentContextChars} 字（原本 ${s.contextChars} 字）`
+    : `附带上下文 ${s.sentContextChars} 字`;
+  const tokens = typeof s.promptTokens === 'number' && typeof s.completionTokens === 'number'
+    ? `；输入 ${s.promptTokens} token，输出 ${s.completionTokens} token` : '';
+  const hedged = s.hedged ? '第一次请求 12 秒没有返回，补发了一次，用的是先返回的那次。' : '';
+  return `发送 ${s.inputChars} 字，${context}${tokens}。${hedged}`;
+});
 </script>
 
 <template>
@@ -69,11 +97,16 @@ function hasScore(h: RecallDebugRerankHit): boolean {
       <span class="bbs-dbg-status-text">{{ recallStatusText(recallDebug) }}</span>
       <span class="bbs-dbg-time">{{ fmtRecallTime(recallDebug.at) }}</span>
     </div>
+    <p v-if="timingLine" class="bbs-dbg-timing">{{ timingLine }}</p>
 
-    <!-- 五个阶段各自可折叠,默认收起;行尾带计数 -->
+    <!-- 五个阶段各自可折叠,默认收起;行尾带计数和用时 -->
     <div class="bbs-dbg-steps">
     <details class="bbs-disclosure bbs-dbg-step">
-      <summary>1 · 查询重写<span class="bbs-disclosure-meta">{{ recallDebug.queries.length }} 条查询</span></summary>
+      <summary>1 · 查询重写<span class="bbs-disclosure-meta">{{ stepMeta(`${recallDebug.queries.length} 条查询`, timings.rewrite) }}</span></summary>
+      <p v-if="recallDebug.rewriteStats?.thinking" class="bbs-callout is-warning bbs-dbg-callout">
+        重写模型这次先输出了思考内容{{ recallDebug.rewriteStats.reasoningTokens ? `（${recallDebug.rewriteStats.reasoningTokens} token）` : '' }}，这是重写变慢最常见的原因。可以在「设置 → 向量记忆 → Query 重写」换一个不思考的模型，或在服务商处关闭思考。
+      </p>
+      <p v-if="rewriteLine" class="bbs-dbg-empty bbs-dbg-note">{{ rewriteLine }}</p>
       <p v-if="recallDebug.intent" class="bbs-dbg-intent">
         <span class="bbs-dbg-tag">INTENT</span><span class="bbs-dbg-intent-text">{{ recallDebug.intent }}</span>
       </p>
@@ -87,7 +120,7 @@ function hasScore(h: RecallDebugRerankHit): boolean {
     </details>
 
     <details class="bbs-disclosure bbs-dbg-step">
-      <summary>2 · Embedding 检索<span class="bbs-disclosure-meta">{{ recallDebug.embedding.length }} 条</span></summary>
+      <summary>2 · Embedding 检索<span class="bbs-disclosure-meta">{{ stepMeta(`${recallDebug.embedding.length} 条`, timings.embed, timings.search) }}</span></summary>
       <ul v-if="recallDebug.embedding.length" class="bbs-dbg-cards">
         <li v-for="(h, i) in recallDebug.embedding" :key="i" class="bbs-dbg-card">
           <div class="bbs-dbg-card-top">
@@ -120,7 +153,7 @@ function hasScore(h: RecallDebugRerankHit): boolean {
     </details>
 
     <details class="bbs-disclosure bbs-dbg-step">
-      <summary>{{ reranked ? '4 · Rerank 分档' : '4 · 分档（未重排）' }}<span class="bbs-disclosure-meta">{{ recallDebug.rerank.length }} 条</span></summary>
+      <summary>{{ reranked ? '4 · Rerank 分档' : '4 · 分档（未重排）' }}<span class="bbs-disclosure-meta">{{ stepMeta(`${recallDebug.rerank.length} 条`, timings.rerank) }}</span></summary>
       <p v-if="!reranked" class="bbs-dbg-empty bbs-dbg-note">{{ recallDebug.rerankIssue || '本轮没有重排。' }}以下分数为 embedding 相似度。</p>
       <ul v-if="recallDebug.rerank.length" class="bbs-dbg-cards">
         <li v-for="(h, i) in recallDebug.rerank" :key="i" class="bbs-dbg-card" :class="{ 'is-dropped': h.tier === 'drop' }">
@@ -232,6 +265,19 @@ function hasScore(h: RecallDebugRerankHit): boolean {
 .bbs-dbg-note {
   margin-bottom: 10px;
   line-height: 1.6;
+}
+/* 横幅下的各步用时 */
+.bbs-dbg-timing {
+  margin: -4px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--bbs-ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+/* 重写模型在思考的提醒 */
+.bbs-dbg-callout {
+  margin: 0 0 10px;
+  font-size: 12.5px;
 }
 
 /* 重写:INTENT 高亮 + Q 列表 */

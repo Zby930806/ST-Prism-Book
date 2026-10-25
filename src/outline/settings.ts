@@ -2,7 +2,7 @@ import { reactive, ref } from 'vue';
 import type { ApiChannel } from '@/api/settings';
 import { getContext } from '@/st/context';
 import { notesSettings, settingsIssue as notesSettingsIssue } from '@/notes/settings';
-import type { OutlineSettings } from './types';
+import type { DiscussionPersona, OutlinePace, OutlineSettings } from './types';
 
 export const OUTLINE_SETTINGS_KEY = 'prism_book_outline_settings';
 export const outlineSettingsIssue = ref('');
@@ -10,6 +10,11 @@ export const outlineSettingsIssue = ref('');
 export const OUTLINE_DEFAULT_MAX_TOKENS = 8000;
 /** 旧版保存设置时没有记下默认值，那时的默认是 6000。 */
 const LEGACY_DEFAULT_MAX_TOKENS = 6000;
+/** 自定义讨论角色的名字和人设提示词的长度上限。 */
+export const PERSONA_NAME_MAX = 20;
+export const PERSONA_PROMPT_MAX = 4000;
+const PACES: readonly OutlinePace[] = ['slow', 'normal', 'fast'];
+const defaultPersona = (): DiscussionPersona => ({ mode: 'qiheng', name: '', prompt: '', avatar: '' });
 const defaults = (): OutlineSettings => ({
   apiMode: 'notes',
   channel: {
@@ -18,14 +23,31 @@ const defaults = (): OutlineSettings => ({
     prefill: false, excludeParams: [], reasoningEffort: '',
   },
   progressCheck: { auto: false, interval: 3, autoAdvance: false },
+  pace: 'normal',
+  discussionPersona: defaultPersona(),
 });
 export const outlineSettings = reactive<OutlineSettings>(defaults());
 let protectedSettings = false;
 let committed = defaults();
-const copy = (s: OutlineSettings): OutlineSettings => ({ ...s, channel: { ...s.channel, excludeParams: [...s.channel.excludeParams] }, progressCheck: { ...s.progressCheck } });
+const copy = (s: OutlineSettings): OutlineSettings => ({
+  ...s, channel: { ...s.channel, excludeParams: [...s.channel.excludeParams] }, progressCheck: { ...s.progressCheck },
+  discussionPersona: { ...s.discussionPersona },
+});
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const bounded = (v: unknown, fallback: number, lo: number, hi: number) =>
   typeof v === 'number' && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : fallback;
+const text = (v: unknown, max: number) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+
+/** 讨论角色:旧设置没有这一项时用 Qiheng;名字、提示词超长时截到上限(界面已限制长度,只防手改的设置)。 */
+function normalizePersona(value: unknown): DiscussionPersona {
+  const p = record(value) ? value : {};
+  return {
+    mode: p.mode === 'custom' ? 'custom' : 'qiheng',
+    name: text(p.name, PERSONA_NAME_MAX),
+    prompt: text(p.prompt, PERSONA_PROMPT_MAX),
+    avatar: text(p.avatar, 1000),
+  };
+}
 
 function recognized(raw: unknown): raw is Record<string, unknown> {
   return record(raw) && raw.version === 1 && (raw.apiMode === 'notes' || raw.apiMode === 'independent') && record(raw.channel);
@@ -55,6 +77,9 @@ function normalize(value: OutlineSettings | Record<string, unknown>): OutlineSet
       interval: Math.floor(bounded(pc.interval, d.progressCheck.interval, 1, 20)),
       autoAdvance: pc.autoAdvance === true,
     },
+    // 旧设置没有推进节奏:按默认的适中
+    pace: PACES.includes(value.pace as OutlinePace) ? value.pace as OutlinePace : d.pace,
+    discussionPersona: normalizePersona(value.discussionPersona),
   };
 }
 

@@ -2,6 +2,7 @@ import { getContext } from '@/st/context';
 import { normalizeTemplate, type VarTemplate } from '@/memory/types';
 import { reactive, watch } from 'vue';
 import { DEFAULT_RECALL_INJECTION_DEPTH, normalizeRecallInjectionDepth } from '@/memory/vector/depth';
+import { normalizeQueryRewriteContextChars, QUERY_REWRITE_CONTEXT_DEFAULT } from '@/memory/vector/params';
 import { normalizeSavedTimeTag } from '@/memory/timeTagMigration';
 
 /**
@@ -136,6 +137,11 @@ export interface VectorSettings {
   queryRewriteJailbreak: boolean;
   /** 查询重写单次最大输出 token(三角色里仅它生成文本;够放 INTENT + 多条 Q 即可,偏小会截断)。默认 8192。 */
   queryRewriteMaxTokens: number;
+  /**
+   * 查询重写附带上下文(历史摘要、最近几楼全文、状态快照)的字数上限,超出时按新近和相关程度精简。
+   * 默认 16000;0 = 不限制(1.4.0 及以前的做法,上下文两三万字时重写明显变慢)。
+   */
+  queryRewriteContextChars: number;
   /** 召回参数(候选数/阈值/条数) */
   recall: VectorRecallSettings;
 }
@@ -503,6 +509,7 @@ function defaults(): ApiSettings {
       queryRewrite: { url: '', key: '', model: 'Qwen/Qwen3.5-27B', timeoutSec: 90, retries: 1 },
       queryRewriteJailbreak: false,
       queryRewriteMaxTokens: 8192,
+      queryRewriteContextChars: QUERY_REWRITE_CONTEXT_DEFAULT,
       recall: {
         injectionDepth: DEFAULT_RECALL_INJECTION_DEPTH,
         rerankCandidates: 20,
@@ -670,6 +677,8 @@ function normalize(raw: unknown): ApiSettings {
     Number.isFinite(merged.vector.queryRewriteMaxTokens) && merged.vector.queryRewriteMaxTokens >= 256
       ? Math.floor(merged.vector.queryRewriteMaxTokens)
       : 8192;
+  // 查询重写附带上下文上限:0 = 不限制,其余不小于 2000;老数据没有此键时用默认 16000(只压很长的上下文)
+  merged.vector.queryRewriteContextChars = normalizeQueryRewriteContextChars(merged.vector.queryRewriteContextChars);
   // 副 API 渠道:逐个补全新加的字段(老数据没有 timeoutSec/stream/excludeParams),并校验类型
   merged.channels = (Array.isArray(merged.channels) ? merged.channels : []).map(normalizeChannel);
   // 字数档位:仅两个合法值,旧数据缺失/非法回退详细(= 老用户行为不变)
