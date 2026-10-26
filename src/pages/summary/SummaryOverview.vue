@@ -1,5 +1,8 @@
 <script setup lang="ts">
-/** 摘要页概览：逐楼摘要、总结、待补摘三项计数与记忆状态，常驻的「补摘」入口（没有漏摘的楼层时禁用），下方为楼层光谱。 */
+/**
+ * 摘要页概览：逐楼摘要、总结、待补摘三项计数与记忆状态，常驻的「补摘」入口（没有漏摘的楼层时禁用）
+ * 和「全部重新摘要」入口（还没有摘要时禁用），下方为楼层光谱。
+ */
 import Icon from '@/components/Icon.vue';
 import { batchState, engineState } from '@/memory/engine';
 import { compatibilityState, derivedMeta, memory } from '@/memory/store';
@@ -8,10 +11,18 @@ import FloorSpectrum from './FloorSpectrum.vue';
 import { useSummaryPage } from './pageCtx';
 
 const page = useSummaryPage();
-const { editingBlocked, conversionBusy, pendingFloors } = page;
+const { editingBlocked, conversionBusy, pendingFloors, hasLeaf } = page;
 const { openBatchConfirm } = page.batch;
+const { openRebuild, rebuildProgressView } = page.rebuild;
 // 概览仅取当前响应式记忆；兼容报告是历史快照，不参与实时计数。
 const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.stale).length);
+const rebuildTitle = computed(() => {
+  if (!hasLeaf.value) return '还没有摘要';
+  const p = rebuildProgressView.value;
+  return p && p.next !== null
+    ? `上次的全部重新摘要停在 #${p.next}，可以继续或重新开始`
+    : '按楼层顺序重新生成已有的摘要和模型记录的状态；中断后可以从停下的楼层继续';
+});
 </script>
 
 <template>
@@ -23,14 +34,23 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
     </dl>
     <div class="bbs-overview-side">
       <span class="bbs-overview-status" :class="{ 'is-protected': editingBlocked }">{{ conversionBusy ? '正在转换' : compatibilityState.mode === 'ready' ? '记忆正常' : compatibilityState.mode === 'convert' ? '需要转换' : '只读保护' }}</span>
-      <!-- 补摘入口常驻：没有漏摘的楼层时灰掉，有就显示层数，点开是批量补摘的确认。 -->
-      <button
-        class="bbs-btn bbs-btn-primary bbs-backfill-btn"
-        type="button"
-        :disabled="editingBlocked || engineState.running || batchState.running || !pendingFloors.length"
-        title="按楼层顺序为未摘要的楼层生成摘要和状态，不覆盖已有摘要"
-        @click="openBatchConfirm"
-      ><Icon name="plus" />{{ !editingBlocked && pendingFloors.length ? `补摘 ${pendingFloors.length} 层` : '补摘' }}</button>
+      <div class="bbs-overview-actions">
+        <!-- 补摘入口常驻：没有漏摘的楼层时灰掉，有就显示层数，点开是批量补摘的确认。 -->
+        <button
+          class="bbs-btn bbs-btn-primary bbs-backfill-btn"
+          type="button"
+          :disabled="editingBlocked || engineState.running || batchState.running || !pendingFloors.length"
+          title="按楼层顺序为未摘要的楼层生成摘要和状态，不覆盖已有摘要"
+          @click="openBatchConfirm"
+        ><Icon name="plus" />{{ !editingBlocked && pendingFloors.length ? `补摘 ${pendingFloors.length} 层` : '补摘' }}</button>
+        <button
+          class="bbs-btn bbs-rebuild-btn"
+          type="button"
+          :disabled="editingBlocked || engineState.running || batchState.running || !hasLeaf"
+          :title="rebuildTitle"
+          @click="openRebuild"
+        >全部重新摘要…</button>
+      </div>
     </div>
     <FloorSpectrum v-if="!editingBlocked" class="bbs-overview-spectrum" />
   </section>
@@ -50,11 +70,16 @@ const liveLeafCount = computed(() => derivedMeta.leaves.filter(leaf => !leaf.sta
 .bbs-overview-status.is-protected { color:var(--bbs-warning); background:var(--bbs-warning-soft); }
 .bbs-overview-status.is-protected::before { background:var(--bbs-warning); }
 .bbs-overview-side { flex:0 0 auto; display:flex; flex-direction:column; align-items:flex-end; gap:10px; }
-.bbs-backfill-btn { white-space:nowrap; }
+/* 补摘为主按钮，全部重新摘要为次要按钮，并排；窄屏时可换行 */
+.bbs-overview-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
+.bbs-backfill-btn,.bbs-rebuild-btn { white-space:nowrap; }
 @media(max-width:640px) {
  .bbs-overview { padding:14px 16px; gap:10px; flex-wrap:wrap; }
  .bbs-overview-stats { flex-basis:100%; }
  .bbs-overview-stats dd { font-size:24px; }
- .bbs-overview-side { flex-basis:100%; flex-direction:row; align-items:center; justify-content:space-between; }
+ .bbs-overview-side { flex-basis:100%; flex-direction:row; flex-wrap:wrap; align-items:center; justify-content:space-between; }
+ /* 窄屏放不下状态和两个按钮：按钮另起一行，两列等宽 */
+ .bbs-overview-actions { flex:1 1 100%; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+ .bbs-backfill-btn,.bbs-rebuild-btn { justify-content:center; }
 }
 </style>

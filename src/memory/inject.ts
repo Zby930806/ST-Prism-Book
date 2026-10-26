@@ -19,6 +19,7 @@ import { getContext } from '@/st/context';
 import { buildSceneLocationIndex, classifyNpcPresence, findCurrentSceneId, getLeaf, itemReachableAtScene, leafValid, staleLastSeenRelation } from './apply';
 import { fmtItems, fmtPlans, fmtResolvedPlans, renderVarsState, selectRecentResolvedPlans, MEMORY_BRIEFING_NOTE, MEMORY_BRIEFING_END, MEMORY_BRIEFING_HISTORY_END } from './prompts';
 import { fmtLifeDetail } from './lifeDetails';
+import { fmtKnowledgeInjection } from './knowledge';
 import { fmtInjuryReminder, type InjuryReminderSubject } from './injuryReminder';
 import { isNpcLabelName, npcMentioned } from './npcLabel';
 import { fmtNpcAffinity, fmtNpcTiesContext, NPC_AFFINITY_BRIEFING } from './npcRelations';
@@ -756,6 +757,14 @@ export function buildTravelDraft(target: MemScene): string {
   ].join('\n\n');
 }
 
+/** 正文注入了解清单的角色:主要角色在前,其后是在场角色,各按登场先后;与角色页的分组同一在场判定。 */
+export function knowledgeTargets(here: string, locationPath: string[] | undefined): string[] {
+  const byCreated = (a: MemNpc, b: MemNpc) => a.createdAt - b.createdAt;
+  const mains = memory.npcs.filter(n => n.important).sort(byCreated);
+  const present = memory.npcs.filter(n => !n.important && classifyNpcPresence(n, memory.scenes, here, locationPath) === 'present').sort(byCreated);
+  return [...mains, ...present].map(n => n.name);
+}
+
 /** 组合当前结构化状态注入文本;无有意义状态时返回空串。 */
 export function buildStateInjectionText(): string {
   // 仅摘要模式保留内部状态供副 API、页面和公开查询使用,主模型只接收剧情摘要。
@@ -836,6 +845,13 @@ export function buildStateInjectionText(): string {
     if (secretBlock) st.push(secretBlock);
   }
 
+  // 了解清单:主要角色与在场角色,没有记录的也列出(「没记下的按不知道处理」才对其生效)。
+  // 只看自己的开关,不依赖名册与场景信息:在场判定读的是记忆数据,不是注入文本。
+  const knowledgeBlock = inj.knowledge
+    ? fmtKnowledgeInjection(memory.knowledge, knowledgeTargets(here, locPath), getContext()?.name1?.trim() || '主角')
+    : '';
+  if (knowledgeBlock) st.push(knowledgeBlock);
+
   if (reminder) st.push(reminder);
 
   const openPlans = memory.plans
@@ -871,7 +887,7 @@ export function buildStateInjectionText(): string {
   // 状态块在有任何有意义内容时才注入(物品/计划即使空也会有「(无)」占位,
   // 但只要存在摘要或时间/地点就值得带上整块)
   const hasProtagonist = inj.protagonist && PROTAGONIST_TEXT_FIELDS.some(key => !!oneLine(memory.protagonist[key]));
-  const hasState = memory.state.time || memory.state.location || (inj.sceneFocus && memory.state.sceneFocus) || hasProtagonist || (itemsOn && memory.items.length) || (scenesOn && memory.scenes.length) || (npcsOn && memory.npcs.length) || openPlans.length || hasVarState || (inj.lifeDetails && memory.lifeDetails.length);
+  const hasState = memory.state.time || memory.state.location || (inj.sceneFocus && memory.state.sceneFocus) || hasProtagonist || (itemsOn && memory.items.length) || (scenesOn && memory.scenes.length) || (npcsOn && memory.npcs.length) || openPlans.length || hasVarState || (inj.lifeDetails && memory.lifeDetails.length) || !!knowledgeBlock;
   if (!hasState) return '';
   // 首尾私密简报框定,避免主模型把状态快照当成要复述/输出的模板(正文后跟吐一份状态)
   return fitMemoryUnits(st, 'state', `${MEMORY_BRIEFING_NOTE}\n[当前状态]`, MEMORY_BRIEFING_END).text;

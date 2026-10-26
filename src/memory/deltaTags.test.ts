@@ -6,14 +6,14 @@ import type { LeafExtra, StoredDelta } from './types';
 
 // 楼层面板和重新摘要对比弹窗共用这份标签；这里只验证分组、说法和定位键，不涉及界面。
 describe('状态变动的标签', () => {
-  it('按主角、局势、物品、角色、生活档案、场景、悬念簿、信息差、变量分组，没有变动的组为空', () => {
+  it('按主角、局势、物品、角色、生活档案、场景、悬念簿、信息差、了解清单、变量分组，没有变动的组为空', () => {
     const delta: StoredDelta = {
       items: { add: [{ name: '地图', qty: 1, desc: '旧街地图' }], remove: ['火把'] },
       npcs: { update: [{ name: '小A', location: '厨房', follow: false }] },
       plans: { add: [{ kind: 'suspense', content: '信是谁寄的' }] },
     };
     const groups = deltaTagGroups(delta, 3);
-    expect(groups.map(g => g.title)).toEqual(['主角', '局势', '物品', '角色', '生活档案', '场景', '悬念簿', '信息差', '变量']);
+    expect(groups.map(g => g.title)).toEqual(['主角', '局势', '物品', '角色', '生活档案', '场景', '悬念簿', '信息差', '了解清单', '变量']);
     const items = groups.find(g => g.title === '物品')!.tags;
     expect(items.map(t => [t.key, DELTA_OP_LABEL[t.op], t.text, t.sub])).toEqual([
       ['item:add:0', '新增', '地图 ×1', '旧街地图'],
@@ -45,6 +45,24 @@ describe('状态变动的标签', () => {
       { key: 'focus:update:0', op: 'update', bucket: 'update', idx: 0, text: '雨夜对峙', sub: '在场:小A、小B · 张力:互不信任', editable: false },
     ]);
     expect(deltaTagGroups({ sceneFocus: null }, 0).find(g => g.title === '局势')!.tags[0]).toMatchObject({ text: '清空局势卡', op: 'remove' });
+    vi.restoreAllMocks();
+  });
+  it('了解清单按日志逐条列出:新增显示内容和角色,改写、改归属和删除反查新增时的内容;只读、可删除', () => {
+    const first = { name: '角色', is_user: false, is_system: false, mes: '一',
+      extra: { bbs_leaf: { id: 'leaf-k', text: '摘要', delta: { knowledge: [{ op: 'add', subject: '艾琳', text: '认定主角是行商' }] }, createdAt: 1, swipe: 0, v: 1 } as LeafExtra } } as STMessage;
+    vi.spyOn(context, 'getContext').mockReturnValue({ chat: [first] } as unknown as STContext);
+    const tags = deltaTagGroups({ knowledge: [
+      { op: 'update', id: 'know:leaf-k#0', text: '得知主角其实是王子' },
+      { op: 'update', id: 'know:leaf-k#0', subject: '艾莉' },
+      { op: 'remove', id: 'know:missing#2' },
+      { op: 'add', subject: '小夏', text: '听说主角会医术' },
+    ] }, 1).find(g => g.title === '了解清单')!.tags;
+    expect(tags.map(t => [t.key, DELTA_OP_LABEL[t.op], t.text, t.sub, t.editable])).toEqual([
+      ['know:op:0', '更新', '得知主角其实是王子', '艾琳', false],
+      ['know:op:1', '更新', '认定主角是行商', '归属改为 艾莉', false],
+      ['know:op:2', '移除', '删除一项', undefined, false],
+      ['know:op:3', '新增', '听说主角会医术', '小夏', false],
+    ]);
     vi.restoreAllMocks();
   });
 });

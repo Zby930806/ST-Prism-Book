@@ -59,7 +59,7 @@ describe('逐楼完整重建的生产入口', () => {
       response('林舟想起2028年的借册往事；当前仍在广场，地图未还。', { timeEnd: '2031/4/12 19:55' }),
       response('守卫增多，两人撤回厨房，小A未在场。', { location: '厨房', timeEnd: '2031/4/12 21:00' }),
       response('次晨小A验收地图、账目结清；她仍需养伤，拒绝同行。', { timeEnd: '2031/4/13 08:00',
-        npcs: { update: [{ name: '小A', location: '厨房', locationEvidence: '次晨小A在厨房收回地图', follow: false, conditionPatch: { add: [{ text: '仍需休养四五天', evidence: '仍需休养四五天' }] } }] },
+        npcs: { update: [{ name: '小A', location: '厨房', locationEvidence: '次晨小A在厨房收回地图', follow: false, condition: '右腕受伤，仍需休养四五天' }] },
         items: { remove: ['地图'] }, plans: { resolve: [{ id: 'p1', outcome: 'done', reason: '已验收结账' }] } }),
     ];
     let i = 0;
@@ -76,7 +76,7 @@ describe('逐楼完整重建的生产入口', () => {
     expect(await batchBackfill({ regenerate: true })).toEqual({ done: 5, total: 5, cancelled: false });
     expect(client.requestViaMainApi).toHaveBeenCalledTimes(5);
     const st = deriveMemory(chat);
-    expect(st.npcs.find(n => n.name === '小A')).toMatchObject({ location: '厨房', follow: false, condition: '右腕受伤；仍需休养四五天', locationStale: false });
+    expect(st.npcs.find(n => n.name === '小A')).toMatchObject({ location: '厨房', follow: false, condition: '右腕受伤，仍需休养四五天', locationStale: false });
     expect(st.npcs.find(n => n.name === '小B')?.follow).toBe(true);
     expect(st.items.find(x => x.name === '地图')).toBeUndefined();
     expect(st.plans).toHaveLength(1);
@@ -202,47 +202,40 @@ describe('逐楼完整重建的生产入口', () => {
   });
 });
 
-// 故意让模型漏掉旧限制，验证正式入口会拒绝而不是靠 mock 返回完整旧伤情。
-describe('v0.7 伤情补丁的生产链', () => {
+// 伤情整段覆盖:请求不再附伤情片段编号,模型写的完整伤情直接保存;旧叶子存的本来就是完整文本。
+describe('伤情整段覆盖的生产链', () => {
   function fixture() {
     const seed = msg('小A此前手腕受伤，爬不了沉降井。', true);
     seed.extra!.bbs_leaf = { ...seed.extra!.bbs_leaf!, seed: true, delta: { npcs: { add: [{ name: '小A', condition: '手腕受伤，爬不了沉降井' }] } } };
     const chat = [seed, msg('小A说：“还需休养四五天。”', true)];
     useChat(chat); return chat;
   }
-  const patchResponse = () => response('小A自述还需休养四五天。', { npcs: { update: [{ name: '小A', conditionPatch: { add: [{ text: '自述还需休养四五天', evidence: '还需休养四五天' }] } }] } });
-  it('原样覆盖丢失触发有限纠错，未重新输出旧限制也保留它', async () => {
+  const whole = '手腕受伤，爬不了沉降井，自述还需休养四五天';
+  const wholeResponse = () => response('小A自述还需休养四五天。', { npcs: { update: [{ name: '小A', condition: whole }] } });
+  it('请求不带局部协议和片段编号,名册里有旧伤情;整段改写直接保存,不触发纠错', async () => {
     const chat = fixture(); settings.apiSettings.summaryMaxRetries = 1;
-    vi.mocked(client.requestViaMainApi)
-      .mockResolvedValueOnce(response('她仍需养伤。', { npcs: { update: [{ name: '小A', condition: '自述还需休养四五天' }] } }))
-      .mockResolvedValueOnce(patchResponse());
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(wholeResponse());
     expect(await batchBackfill({ regenerate: true })).toMatchObject({ done: 1 });
-    expect(client.requestViaMainApi).toHaveBeenCalledTimes(2);
-    const second = vi.mocked(client.requestViaMainApi).mock.calls[1][0];
-    expect(second.at(-2)?.content).toContain('conditionPatch');
-    expect(second.at(-1)?.role).toBe('assistant');
-    expect(second.map(m => m.content).join(' ')).toContain('"id":"c2","text":"爬不了沉降井"');
-    expect(deriveMemory(chat).npcs[0].condition).toBe('手腕受伤，爬不了沉降井；自述还需休养四五天');
-    expect(JSON.stringify(chat[1].extra!.bbs_leaf)).not.toContain('conditionPatch');
-    expect(JSON.stringify(chat[1].extra!.bbs_leaf)).not.toContain('evidence');
+    expect(client.requestViaMainApi).toHaveBeenCalledTimes(1);
+    const sent = vi.mocked(client.requestViaMainApi).mock.calls[0][0].map(m => m.content).join('\n');
+    expect(sent).not.toContain('伤情局部更新协议');
+    expect(sent).not.toContain('conditionPatch');
+    expect(sent).toContain('手腕受伤，爬不了沉降井');
+    expect(deriveMemory(chat).npcs[0].condition).toBe(whole);
   });
-  it('纠错耗尽时只去掉对不上的伤情更新：旧伤情不被写坏，其余照常保存并提示，后楼继续', async () => {
-    const chat = fixture(); chat.push(msg('下一楼', true));
-    settings.apiSettings.summaryMaxRetries = 1;
-    vi.mocked(client.requestViaMainApi).mockResolvedValue(response('省略了旧限制。', { npcs: { update: [{ name: '小A', condition: '还需休养' }] } }));
-    expect(await batchBackfill({ regenerate: true })).toMatchObject({ done: 2 });
-    expect(client.requestViaMainApi).toHaveBeenCalledTimes(4); // 每楼首试一次、纠错一次
-    expect(vi.mocked(client.requestViaMainApi).mock.calls[1][0].at(-2)?.content).toContain('conditionPatch');
-    expect(deriveMemory(chat).npcs[0].condition).toBe('手腕受伤，爬不了沉降井');
-    expect(chat[1].extra!.bbs_leaf).toMatchObject({ text: '省略了旧限制。' });
-    expect(chat[1].extra!.bbs_leaf!.delta.npcs).toBeUndefined();
+  it('模型照旧写法只给补丁:补丁去掉,旧伤情不变,其余照常保存,不重试也不报错', async () => {
+    const chat = fixture(); settings.apiSettings.summaryMaxRetries = 1;
+    const legacy = { npcs: { update: [{ name: '小A', outfit: '灰外套', conditionPatch: { add: [{ text: '自述还需休养四五天', evidence: '还需休养四五天' }] } }] } };
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(response('她仍需养伤。', legacy as SummaryDelta));
+    expect(await batchBackfill({ regenerate: true })).toMatchObject({ done: 1 });
+    expect(client.requestViaMainApi).toHaveBeenCalledTimes(1);
+    expect(deriveMemory(chat).npcs[0]).toMatchObject({ condition: '手腕受伤，爬不了沉降井', outfit: '灰外套' });
+    expect(JSON.stringify(chat[1].extra!.bbs_leaf)).not.toMatch(/conditionPatch|evidence/);
     expect(engineState.lastError).toBe('');
-    expect(notices.toast).toHaveBeenCalledWith(expect.stringContaining('小A的伤情（伤情片段的编号或写法不符合要求）'), 'warning');
-    expect(chat[1].extra!.bbs_leaf).toMatchObject({ dropped: [{ kind: 'condition', name: '小A', reason: 'invalid' }] });
   });
-  it('单楼重摘和连续重建均用楼前旧状态，不叠加当前叶子的休养估计', async () => {
+  it('单楼重摘和连续重建均用楼前旧状态,不叠加当前叶子的休养估计', async () => {
     const chat = fixture();
-    vi.mocked(client.requestViaMainApi).mockResolvedValue(patchResponse());
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(wholeResponse());
     expect(await regenerateFloor(1)).toBe(true);
     const first = deriveMemory(chat).npcs[0].condition;
     await batchBackfill({ regenerate: true });
@@ -250,18 +243,18 @@ describe('v0.7 伤情补丁的生产链', () => {
     expect(deriveMemory(chat).npcs[0].condition).toBe(first);
     expect(first?.match(/四五天/g)).toHaveLength(1);
   });
-  it('新增未来伤情不会泄漏进重摘早楼的局部编号', async () => {
+  it('重摘早楼时名册只带楼前伤情,不泄漏之后楼层的新伤', async () => {
     const chat = fixture();
     const future = msg('之后手臂受伤。', true);
     future.extra!.bbs_leaf!.delta = { npcs: { update: [{ name: '小A', condition: '手臂受伤，不能抬举' }] } };
     chat.push(future);
     vi.mocked(client.requestViaMainApi).mockImplementation(async messages => {
-      const protocol = messages.find(m => m.content.startsWith('【伤情局部更新协议】'))?.content;
-      expect(protocol).toContain('爬不了沉降井'); expect(protocol).not.toContain('不能抬举');
-      return patchResponse();
+      const sent = messages.map(m => m.content).join('\n');
+      expect(sent).toContain('爬不了沉降井'); expect(sent).not.toContain('不能抬举');
+      return wholeResponse();
     });
     expect(await regenerateFloor(1)).toBe(true);
-    expect(chat[1].extra!.bbs_leaf!.delta.npcs?.update?.[0].condition).toContain('爬不了沉降井');
+    expect(chat[1].extra!.bbs_leaf!.delta.npcs?.update?.[0].condition).toBe(whole);
   });
 });
 
@@ -486,7 +479,7 @@ describe('v0.10 空路径实际保存与继承消费', () => {
 
 
 describe('v0.11 离场伤势从模型协议到正文消费者', () => {
-  it('跨题材模拟完整重建：新增限制与局部恢复保存重放后仍可见，未变部分不丢', async () => {
+  it('跨题材模拟完整重建：整段改写的新增限制与恢复保存重放后仍可见，未变部分不丢', async () => {
     // 模拟的是模型响应和持久化链路，不证明真实模型理解。
     const chat = [msg('岑岚在基地医务室接受诊治，左腿骨折，不能负重。', true),
       msg('旅行者驶离基地，进入外海航线。岑岚通过无线电说还需休养两周。', true),
@@ -500,13 +493,9 @@ describe('v0.11 离场伤势从模型协议到正文消费者', () => {
       response('岑岚左腿骨折，不能负重，在医务室诊治。', { timeEnd: '2042/5/6 10:00', location: '医务室',
         npcs: { add: [{ name: '岑岚', location: '医务室', locationEvidence: '岑岚在基地医务室接受诊治', condition: '左腿骨折；不能负重', follow: false }] } }),
       response('旅行者驶入外海；岑岚通过无线电自述还需休养两周。', { location: '外海航线', locationPath: [],
-        npcs: { update: [{ name: '岑岚', conditionPatch: { add: [{ text: '自述还需休养两周', evidence: '岑岚通过无线电说还需休养两周' }] } }] } }),
+        npcs: { update: [{ name: '岑岚', condition: '左腿骨折；不能负重；自述还需休养两周' }] } }),
       response('岑岚通过无线电转述复查结果：左腿骨折已愈合，已可短距离行走。', { timeEnd: '2042/5/20 10:00',
-        npcs: { update: [{ name: '岑岚', conditionPatch: { replace: [
-          { id: 'c1', text: '据其转述复查结果左腿骨折已愈合', evidence: '岑岚通过无线电转述医生复查结果：左腿骨折已愈合' },
-          { id: 'c2', text: '据其转述已可短距离行走', evidence: '已可短距离行走' },
-          { id: 'c3', text: '', evidence: '岑岚通过无线电转述医生复查结果：左腿骨折已愈合，已可短距离行走' },
-        ] } }] } }),
+        npcs: { update: [{ name: '岑岚', condition: '据其转述复查结果左腿骨折已愈合；据其转述已可短距离行走' }] } }),
     ];
     let i = 0;
     vi.mocked(client.requestViaMainApi).mockImplementation(async messages => {
@@ -602,48 +591,28 @@ describe('v0.12 计划变更的现有手工消费者', () => {
   });
 });
 
-// 伤情证据与有限纠错：经正式补录/重摘入口验证落盘和保护，而非只测 helper。
-describe('伤情排版证据与失败恢复生产链', () => {
+// 旧版本按片段补丁写入的叶子,存的就是合成后的完整伤情:升级后重放结果不变,之后的楼层按整段改写。
+describe('旧叶子的伤情与整段改写衔接', () => {
   function fixture() {
     const seed = msg('此前岑岚右腕受伤，不能负重。', true);
     seed.extra!.bbs_leaf!.seed = true;
     seed.extra!.bbs_leaf!.delta = { npcs: { add: [{ name: '岑岚', condition: '右腕受伤，不能负重' }] } };
-    const chat = [seed, msg('岑岚说：“**右腕仍需休养**\n三天。”')];
+    const old = msg('岑岚说：“右腕仍需休养三天。”', true);
+    old.extra!.bbs_leaf!.delta = { npcs: { update: [{ name: '岑岚', condition: '右腕受伤，不能负重；仍需休养三天' }] } };
+    const chat = [seed, old, msg('三天后，岑岚拆了护腕，说右腕已经好了。')];
     useChat(chat); return chat;
   }
-  const valid = () => response('岑岚仍需休养三天。', { npcs: { update: [{ name: '岑岚', conditionPatch: { add: [{ text: '仍需休养三天', evidence: '右腕仍需休养三天' }] } }] } });
-  it('排版差异无需重试，仍保留旧伤处与限制且不持久化证据', async () => {
-    const chat = fixture(); vi.mocked(client.requestViaMainApi).mockResolvedValue(valid());
+  it('旧叶子重放结果不变,无需重建', () => {
+    const chat = fixture();
+    expect(deriveMemory(chat).npcs[0].condition).toBe('右腕受伤，不能负重；仍需休养三天');
+  });
+  it('之后的楼层全部恢复时写空字符串,伤情清除', async () => {
+    const chat = fixture();
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(response('岑岚拆了护腕，右腕已经好了。', { npcs: { update: [{ name: '岑岚', condition: '' }] } }));
     expect(await batchBackfill()).toMatchObject({ done: 1 });
     expect(client.requestViaMainApi).toHaveBeenCalledTimes(1);
-    expect(deriveMemory(chat).npcs[0].condition).toBe('右腕受伤，不能负重；仍需休养三天');
-    expect(JSON.stringify(chat[1].extra!.bbs_leaf)).not.toMatch(/conditionPatch|evidence/);
-  });
-  it('缺证据有限纠错有精确路径，修正后只写一次', async () => {
-    const chat = fixture(); settings.apiSettings.summaryMaxRetries = 1;
-    const bad = { summary: '仍需养伤。', stateChanges: ['npcs'], npcs: { update: [{ name: '岑岚', conditionPatch: { add: [{ text: '仍需休养三天' }] } }] } };
-    vi.mocked(client.requestViaMainApi).mockResolvedValueOnce(JSON.stringify(bad)).mockResolvedValueOnce(valid());
-    expect(await batchBackfill()).toMatchObject({ done: 1 });
-    const second = vi.mocked(client.requestViaMainApi).mock.calls[1][0];
-    expect(second.at(-2)?.content).toContain('岑岚.conditionPatch.add[0].evidence');
-    expect(second.at(-2)?.content).toContain('缺失'); expect(second.at(-1)?.role).toBe('assistant');
-    expect(deriveMemory(chat).npcs[0].condition?.match(/三天/g)).toHaveLength(1);
-  });
-  it('无效证据耗尽后只去掉这项伤情更新：旧伤情保留、后楼照常；之后重新摘要可写入有效补丁', async () => {
-    const chat = fixture(); chat[1].extra!.bbs_leaf = { id: 'old', text: '保留的旧摘要', delta: {}, createdAt: 1, swipe: 0, v: 1 };
-    chat.push(msg('下一楼照常处理。'));
-    settings.apiSettings.summaryMaxRetries = 1;
-    vi.mocked(client.requestViaMainApi).mockResolvedValue(response('错误恢复。', { npcs: { update: [{ name: '岑岚', conditionPatch: { replace: [{ id: 'c1', text: '', evidence: '右腕已经痊愈' }] } }] } }));
-    expect(await batchBackfill({ regenerate: true })).toMatchObject({ done: 2 });
-    expect(vi.mocked(client.requestViaMainApi).mock.calls[1][0].at(-2)?.content).toContain('replace[0].evidence');
-    expect(deriveMemory(chat).npcs[0].condition).toBe('右腕受伤，不能负重');
-    expect(chat[1].extra!.bbs_leaf!.text).toBe('错误恢复。'); expect(chat[2].extra!.bbs_leaf).toBeDefined();
+    expect(deriveMemory(chat).npcs[0].condition).toBeUndefined();
     expect(engineState.lastError).toBe('');
-    expect(notices.toast).toHaveBeenCalledWith(expect.stringContaining('岑岚的伤情（给出的原句与本楼正文对不上）'), 'warning');
-    vi.mocked(client.requestViaMainApi).mockResolvedValue(valid());
-    expect(await regenerateFloor(1)).toBe(true); expect(engineState.lastError).toBe('');
-    expect(chat[1].extra!.bbs_leaf!.text).toBe('岑岚仍需休养三天。');
-    expect(deriveMemory(chat, 2).npcs[0].condition).toBe('右腕受伤，不能负重；仍需休养三天');
   });
 });
 

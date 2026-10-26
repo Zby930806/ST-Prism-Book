@@ -39,7 +39,7 @@ describe('v0.13 档案纠错的正式消费及手动入口（隔离内存宿主�
     expect(deriveMemory(chat).npcs[0]).toMatchObject({relation:'主角的队友，准备赴北站',title:'研究员',outfit:'灰色大衣'});
   });
   it.each([{label:'null',value:null},{label:'缺省',value:undefined},{label:'对象',value:{}},{label:'数组',value:[]}])('非法或缺省文本$label不当成清空',({value})=>{
-    const chat=fixture();chat.push(floor(finalizeDelta({npcs:{update:[{name:'观察员',relation:value,title:value}]}} as unknown as StoredDelta,[])));
+    const chat=fixture();chat.push(floor(finalizeDelta({npcs:{update:[{name:'观察员',relation:value,title:value}]}} as unknown as Parameters<typeof finalizeDelta>[0],[])));
     expect(deriveMemory(chat).npcs[0]).toMatchObject({relation:'主角的队友，准备赴北站',title:'研究员'});
   });
 });

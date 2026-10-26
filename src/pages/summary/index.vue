@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /**
- * 摘要页：组合各区块——概览、旧记忆兼容、未摘要楼层与批量补摘、当前局势与计划、创作规划、页脚；
+ * 摘要页：组合各区块——概览（含补摘、全部重新摘要入口）、旧记忆兼容、全部重新摘要未完成提示、未摘要楼层与批量补摘、
+ * 当前局势与计划、创作规划、页脚；
  * 本文件负责「摘要与总结」列表：工具行、搜索、多选合并与删除、单条编辑与删除。
  * 页面级状态（只读保护、旧记忆转换、批量补摘、关闭弹窗与切聊天重置）在 pageCtx.ts。
  */
@@ -26,6 +27,8 @@ import BatchBackfillDialog from './BatchBackfillDialog.vue';
 import CompatibilityNotice from './CompatibilityNotice.vue';
 import OutlineSection from './OutlineSection.vue';
 import PendingFloors from './PendingFloors.vue';
+import RebuildDialog from './RebuildDialog.vue';
+import RebuildNotice from './RebuildNotice.vue';
 import SituationSection from './SituationSection.vue';
 import SummaryEditDialog from './SummaryEditDialog.vue';
 import SummaryFooter from './SummaryFooter.vue';
@@ -374,8 +377,10 @@ onUnmounted(() => {
     </div>
 
     <fieldset class="bbs-memory-editors" :disabled="editingBlocked" aria-label="本聊天记忆编辑">
+    <RebuildNotice />
     <PendingFloors />
     <BatchBackfillDialog />
+    <RebuildDialog />
     <SituationSection />
     <OutlineSection />
 
@@ -542,7 +547,7 @@ onUnmounted(() => {
       v-else
       icon="summary"
       :title="editingBlocked ? '记忆处于只读保护' : '暂无摘要'"
-      :text="editingBlocked ? '请先查看上方说明。这不表示聊天没有记忆，请勿用重建或导入解除保护。' : emptyText"
+      :text="editingBlocked ? '请先查看上方说明。这不表示聊天没有记忆，请勿用全部重新摘要或导入解除保护。' : emptyText"
     />
 
     <SummaryPager :page="activeWindow.page" :total="activeWindow.total" :size="SUMMARY_PAGE_SIZE" label="摘要" @update:page="changeSummaryPage" />

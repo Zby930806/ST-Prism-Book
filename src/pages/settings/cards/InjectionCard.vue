@@ -28,11 +28,11 @@ function onBudgetChange() {
     >
       <input v-model.number="apiSettings.memoryBudgetTokens" class="bbs-input bbs-num" type="number" min="0" max="50000" step="500" @change="onBudgetChange" />
     </SettingRow>
-    <p class="bbs-field-hint">以下开关选择注入正文的状态，<strong>只影响正文模型看到的内容</strong>：摘要请求始终包含全部状态并照常记录，关闭某项不会造成重复记录。时间地点、计划悬念和自定义变量不受下列开关控制（开启「仅注入剧情摘要」时同样不发送）。</p>
+    <p class="bbs-field-hint">以下开关选择注入正文的状态，<strong>只影响正文模型看到的内容</strong>：摘要请求始终包含全部状态并照常记录，关闭某项不会造成重复记录。时间地点、计划悬念和自定义变量不受下列开关控制（开启「仅注入剧情摘要」时同样不发送）。「角色对主角的了解」例外，它同时控制记录，见该项说明。</p>
 
     <SettingRow
       label="仅注入剧情摘要"
-      hint="适用于自带变量系统的角色卡。启用后，当前状态（时间地点、局势、主角、角色、物品、场景、计划、变量、生活档案、信息差和伤势提醒）不再注入正文，以下各项开关随之失效。"
+      hint="适用于自带变量系统的角色卡。启用后，当前状态（时间地点、局势、主角、角色、物品、场景、计划、变量、生活档案、信息差、角色对主角的了解和伤势提醒）不再注入正文，以下各项开关随之失效。"
       details="这些内容照常分析、保存并在棱镜宝书中显示；之后的楼层不再写入物品和变量的变动旁注。已有楼层中的旁注不会清理；场景页的「前往」不受影响。"
     >
       <input v-model="apiSettings.summaryOnlyMode" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" />
@@ -71,6 +71,14 @@ function onBudgetChange() {
 
     <SettingRow label="信息差" hint="提醒在场的角色哪些事不知情，避免其说出或依据自己不知道的事行动。每次最多 12 条，不知情者里有在场角色的优先，其余按记录从新到旧。信息差始终记录，可在角色页查看；需开启 NPC 名册和场景信息。">
       <input v-model="apiSettings.injection.secrets" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" :disabled="apiSettings.summaryOnlyMode || !apiSettings.injection.npcs || !apiSettings.injection.scenes" />
+    </SettingRow>
+
+    <SettingRow
+      label="角色对主角的了解"
+      hint="默认关闭。开启后，摘要时记录每个角色知道或以为的主角的事，生成正文时向主要角色和在场角色注入；没有记下的主角私事按该角色不知道处理，避免角色凭人设或世界书说出不该知道的事。本项同时控制记录：关闭后不再记录也不注入，已有记录保留。"
+      details="记录的是角色自己的认知，包括被骗后的认知；揭穿后改写原条。外貌、公开身份和按关系本应知道的事不受限制。注入时每人最多 15 条（取最近的），没有记录的角色注明暂无记录；不依赖 NPC 名册和场景信息。摘要请求只附主要角色、在场或同区域角色和本楼正文提到的角色的记录。开启「仅注入剧情摘要」时照常记录、不注入。记录在角色页各角色卡最下方，可添加、修改和删除。旧聊天开启后从之后摘要的楼层开始记录，此前已经得知的事可手动补充。"
+    >
+      <input v-model="apiSettings.injection.knowledge" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" />
     </SettingRow>
 
     <SettingRow

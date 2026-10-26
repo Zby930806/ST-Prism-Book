@@ -5,6 +5,7 @@ export const NPC_LOCATION_EVIDENCE_PROTOCOL = `【NPC 定位证据】
 - 引文应原样复制；校验仅容忍排版空白、换行、成对 Markdown 行内强调标记，以及全角半角、引号样式和省略号写法的差异。文字、标点、语序与否定必须保留，不得拼接不同片段、改写或自行添加引号/省略号；英文单词间空格不能删成另一个词。引用不含程序附加的 [M…-P…] 编号或来源提示，不得跨消息拼接。
 - 主角离开而定点角色未同行、此前打算留守、暂无新消息，都不构成重新确认旧位置；此时省略该角色 location/locationEvidence，由系统保留最后确认并标记过期。角色重逢或正文明确交代其远方现位置时才重新确认。
 - 空 location 表示去向不明，不需引文；follow:true 表示同行，不同时写 location。只有定位操作才附 locationEvidence，同一角色每楼最多一次定位。证据仅用于解析校验，存储前移除，不进入正文或档案。
+- 定位原话拿不准时只省略该角色的 location/locationEvidence，建档和其他字段照常输出；新登场的角色不能因为定位不确定就不建档。
 `;
 
 export class NpcLocationEvidenceError extends Error {}
@@ -82,7 +83,7 @@ export function validateNpcLocationEvidence(parsed: Record<string, unknown>, opt
       const quote = entry.locationEvidence;
       if (typeof quote !== 'string' || !quote.trim()) {
         if (lenient) { dropLocation('missing'); continue; }
-        fail('NPC非空 location 必须附 locationEvidence 本楼连续原文。未同行或暂无消息不能重报旧地点，请省略定位更新。');
+        fail('NPC非空 location 必须附 locationEvidence 本楼连续原文。未同行或暂无消息不能重报旧地点，请省略定位更新；只省略 location，该角色的建档和其他字段照常保留。');
       }
       if (!matchesSource(quote)) {
         if (lenient) { dropLocation('mismatch'); continue; }

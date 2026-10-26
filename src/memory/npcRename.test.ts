@@ -19,10 +19,9 @@ const ai = (mes: string, delta?: StoredDelta): STMessage => ({
   extra: delta ? { bbs_leaf: { id: 'rename-' + ++seq, text: '摘要。', delta, createdAt: seq, swipe: 0, v: 1 } as LeafExtra } : {},
 });
 const source = ['酒保A擦了擦手，笑道：“叫我老周就行。”他的右手伤口已经结痂。'];
-const parse = (body: Record<string, unknown>, roster = ['酒保A', '梅芙'], conditionNpcs = [{ name: '酒保A', condition: '右手割伤' }]) =>
+const parse = (body: Record<string, unknown>, roster = ['酒保A', '梅芙']) =>
   parseSummaryResponse(JSON.stringify({ summary: '酒保报出名字。', ...body }), {
     requireStateChanges: false, sourceTexts: source, sourceContent: source[0], npcRoster: roster, userName: '沈遥',
-    conditionContext: { protagonist: {}, npcs: conditionNpcs, content: source[0], strict: true },
     finalize: d => finalizeDelta(d, []),
   });
 const rename = (extra: Record<string, unknown> = {}) => ({ npcs: { rename: [{ from: '酒保A', to: '老周', evidence: '叫我老周就行', ...extra }] } });
@@ -67,12 +66,9 @@ describe('改名操作的校验', () => {
     expect(() => parse(body as Record<string, unknown>)).toThrow(SummaryResponseError);
     expect(() => parse(body as Record<string, unknown>)).toThrow(message);
   });
-  it('改名后用新名字局部更新伤情,能找回改名前的伤情片段', () => {
-    const d = parse({ npcs: { ...rename().npcs, update: [{ name: '老周', conditionPatch: { replace: [{ id: 'c1', text: '右手伤口结痂', evidence: '他的右手伤口已经结痂' }] } }] } });
+  it('改名后用新名字整段改写伤情', () => {
+    const d = parse({ npcs: { ...rename().npcs, update: [{ name: '老周', condition: '右手伤口结痂' }] } });
     expect(d.npcs?.update?.[0]).toMatchObject({ name: '老周', condition: '右手伤口结痂' });
-  });
-  it('改名后对已有伤情整段覆盖仍按局部协议拒绝', () => {
-    expect(() => parse({ npcs: { ...rename().npcs, update: [{ name: '老周', condition: '痊愈' }] } })).toThrow('conditionPatch');
   });
 });
 
@@ -81,7 +77,6 @@ describe('最后一次尝试时不合格的改名只去掉这一条', () => {
     const dropped: DroppedEvidence[] = [];
     const d = parseSummaryResponse(JSON.stringify({ summary: '酒保报出名字。', ...body }), {
       requireStateChanges: false, sourceTexts: source, sourceContent: source[0], npcRoster: roster, userName: '沈遥',
-      conditionContext: { protagonist: {}, npcs: [{ name: '酒保A', condition: '右手割伤' }], content: source[0], strict: true },
       finalize: v => finalizeDelta(v, []), onDroppedEvidence: list => { dropped.push(...list); },
     });
     return { d, dropped };

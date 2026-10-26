@@ -1,4 +1,3 @@
-import type { ConditionPatch } from './conditionPatch';
 /**
  * 棱镜宝书记忆数据模型 —— 混合架构:叶子在消息上,压缩节点在森林
  *
@@ -384,6 +383,11 @@ export interface LeafExtra {
    * 重放顺序:delta → migratedDelta → enriched → manualOps。
    */
   manualOps?: StoredDelta;
+  /**
+   * 全部重新摘要时由哪一次运行生成(运行 id,见 engine.ts 的 REBUILD_RUN_KEY)。中断后继续据此跳过已完成的楼层;
+   * 单楼重新摘要替换这条叶子时沿用。旧叶子没有。
+   */
+  rebuildRun?: string;
   /** 叶子结构版本 */
   v: 1;
 }
@@ -542,6 +546,32 @@ export interface SecretUpdate {
 }
 
 /**
+ * 了解清单一条(派生产物,不持久化):某角色目前知道或以为的一件主角的事。
+ * 记的是角色的认知,不是真相;被骗时照记被骗后的认知,揭穿时改写原条。
+ */
+export interface MemKnowledge {
+  /** 稳定 id:know:${leafId}#${add 序号}(重放幂等;手动条目为显式 id) */
+  id: string;
+  /** 知情的角色(名册中的名字) */
+  subject: string;
+  text: string;
+  /** 记录时的故事内时间 */
+  createdTime?: string;
+  createdAt: number;
+  /** 最近一次新增或改写所在叶子的生成时刻 */
+  updatedAt?: number;
+}
+
+/**
+ * 了解清单的存储操作:有序日志,按数组顺序施加(删了再加回、改名后再改写都按先后生效)。
+ * add 的稳定 id 由叶子 id 和它在这一部分 add 中的先后序号派生;只有手动修改的 add 带显式 id。
+ */
+export type KnowledgeOp =
+  | { op: 'add'; subject: string; text: string; id?: string }
+  | { op: 'update'; id: string; subject?: string; text?: string }
+  | { op: 'remove'; id: string };
+
+/**
  * 本楼正文与已有记录的矛盾(摘要时标出;对应字段保持原记录)。存在叶子上,不参与重放。
  */
 export interface LeafConflict {
@@ -580,6 +610,8 @@ export interface BaibaiMemory {
   lifeDetails: MemLifeDetail[];
   /** 派生缓存:信息差(从叶子 delta 重放) */
   secrets: MemSecret[];
+  /** 派生缓存:各角色对主角的了解清单(从叶子 delta 重放) */
+  knowledge: MemKnowledge[];
   /** 真源镜像:三层变量定义模板(global/char 来自 settings,chat 来自 chatMetadata) */
   varTemplates: Record<VarTier, VarTemplate>;
   /** 派生缓存:变量当前状态(从合并模板起、fold 各叶子 varOps 得到的 JSON 树) */
@@ -597,6 +629,7 @@ export function createEmptyMemory(): BaibaiMemory {
     plans: [],
     lifeDetails: [],
     secrets: [],
+    knowledge: [],
     scenes: [],
     npcs: [],
     itemLog: [],
@@ -734,7 +767,7 @@ export interface SummaryDelta {
   /** 局势卡更新:省略=不动;null=明确清空;对象=整卡覆盖 */
   sceneFocus?: SceneFocus | null;
   /** 覆盖型:用户操控主角的当前客观档案变化 */
-  protagonist?: ProtagonistDelta & { conditionPatch?: ConditionPatch };
+  protagonist?: ProtagonistDelta;
   /** 指令型:物品增删改 */
   items?: {
     add?: ItemDelta[];
@@ -757,7 +790,7 @@ export interface SummaryDelta {
     /** 新登场/新记录的 NPC */
     add?: (NpcDelta & { locationEvidence?: string })[];
     /** 按名字更新已有 NPC(身份/描述/性格/随行/所在地) */
-    update?: (NpcDelta & { conditionPatch?: ConditionPatch; locationEvidence?: string })[];
+    update?: (NpcDelta & { locationEvidence?: string })[];
     /** 改名接续(evidence 为本楼原句,仅校验,存储前移除);在同一叶子的 add/update/remove 之前施加 */
     rename?: (NpcRename & { evidence?: string })[];
     /** 按名字移除(永久退场/死亡) */
@@ -787,6 +820,12 @@ export interface SummaryDelta {
     update?: SecretUpdate[];
     /** 结案:所有相关角色都已知情,或已无关紧要 */
     resolve?: string[];
+  };
+  /** 指令型:了解清单(功能开启时才发规则;update/remove 用短序号 k1/k2,固化时翻成稳定 id) */
+  knowledge?: {
+    add?: { who: string; text: string }[];
+    update?: { id: string; text: string }[];
+    remove?: string[];
   };
   /** 正文与已有记录的矛盾(可选;写了就不更新对应字段,存到叶子上供用户处理) */
   conflicts?: { about: string; record: string; text: string }[];
@@ -869,5 +908,7 @@ export interface StoredDelta {
     remove?: string[];
     reopen?: string[];
   };
+  /** 了解清单:按顺序施加的操作日志(模型结果、迁移状态、手动修改共用) */
+  knowledge?: KnowledgeOp[];
   varOps?: VarOp[];
 }

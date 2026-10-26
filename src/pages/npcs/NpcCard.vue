@@ -4,11 +4,13 @@
  *  主要角色：主要角色开关（已开启）、编辑、删除；NPC 三档：主要角色开关、随行开关、编辑、删除。
  * 两个开关是 aria-pressed 按钮，名称固定，状态由按下样式表达；只发出事件，写入记忆由页面处理。
  * 档案缺外貌、身份或性别时，卡片底部显示所缺项与「从原文补全」（检索全部楼层，结果确认后写入）。
+ * knowledge 不为空时，最下方显示该角色对主角的了解（见 NpcKnowledge），增改删只发出事件。
  */
 import IconButton from '@/components/IconButton.vue';
-import type { MemNpc } from '@/memory/types';
+import type { MemKnowledge, MemNpc } from '@/memory/types';
 import { computed } from 'vue';
 import NpcCardBase from './NpcCardBase.vue';
+import NpcKnowledge from './NpcKnowledge.vue';
 import { npcCardFields, npcChips, profileGapText, type NpcTier } from './npcView';
 import { blockSent } from './sendScope';
 
@@ -21,6 +23,14 @@ const props = defineProps<{
   enriching?: boolean;
   /** 其他角色正在检索,本卡暂不可点 */
   enrichBusy?: boolean;
+  /** 该角色对主角的了解;不给时不显示这一块(功能关闭且没有记录) */
+  knowledge?: MemKnowledge[] | null;
+  /** 主角名(了解清单的标题) */
+  userName?: string;
+  /** 有有效摘要可写入时才能手动修改了解清单 */
+  canEditKnowledge?: boolean;
+  knowledgeWarning?: string;
+  knowledgeNote?: string;
 }>();
 const emit = defineEmits<{
   (e: 'toggle-important'): void;
@@ -28,6 +38,9 @@ const emit = defineEmits<{
   (e: 'edit'): void;
   (e: 'remove'): void;
   (e: 'enrich'): void;
+  (e: 'knowledge-add'): void;
+  (e: 'knowledge-edit', entry: MemKnowledge): void;
+  (e: 'knowledge-remove', entry: MemKnowledge): void;
 }>();
 
 const chips = computed(() => npcChips(props.npc));
@@ -68,6 +81,11 @@ const enrichTitle = computed(() => (props.canEnrich
         :title="enrichTitle" :aria-label="'从原文补全档案：' + npc.name" @click="emit('enrich')">
         <span v-if="enriching" class="bbs-spin" aria-hidden="true"></span>{{ enriching ? '正在检索原文' : '从原文补全' }}
       </button>
+    </template>
+    <template v-if="knowledge" #below>
+      <NpcKnowledge :name="npc.name" :user-name="userName || '主角'" :entries="knowledge" :can-edit="!!canEditKnowledge"
+        :warning="knowledgeWarning" :note="knowledgeNote"
+        @add="emit('knowledge-add')" @edit="k => emit('knowledge-edit', k)" @remove="k => emit('knowledge-remove', k)" />
     </template>
   </NpcCardBase>
 </template>

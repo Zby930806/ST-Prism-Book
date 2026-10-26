@@ -220,9 +220,9 @@ describe('摘要生产入口的结算边界（mock不证明模型遵从率）', 
       expect(input).toContain('最后记录身体状态:脚踝扭伤,不能负重');
       expect(input).toContain('本轮只新增休养估计');
       expect(input).toContain('对方表示不再追究某项义务，不等于义务人已经付款或履约');
-      return response({ npcs: { update: [{ name: '甲', desc: '黑发', conditionPatch: { add: [{ text: '自述还需休养两天', evidence: '甲说还得休养两天' }] } }] } });
+      return response({ npcs: { update: [{ name: '甲', desc: '黑发', condition: '脚踝扭伤,不能负重;自述还需休养两天' }] } });
     });
     await batchBackfill({ regenerate: true });
-    expect(deriveMemory(chat).npcs[0]).toMatchObject({ desc: '黑发', condition: '脚踝扭伤,不能负重；自述还需休养两天' });
+    expect(deriveMemory(chat).npcs[0]).toMatchObject({ desc: '黑发', condition: '脚踝扭伤,不能负重;自述还需休养两天' });
   });
 });

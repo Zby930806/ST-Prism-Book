@@ -369,6 +369,11 @@ export function useLeafEdit(opts: {
         if (Array.isArray(dd.varOps)) dd.varOps.splice(tag.idx, 1); // varOps 是扁平数组,直接按序号删
         return;
       }
+      if (cat === 'know') {
+        // 了解清单同为有序日志;新增条目的 id 只按 add 的先后编号,删改写或删除不影响其后新增条目的 id
+        if (Array.isArray(dd.knowledge)) dd.knowledge.splice(tag.idx, 1);
+        return;
+      }
       const field = ({ item: 'items', npc: 'npcs', scene: 'scenes', secret: 'secrets', plan: 'plans', life: 'lifeDetails' } as Record<string, string>)[cat];
       if (!field) return;
       const group = (dd as Record<string, Record<string, unknown[]>>)[field];

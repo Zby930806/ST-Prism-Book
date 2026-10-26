@@ -2,30 +2,45 @@
 /**
  * 角色页：统计行，随后依次为主角、主要角色、NPC（按在场、同区域、不在场分组，带检索与筛选），页尾为生活小档案、信息差。
  * 角色卡见 NpcCard，添加/编辑表单见 NpcFormDialog，从原文补全档案见 NpcEnrichDialog；区块各自的状态与弹窗在对应组件中。
+ * 页首「角色重新建档…」按原文补齐漏记的角色、重新整理全部角色的档案：开始前的确认见 NpcRefileStartDialog，
+ * 进度与未完成的记录见 NpcRefilePanel（统计行下方），审核列表见 NpcRefileReview。
+ * 各角色卡最下方是该角色对主角的了解（开启记录或已有记录时显示），添加/修改弹窗与删除确认在本页。
  * 各区块是否随正文发送与注入设置一致（见 sendScope.ts）。
  */
 import EmptyState from '@/components/EmptyState.vue';
 import Icon from '@/components/Icon.vue';
+import ModalShell from '@/components/ModalShell.vue';
 import PageHeader from '@/components/PageHeader.vue';
 import { affinityLevelFromInput } from '@/memory/npcRelations';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import StatRow from '@/components/StatRow.vue';
 import SummaryOnlyNotice from '@/components/SummaryOnlyNotice.vue';
-import { classifyNpcPresence, editNpc, removeNpc, setNpcFollow, setNpcImportant, upsertNpc } from '@/memory/apply';
+import { apiSettings } from '@/api/settings';
+import { addKnowledge, classifyNpcPresence, editNpc, removeKnowledge, removeNpc, setNpcFollow, setNpcImportant, updateKnowledge, upsertNpc } from '@/memory/apply';
+import { resolveSender } from '@/memory/engine';
+import { KNOWLEDGE_INJECT_CAP, sameKnowledge } from '@/memory/knowledge';
 import { applyManualEnrichment, npcEnrichState, previewManualEnrichment, type ManualEnrichResult } from '@/memory/npcEnrich';
-import { derivedMeta, memory } from '@/memory/store';
-import type { MemNpc } from '@/memory/types';
+import {
+  applyNpcRefile, discardNpcRefile, npcRefileState, readRefileRecord, refileEstimate, runNpcRefile,
+  type RefileEstimate, type RefileRecord, type RefileSelection,
+} from '@/memory/npcRefile';
+import { derivedMeta, memory, memoryWriteIssue } from '@/memory/store';
+import type { MemKnowledge, MemNpc } from '@/memory/types';
 import { getContext } from '@/st/context';
+import { toast } from '@/st/toast';
 import { computed, nextTick, ref } from 'vue';
 import LifeDetailsSection from './LifeDetailsSection.vue';
 import NpcCard from './NpcCard.vue';
 import NpcEnrichDialog from './NpcEnrichDialog.vue';
 import NpcFormDialog from './NpcFormDialog.vue';
+import NpcRefilePanel from './NpcRefilePanel.vue';
+import NpcRefileReview from './NpcRefileReview.vue';
+import NpcRefileStartDialog from './NpcRefileStartDialog.vue';
 import NpcSectionHead from './NpcSectionHead.vue';
 import NpcTierHead from './NpcTierHead.vue';
 import ProtagonistCard from './ProtagonistCard.vue';
 import SecretsSection from './SecretsSection.vue';
-import { emptyNpcDraft, type NpcDraft } from './npcView';
+import { emptyNpcDraft, labelSnippet, type NpcDraft } from './npcView';
 import { blockLocalNote } from './sendScope';
 
 // 角色是从叶子摘要重放出的派生数据,手动操作单独保存在「最新一条有效叶子」上;无有效叶子时无处挂载。
@@ -123,6 +138,54 @@ function applyEnrich() {
 }
 function closeEnrich() {
   enrichDialog.value = null;
+}
+
+/* —— 角色重新建档:确认后分两步请求,结果审核后才写入;进度和结果存在聊天元数据里,可以继续 —— */
+// chatMetadata 不是响应式:按 npcRefileState.rev(记录变化)和 derivedMeta.rev(切换聊天、记忆重算)重读
+const refileRecord = computed<RefileRecord | null>(() => {
+  void npcRefileState.rev;
+  void derivedMeta.rev;
+  return readRefileRecord();
+});
+const refileStart = ref<{ estimate: RefileEstimate; resuming: boolean; senderLabel: string } | null>(null);
+const refileReviewOpen = ref(false);
+const refileDiscarding = ref(false);
+
+function openRefile() {
+  if (npcRefileState.running || !hasLeaf.value) return;
+  const rec = readRefileRecord();
+  if (rec?.phase === 'review') { refileReviewOpen.value = true; return; }
+  const issue = memoryWriteIssue();
+  if (issue) { toast(issue, 'warning'); return; }
+  const sender = resolveSender('summary');
+  if ('error' in sender) { toast(sender.error, 'warning'); return; }
+  refileStart.value = { estimate: refileEstimate(rec), resuming: !!rec, senderLabel: sender.label };
+}
+async function startRefile(restart: boolean) {
+  refileStart.value = null;
+  const result = await runNpcRefile({ restart });
+  if (result.status === 'review') {
+    toast('角色重新建档已完成，请审核结果；勾选的项才会写入。', 'success');
+    refileReviewOpen.value = true;
+  } else if (result.status === 'cancelled') {
+    toast('角色重新建档已停止，进度已保存，可以在角色页继续或先审核已找到的结果。', 'info');
+  } else {
+    toast(result.error || '角色重新建档没有完成。', 'error');
+  }
+}
+function applyRefile(selection: RefileSelection) {
+  const result = applyNpcRefile(selection);
+  refileReviewOpen.value = false;
+  if (!result) {
+    toast(memoryWriteIssue() || '没有写入：当前聊天没有可以写入的摘要。结果仍保留，可以稍后再审核。', 'warning');
+    return;
+  }
+  const parts = [result.added ? `新增 ${result.added} 个角色` : '', result.updated ? `更新 ${result.updated} 个角色的档案` : ''].filter(Boolean);
+  toast(parts.length ? `角色重新建档：${parts.join('，')}。` : '角色重新建档已结束，没有写入改动。', 'success');
+}
+function confirmDiscardRefile() {
+  discardNpcRefile();
+  refileDiscarding.value = false;
 }
 
 /* —— 新增弹窗 —— */
@@ -224,12 +287,63 @@ function confirmRemove() {
   if (removing.value) removeNpc(removing.value.name);
   removing.value = null;
 }
+
+/* —— 对主角的了解:每张角色卡最下方,开启记录或已有记录时显示 —— */
+const knowledgeOn = computed(() => apiSettings.injection.knowledge);
+const knowledgeBy = computed(() => {
+  const map = new Map<string, MemKnowledge[]>();
+  for (const k of memory.knowledge) {
+    const key = k.subject.trim().toLowerCase();
+    const list = map.get(key);
+    if (list) list.push(k);
+    else map.set(key, [k]);
+  }
+  return map;
+});
+const knowledgeWarning = computed(() => {
+  if (!knowledgeOn.value) return '注入设置中已关闭：不再记录，也不发送给正文模型';
+  return apiSettings.summaryOnlyMode ? '仅供棱镜宝书记录，不发送给主对话 AI' : undefined;
+});
+const KNOWLEDGE_NOTE = `作为主要角色或在场时随正文发送，每人最多 ${KNOWLEDGE_INJECT_CAP} 条（取最近的）。`;
+/** 一张角色卡上了解清单的参数;功能关闭且没有记录时不显示这一块。 */
+function knowledgeBind(n: MemNpc) {
+  const list = knowledgeBy.value.get(n.name.trim().toLowerCase()) ?? [];
+  return {
+    knowledge: knowledgeOn.value || list.length ? list : null,
+    userName: protagonistName.value,
+    canEditKnowledge: hasLeaf.value,
+    knowledgeWarning: knowledgeWarning.value,
+    knowledgeNote: knowledgeWarning.value ? undefined : KNOWLEDGE_NOTE,
+  };
+}
+
+const knowledgeEditing = ref<{ id: string | null; subject: string; text: string; original: string } | null>(null);
+function openKnowledge(n: MemNpc, k?: MemKnowledge) {
+  knowledgeEditing.value = { id: k?.id ?? null, subject: n.name, text: k?.text ?? '', original: k?.text ?? '' };
+}
+function saveKnowledge() {
+  const e = knowledgeEditing.value;
+  if (!e || !e.text.trim()) return;
+  if (e.id && e.text.trim() === e.original.trim()) { knowledgeEditing.value = null; return; }
+  if (memory.knowledge.some(k => k.id !== e.id && sameKnowledge(k, { subject: e.subject, text: e.text }))) {
+    toast(`${e.subject} 已有同样的记录。`, 'warning');
+    return;
+  }
+  if (e.id ? updateKnowledge(e.id, e.text) : addKnowledge(e.subject, e.text)) knowledgeEditing.value = null;
+}
+const removingKnowledge = ref<MemKnowledge | null>(null);
+function confirmRemoveKnowledge() {
+  if (removingKnowledge.value) removeKnowledge(removingKnowledge.value.id);
+  removingKnowledge.value = null;
+}
 </script>
 
 <template>
   <section class="bbs-page bbs-ledger">
     <PageHeader icon="npcs" title="角色" description="主角、主要角色和 NPC 的身份、外貌与近况，以及生活档案和信息差。">
       <template #actions>
+        <button class="bbs-btn" type="button" :disabled="!hasLeaf || npcRefileState.running"
+          :title="hasLeaf ? '按原文补齐漏记的角色，并重新整理全部角色的档案' : '需先有摘要才能重新建档'" @click="openRefile"><Icon name="refresh" />角色重新建档…</button>
         <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!hasLeaf"
           :title="hasLeaf ? '手动添加角色' : '需先有摘要才能手动添加'" @click="openComposer"><Icon name="plus" />添加角色</button>
       </template>
@@ -242,9 +356,11 @@ function confirmRemove() {
         { value: npcCount, label: '位 NPC' },
         { value: memory.lifeDetails.length, label: '条生活细节' },
         { value: openSecretCount, label: '条信息差' },
+        ...(knowledgeOn || memory.knowledge.length ? [{ value: memory.knowledge.length, label: '条了解记录' }] : []),
       ]"
       :note="hasLeaf ? undefined : '生成摘要后可手动补录'"
     />
+    <NpcRefilePanel :record="refileRecord" @continue="openRefile" @review="refileReviewOpen = true" @discard="refileDiscarding = true" />
 
     <!-- 一、主角:只记录用户操控的角色本人 -->
     <ProtagonistCard :name="protagonistName" :has-leaf="hasLeaf" />
@@ -255,8 +371,9 @@ function confirmRemove() {
         :hint="rosterNote ? `除主角外的主要登场角色；${rosterNote}。` : '除主角外的主要登场角色，档案与当前状态随正文发送。'" />
       <div v-if="mains.length" class="bbs-npc-list">
         <NpcCard v-for="n in mains" :key="n.id" :npc="n" tier="main" :can-enrich="hasLeaf"
-          :enriching="npcEnrichState.running === n.name" :enrich-busy="!!npcEnrichState.running"
-          @toggle-important="toggleImportant(n)" @edit="openEdit(n)" @remove="askRemove(n)" @enrich="startEnrich(n)" />
+          :enriching="npcEnrichState.running === n.name" :enrich-busy="!!npcEnrichState.running" v-bind="knowledgeBind(n)"
+          @toggle-important="toggleImportant(n)" @edit="openEdit(n)" @remove="askRemove(n)" @enrich="startEnrich(n)"
+          @knowledge-add="openKnowledge(n)" @knowledge-edit="k => openKnowledge(n, k)" @knowledge-remove="k => removingKnowledge = k" />
       </div>
       <EmptyState v-else compact icon="star" title="暂无主要角色" text="同伴、反复出场或推动主线的人物会被标为主要角色，也可在 NPC 卡片上点星标设定。" />
     </section>
@@ -279,8 +396,9 @@ function confirmRemove() {
             :hint="rosterNote ?? '完整信息随剧情发送'" />
           <div class="bbs-npc-list">
             <NpcCard v-for="n in visibleGroups.present" :key="n.id" :npc="n" tier="present" :can-enrich="hasLeaf"
-              :enriching="npcEnrichState.running === n.name" :enrich-busy="!!npcEnrichState.running"
-              @toggle-important="toggleImportant(n)" @toggle-follow="toggleFollow(n)" @edit="openEdit(n)" @remove="askRemove(n)" @enrich="startEnrich(n)" />
+              :enriching="npcEnrichState.running === n.name" :enrich-busy="!!npcEnrichState.running" v-bind="knowledgeBind(n)"
+              @toggle-important="toggleImportant(n)" @toggle-follow="toggleFollow(n)" @edit="openEdit(n)" @remove="askRemove(n)" @enrich="startEnrich(n)"
+              @knowledge-add="openKnowledge(n)" @knowledge-edit="k => openKnowledge(n, k)" @knowledge-remove="k => removingKnowledge = k" />
           </div>
         </div>
 
@@ -290,8 +408,9 @@ function confirmRemove() {
             :hint="rosterNote ?? '位于附近，发送名字、身份、性格、位置和身体状态'" />
           <div class="bbs-npc-list">
             <NpcCard v-for="n in visibleGroups.nearby" :key="n.id" :npc="n" tier="nearby" :can-enrich="hasLeaf"
-              :enriching="npcEnrichState.running === n.name" :enrich-busy="!!npcEnrichState.running"
-              @toggle-important="toggleImportant(n)" @toggle-follow="toggleFollow(n)" @edit="openEdit(n)" @remove="askRemove(n)" @enrich="startEnrich(n)" />
+              :enriching="npcEnrichState.running === n.name" :enrich-busy="!!npcEnrichState.running" v-bind="knowledgeBind(n)"
+              @toggle-important="toggleImportant(n)" @toggle-follow="toggleFollow(n)" @edit="openEdit(n)" @remove="askRemove(n)" @enrich="startEnrich(n)"
+              @knowledge-add="openKnowledge(n)" @knowledge-edit="k => openKnowledge(n, k)" @knowledge-remove="k => removingKnowledge = k" />
           </div>
         </div>
 
@@ -301,8 +420,9 @@ function confirmRemove() {
             :hint="rosterNote ?? ABSENT_HINT" />
           <div class="bbs-npc-list">
             <NpcCard v-for="n in visibleGroups.absent" :key="n.id" :npc="n" tier="absent" :can-enrich="hasLeaf"
-              :enriching="npcEnrichState.running === n.name" :enrich-busy="!!npcEnrichState.running"
-              @toggle-important="toggleImportant(n)" @toggle-follow="toggleFollow(n)" @edit="openEdit(n)" @remove="askRemove(n)" @enrich="startEnrich(n)" />
+              :enriching="npcEnrichState.running === n.name" :enrich-busy="!!npcEnrichState.running" v-bind="knowledgeBind(n)"
+              @toggle-important="toggleImportant(n)" @toggle-follow="toggleFollow(n)" @edit="openEdit(n)" @remove="askRemove(n)" @enrich="startEnrich(n)"
+              @knowledge-add="openKnowledge(n)" @knowledge-edit="k => openKnowledge(n, k)" @knowledge-remove="k => removingKnowledge = k" />
           </div>
         </div>
       </div>
@@ -326,6 +446,20 @@ function confirmRemove() {
       @save="saveEdit" @close="cancelEdit" />
     <NpcEnrichDialog :open="!!enrichDialog" :name="enrichDialog?.name ?? ''" :result="enrichDialog?.result ?? null"
       @apply="applyEnrich" @close="closeEnrich" />
+    <NpcRefileStartDialog :open="!!refileStart" :estimate="refileStart?.estimate ?? null" :resuming="refileStart?.resuming ?? false"
+      :sender-label="refileStart?.senderLabel ?? ''" @start="startRefile" @close="refileStart = null" />
+    <NpcRefileReview :open="refileReviewOpen && !!refileRecord" :record="refileRecord" @apply="applyRefile" @close="refileReviewOpen = false" />
+    <ConfirmDialog
+      :open="refileDiscarding"
+      title="放弃角色重新建档"
+      tone="danger"
+      confirm-text="放弃"
+      @update:open="v => { if (!v) refileDiscarding = false; }"
+      @confirm="confirmDiscardRefile"
+      @cancel="refileDiscarding = false"
+    >
+      放弃这次重新建档的结果？已找到的新角色和档案改动都不会写入。
+    </ConfirmDialog>
 
     <ConfirmDialog
       :open="!!removing"
@@ -338,6 +472,35 @@ function confirmRemove() {
       @cancel="removing = null"
     >
       删除「{{ removing?.name }}」？这项修改单独保存，重新摘要或重抽后仍然保留。
+    </ConfirmDialog>
+
+    <ModalShell :open="!!knowledgeEditing"
+      :title="knowledgeEditing ? `${knowledgeEditing.id ? '修改' : '添加'}${knowledgeEditing.subject}对${protagonistName}的了解` : ''"
+      @close="knowledgeEditing = null">
+      <template v-if="knowledgeEditing">
+        <label class="bbs-modal-field">
+          <span class="bbs-modal-label">该角色知道或以为的一件事，可在句首写明把握程度（认定、怀疑、听说、自称）；也可记录该角色不知道的事</span>
+          <textarea v-model="knowledgeEditing.text" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1"
+            :placeholder="`如：认定${protagonistName}是行商；不知道${protagonistName}的真实身份`"></textarea>
+        </label>
+      </template>
+      <template #footer>
+        <button class="bbs-btn" type="button" @click="knowledgeEditing = null">取消</button>
+        <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!knowledgeEditing?.text.trim()" @click="saveKnowledge">保存</button>
+      </template>
+    </ModalShell>
+
+    <ConfirmDialog
+      :open="!!removingKnowledge"
+      title="删除了解记录"
+      tone="danger"
+      confirm-text="删除"
+      confirm-icon="trash"
+      @update:open="v => { if (!v) removingKnowledge = null; }"
+      @confirm="confirmRemoveKnowledge"
+      @cancel="removingKnowledge = null"
+    >
+      删除「{{ removingKnowledge ? labelSnippet(removingKnowledge.text, 24) : '' }}」？这项修改单独保存，重新摘要或重抽后仍然保留。
     </ConfirmDialog>
   </section>
 </template>

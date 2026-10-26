@@ -48,6 +48,15 @@ describe('三类人物的记录规则', () => {
     for (const old of ['宁可漏记', '默认不记**', '极严筛选', '准入硬门槛', '写不出 title 的角色基本没有记录价值']) expect(RULE_NPCS).not.toContain(old);
     expect(RULE_NPCS).toContain('正文描写了发色、身材、五官');
   });
+  it('名册没有的登场人物都要建档:此前只被提到、主角不在场或其他角色视角中登场的也算;视角切走不是退场', () => {
+    for (const rule of ['以名册为准', '以前只被提到、本楼才真正登场的', '在主角不在场的场景或其他角色视角的段落里登场的', '只在一段支线中出场的',
+      '历史摘要、角色卡或世界书提到过不等于已经建档', '同一份 JSON 必须有对应的 npcs.add']) expect(RULE_NPC_LIST).toContain(rule);
+    expect(RULE_NPCS).toContain('视角切回其他人物、支线告一段落、角色暂时不再出场都不是退场');
+    expect(RULE_NPCS).toContain('新登场的角色不能因为定位不确定就不建档');
+    expect(THINKING_CHECKLIST).toContain('名册中没有的登场人物(含此前只被提到、主角不在场或其他角色视角中登场的)都要 add');
+    // 是否与主角互动不是建档条件(旧版的准入门槛)
+    expect(RULE_NPCS).not.toContain('与 {{user}} 发生过');
+  });
   it('输出协议一眼分清主要角色与 NPC:两个 add 示例、important 写法、rename 操作', () => {
     expect(SUMMARY_PROMPT).toContain('"name": "主要角色名", "important": true');
     expect(SUMMARY_PROMPT).toContain('"name": "NPC名;没有名字用职业或身份加大写字母,如酒保A"');

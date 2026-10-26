@@ -38,8 +38,10 @@ const pendingWindow = computed(() => arrayPage(ranges.value, pendingPage.value, 
 watch(() => pendingWindow.value.page, p => { pendingPage.value = p; });
 page.onReset(() => { pendingPage.value = 1; });
 
-// 进度条宽度：已完成 / 总数
-const batchPercent = computed(() => (batchState.total ? Math.min(100, Math.round((batchState.done / batchState.total) * 100)) : 0));
+// 进度条宽度：已完成 / 总数（全部重新摘要继续时，加上这次开始之前已完成的楼层）
+const batchDone = computed(() => batchState.priorDone + batchState.done);
+const batchTotal = computed(() => batchState.priorDone + batchState.total);
+const batchPercent = computed(() => (batchTotal.value ? Math.min(100, Math.round((batchDone.value / batchTotal.value) * 100)) : 0));
 const summarizingFloor = computed<number | null>(() => {
   // derivedMeta.rev 让切聊天后的 computed 重新核对当前 chatId。
   void derivedMeta.rev;
@@ -78,7 +80,7 @@ async function markOmit(floor: number) {
   <div v-if="batchState.running" class="bbs-pending bbs-job-progress" role="status" aria-live="polite">
     <div class="bbs-batch-progress">
       <span class="bbs-spin"></span>
-      <span class="bbs-batch-count">{{ batchState.mode === 'rebuild' ? '正在重建' : '正在补摘' }} {{ batchState.done }}/{{ batchState.total }}</span>
+      <span class="bbs-batch-count">{{ batchState.mode === 'rebuild' ? '正在全部重新摘要' : '正在补摘' }} {{ batchDone }}/{{ batchTotal }}</span>
       <span v-if="batchState.lite && batchState.stage" class="bbs-batch-stage">{{ batchState.stage === 'lite' ? '较早楼层合并摘要' : '逐层摘要' }}</span>
       <span v-if="batchEta" class="bbs-batch-eta">{{ batchEta }}</span>
       <button class="bbs-btn bbs-btn-sm bbs-batch-cancel" type="button" :disabled="batchState.cancelRequested" @click="cancelBatchBackfill">

@@ -12,14 +12,14 @@ import { extractJsonObject } from './json';
 import { npcMentioned } from './npcLabel';
 import { planAutoEnrichment, readEnrichRecord, runAutoEnrichment, writeEnrichRecords, type EnrichRecordUpdate } from './npcEnrich';
 import { parseSummaryResponse, SummaryResponseError, describeDropped, type DroppedEvidence } from './summaryResponse';
-import { buildConditionPatchContext } from './conditionPatch';
+import { selectKnowledgeForSummary } from './knowledge';
 import { clearInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
 import { BATCH_SUMMARY_THINKING_CHECKLIST, buildBatchSummaryPrompt, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, isDeepSeekModel, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
 import { clampToTimeTags, cleanBody, explicitOpeningTime, hasStoryBody, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, latestStoryTime, parseTimeRange, storyTimeValue, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import { memory, memoryWriteIssue, checkCompatibility, recomputeDerived, scheduleLeafFlush } from './store';
 import { legacyLeafIssue } from './compatibility';
-import type { LeafConflict, LeafExtra, MemSummary, NpcEnrichment, StoredDelta, SummaryDelta } from './types';
+import type { LeafConflict, LeafExtra, MemKnowledge, MemSummary, NpcEnrichment, StoredDelta, SummaryDelta } from './types';
 import { scheduleVectorIndex } from './vector';
 import { invalidateRecallCache } from './vector/cache';
 import { clearRecallInjection } from './vector/recall';
@@ -83,8 +83,10 @@ export const batchState = reactive({
   done: 0,
   total: 0,
   cancelRequested: false, // 用户已点取消、等楼层边界生效
-  /** 补摘(只补没有摘要的楼)还是重建(所有楼重摘),界面据此换说法 */
+  /** 补摘(只补没有摘要的楼)还是全部重新摘要(所有楼重摘),界面据此换说法 */
   mode: 'backfill' as 'backfill' | 'rebuild',
+  /** 全部重新摘要中断后继续时,这次开始之前已经完成的楼层数;界面显示总进度时加上它 */
+  priorDone: 0,
   /** 本次是否把较早楼层合并请求(只写摘要和时间);界面据此显示阶段,耗时按「每次请求」说 */
   lite: false,
   /** 当前阶段:较早楼层合并摘要(lite)或逐层完整摘要(full);未开始为空 */
@@ -821,7 +823,7 @@ export async function previewRegenerateFloor(floor: number): Promise<FloorPrevie
   await runSummary(floor, { replaceLeaf: current, checkResummary: false, onPrepared: p => { box.pending = p; } });
   const pending = box.pending;
   if (!pending || engineState.lastError) return null;
-  const preview: FloorPreview = { floor, current, next: buildLeafParts(chat, floor, pending.delta, pending.stateBefore) };
+  const preview: FloorPreview = { floor, current, next: buildLeafParts(chat, floor, pending.delta, pending.stateBefore, pending.knowledge) };
   pendingPreviews.set(preview, pending);
   return preview;
 }
@@ -1237,6 +1239,8 @@ interface RunSummaryOptions {
   quietIfSourceChanged?: boolean;
   /** 重建记忆:替换叶子时不沿用 Horae 迁移来的状态(重建会按正文重新推算,沿用会重复累加) */
   rebuild?: boolean;
+  /** 全部重新摘要的运行 id:写在新叶子上,中断后继续据此跳过已完成的楼层 */
+  rebuildRun?: string;
 }
 
 /** 摘要期间聊天或这层正文变了(切聊天、重抽、续写、编辑),结果按旧内容写成,不能写入。 */
@@ -1261,8 +1265,33 @@ interface PendingFloorSummary {
   dropped: DroppedEvidence[];
   /** 重建记忆:不沿用迁移来的状态 */
   rebuild: boolean;
+  /** 全部重新摘要的运行 id(落叶时写在叶子上) */
+  rebuildRun?: string;
+  /** 了解清单开启时请求里附带的上下文(k1/k2… 的顺序、名册);落叶时按它固化,关闭时为空 */
+  knowledge?: SummaryKnowledgeContext;
   /** 聊天、来源正文、页码等没变才放行,否则抛错 */
   assertUnchanged: () => void;
+}
+
+/** 了解清单的摘要上下文:提示词里展示的条目(顺序即 k1/k2…)、本楼之前的名册和主角名。 */
+interface SummaryKnowledgeContext {
+  shown: MemKnowledge[];
+  roster: string[];
+  userName: string;
+}
+
+/**
+ * 了解清单开启时,摘要请求只附相关角色的条目:主要角色、在场或同区域的角色、本楼正文提到的角色。
+ * 单字名几乎每段正文都能命中,提到只认两个字以上的名字。
+ */
+function summaryKnowledgeContext(stateBefore: ReturnType<typeof deriveMemory>, floorText: string, userName: string): SummaryKnowledgeContext {
+  const names = stateBefore.npcs.filter(n => {
+    if (n.important) return true;
+    const presence = classifyNpcPresence(n, stateBefore.scenes, stateBefore.state.location, stateBefore.state.locationPath);
+    if (presence === 'present' || presence === 'nearby') return true;
+    return Array.from(n.name.trim()).length >= 2 && npcMentioned(floorText, n.name, n.formerNames);
+  }).map(n => n.name);
+  return { shown: selectKnowledgeForSummary(stateBefore.knowledge, names), roster: stateBefore.npcs.map(n => n.name), userName };
 }
 
 export function runSummary(aiFloor: number, options: RunSummaryOptions = {}): Promise<void> {
@@ -1322,6 +1351,7 @@ function buildLeafParts(
   aiFloor: number,
   delta: SummaryDelta,
   stateBefore: ReturnType<typeof deriveMemory>,
+  knowledge?: SummaryKnowledgeContext,
 ): { text: string; delta: StoredDelta; timeStart?: string; timeEnd?: string; conflicts?: LeafConflict[] } {
   // 时间锚点:从该楼正文标签读起止(先裁剪到正文段,跳过思维链/状态栏里混入的同名标签)
   const tag = parseTimeRange(clampToTimeTags(chat[aiFloor].mes));
@@ -1329,8 +1359,8 @@ function buildLeafParts(
   // 未了结计划的有序列表:顺序即提示词里的 p1/p2…,用于把 update/resolve 短序号翻译成稳定 id
   const openPlansOrdered = stateBefore.plans.filter(p => p.status === 'open');
   // 生活小档案当前列表:顺序即提示词里的 d1/d2…,用于把 update/archive/remove 短序号翻译成稳定 id
-  // 未结案信息差:顺序即提示词里的 s1/s2…
-  const storedDelta = finalizeDelta(delta, openPlansOrdered, stateBefore.lifeDetails, stateBefore.secrets.filter(s => s.status === 'open'));
+  // 未结案信息差:顺序即提示词里的 s1/s2…;了解清单按请求时附带的 k1/k2…(功能关闭时不收)
+  const storedDelta = finalizeDelta(delta, openPlansOrdered, stateBefore.lifeDetails, stateBefore.secrets.filter(s => s.status === 'open'), knowledge);
 
   // 时间起止:标签优先(与新剧情同源不漂移);标签缺的那端用 AI 补的 timeStart/timeEnd 兜底。
   const timeStart = tag.start || storyTimeValue(delta.timeStart);
@@ -1361,7 +1391,7 @@ function applyLeafForFloor(
   delta: SummaryDelta,
   stateBefore: ReturnType<typeof deriveMemory>,
   replaceLeaf?: LeafExtra,
-  extras: { enriched?: NpcEnrichment[]; dropped?: DroppedEvidence[]; rebuild?: boolean } = {},
+  extras: { enriched?: NpcEnrichment[]; dropped?: DroppedEvidence[]; rebuild?: boolean; rebuildRun?: string; knowledge?: SummaryKnowledgeContext } = {},
 ): void {
   if (!chat[aiFloor]) {
     throw new Error(`摘要没有保存：楼层 #${aiFloor} 已经不在了（可能在请求期间被删除）。`);
@@ -1369,7 +1399,7 @@ function applyLeafForFloor(
   if (replaceLeaf && getLeaf(chat[aiFloor]) !== replaceLeaf) {
     throw new Error(`重新摘要没有保存：楼层 #${aiFloor} 的原摘要在请求期间被改动了。`);
   }
-  const parts = buildLeafParts(chat, aiFloor, delta, stateBefore);
+  const parts = buildLeafParts(chat, aiFloor, delta, stateBefore, extras.knowledge);
   const storedDelta = parts.delta;
   const { timeStart, timeEnd } = parts;
 
@@ -1390,6 +1420,9 @@ function applyLeafForFloor(
   if (previous?.manualOps && Object.keys(previous.manualOps).length) leaf.manualOps = previous.manualOps;
   if (!extras.rebuild && previous?.migratedDelta && Object.keys(previous.migratedDelta).length) leaf.migratedDelta = previous.migratedDelta;
   if (extras.dropped?.length) leaf.dropped = extras.dropped.map(d => ({ ...d }));
+  // 单楼重新摘要沿用原标记:这一楼已经按当前提示词重新摘要过,继续全部重新摘要时不必再做
+  const rebuildRun = extras.rebuildRun ?? previous?.rebuildRun;
+  if (rebuildRun) leaf.rebuildRun = rebuildRun;
   if (replaceLeaf) invalidateSummaryAncestors(replaceLeaf.id);
   chat[aiFloor].extra = { ...(chat[aiFloor].extra ?? {}), bbs_leaf: leaf };
   // 叶子正文/摘要已变 → 召回读到的向量内容会变,立即失效召回缓存(防重生成/翻页复用旧召回)。
@@ -1433,7 +1466,7 @@ async function summarizeFloorWork(
   chat: STMessage[],
   aiFloor: number,
   sender: Sender,
-  options: Pick<RunSummaryOptions, 'replaceLeaf' | 'onRequestStart' | 'initializeOpening' | 'onPrepared' | 'rebuild'> = {},
+  options: Pick<RunSummaryOptions, 'replaceLeaf' | 'onRequestStart' | 'initializeOpening' | 'onPrepared' | 'rebuild' | 'rebuildRun'> = {},
 ): Promise<void> {
   const ctx = getContext();
   if (!ctx) throw new Error('酒馆上下文还没准备好。');
@@ -1486,6 +1519,8 @@ async function summarizeFloorWork(
   const fictionalOpening = !priorTime && !!initialStoryTime() && ctx.chatMetadata?.[INITIAL_TIME_ORIGIN_KEY] === 'fictional';
   // 本楼正文(不含段落编号):判断角色是否在本楼被提到(名册简列、回看原文补档案都用它)
   const floorText = targets.map(i => cleanBody(chat[i].mes)).join('\n');
+  // 了解清单:设置里开启才附规则、字段和相关角色的清单;关闭时请求里没有任何相关文字,模型输出也不收
+  const knowledge = apiSettings.injection.knowledge ? summaryKnowledgeContext(stateBefore, floorText, ctx.name1) : undefined;
   const prompt = buildSummaryPrompt({
     user: ctx.name1,
     char: ctx.name2,
@@ -1509,6 +1544,8 @@ async function summarizeFloorWork(
     openPlans: openPlansOrdered.map(p => ({ kind: p.kind, content: p.content, createdTime: p.createdTime, targetTime: p.targetTime })),
     // 未结案信息差:顺序即 s1/s2…(与 finalizeDelta 翻译稳定 id 同口径)
     secrets: stateBefore.secrets.filter(s => s.status === 'open').map(s => ({ content: s.content, knownBy: s.knownBy, unaware: s.unaware })),
+    // 了解清单:顺序即 k1/k2…(落叶时按同一份上下文固化)
+    knowledge: knowledge?.shown,
     // 近期已完成计划:与注入端同口径,截止点用本楼之前的状态(不泄漏未来)
     resolvedPlans: selectRecentResolvedPlans(stateBefore.plans, apiSettings.recentResolvedPlansCount),
     history,
@@ -1521,8 +1558,7 @@ async function summarizeFloorWork(
   }, { contentBoundary: sender.contentBoundary });
 
   const builtin = usesBuiltinSummary();
-  const conditionBlock = builtin ? buildConditionPatchContext(stateBefore) : '';
-  const { checklist, prefill } = buildSummaryThinking(ctx.name1);
+  const { checklist, prefill } = buildSummaryThinking(ctx.name1, !!knowledge);
   // 越稳定的越靠前:任务说明、规则、角色卡、主角设定在同一个聊天里基本不变;世界书按本楼内容激活、每楼不同,
   // 排在它们后面。这样支持前缀缓存的服务商能复用前面那段两三万字的规则,批量补摘省钱也更快。
   const messages: ChatMsg[] = [];
@@ -1533,7 +1569,6 @@ async function summarizeFloorWork(
   if (persona) messages.push({ role: 'system', content: buildPersonaSystem(persona) });
   if (worldInfo) messages.push({ role: 'system', content: buildWorldInfoSystem(worldInfo) });
   messages.push(
-    ...(conditionBlock ? [{ role: 'system' as const, content: conditionBlock }] : []),
     { role: 'user', content: prompt.user },
     { role: 'system', content: checklist },
     { role: 'assistant', content: prefill },
@@ -1554,11 +1589,11 @@ async function summarizeFloorWork(
       requireStateChanges: builtin,
       sourceContent: content,
       sourceTexts: targets.map(i => cleanBody(chat[i].mes)),
-      conditionContext: { ...stateBefore, content, strict: builtin },
       npcRoster: stateBefore.npcs.map(n => n.name),
       userName: ctx.name1,
-      finalize: value => finalizeDelta(value, openPlansOrdered, stateBefore.lifeDetails, openSecrets),
+      finalize: value => finalizeDelta(value, openPlansOrdered, stateBefore.lifeDetails, openSecrets, knowledge),
       refCounts: { plans: openPlansOrdered.length, lifeDetails: stateBefore.lifeDetails.length, secrets: openSecrets.length },
+      ...(knowledge ? { knowledge: { shown: knowledge.shown.length } } : {}),
       onSkipped: list => { skipped = list; },
       ...(finalAttempt ? { onDroppedEvidence: (list: DroppedEvidence[]) => { dropped = list; } } : {}),
     });
@@ -1591,7 +1626,7 @@ async function summarizeFloorWork(
   // 回看原文补档案:主摘要解析之后、写入叶子之前。本楼新增或被提到、档案缺外貌/身份/性别的角色,
   // 到建档之前的原文里检索并发一个小请求;失败不影响本楼摘要,只在提交时记下状态。
   // 重新摘要(含先对比)只沿用原叶子的补档结果,不发新请求;设置里关闭时同样只沿用、不请求。
-  const parts = buildLeafParts(chat, aiFloor, delta, stateBefore);
+  const parts = buildLeafParts(chat, aiFloor, delta, stateBefore, knowledge);
   // 替换旧叶子时,它单独保存的手动修改和迁移状态会沿用到新叶子(见 applyLeafForFloor),这里一并算进本楼之后的状态:
   // 手动新增的角色才认得出,原来的补档结果不会因为「新结果里没有这个角色」而被丢掉。重建不沿用迁移状态。
   const previous = options.replaceLeaf;
@@ -1618,6 +1653,8 @@ async function summarizeFloorWork(
     enrichRecords: enrichment.records,
     dropped: [...dropped, ...skipped],
     rebuild: !!options.rebuild,
+    ...(options.rebuildRun ? { rebuildRun: options.rebuildRun } : {}),
+    knowledge,
     assertUnchanged,
   };
   // 预览模式:交出结果就停,不落叶;用户选「用新的」后由 applyFloorPreview 提交。
@@ -1641,7 +1678,7 @@ export function droppedNotice(floor: number, dropped: DroppedEvidence[], userNam
 /** 落叶并刷新派生/注入/落盘/向量;提交前再核对一次聊天和这层正文没变。 */
 function commitFloorSummary(p: PendingFloorSummary): void {
   p.assertUnchanged();
-  applyLeafForFloor(p.chat, p.aiFloor, p.delta, p.stateBefore, p.replaceLeaf, { enriched: p.enriched, dropped: p.dropped, rebuild: p.rebuild });
+  applyLeafForFloor(p.chat, p.aiFloor, p.delta, p.stateBefore, p.replaceLeaf, { enriched: p.enriched, dropped: p.dropped, rebuild: p.rebuild, rebuildRun: p.rebuildRun, knowledge: p.knowledge });
   engineState.lastRunAt = Date.now();
   // 补档记录随叶子一起提交:预览后选「保留现在的」时不写,之后仍可再补
   writeEnrichRecords(p.enrichRecords);
@@ -1699,7 +1736,7 @@ async function runSummaryInner(aiFloor: number, options: RunSummaryOptions = {})
   }
 }
 
-/* ============ 批量补摘/重建 ============ */
+/* ============ 批量补摘/全部重新摘要 ============ */
 
 /** 批量补摘选项 */
 export interface BatchBackfillOpts {
@@ -1707,6 +1744,11 @@ export interface BatchBackfillOpts {
   floors?: number[];
   /** 显式重建：也重新摘要已有叶子，失败保留该楼旧数据。 */
   regenerate?: boolean;
+  /**
+   * 全部重新摘要的运行记录(隐含 regenerate):只处理范围内还没有本次标记的楼层,每楼写完在叶子上标记运行 id;
+   * 开始时写进 chatMetadata,范围内全部完成后删除。floors 此时不用。
+   */
+  rebuildRun?: RebuildRun;
   /**
    * 较早楼层合并摘要:最近 batchFullRecent 层仍逐层完整摘要;更早的待摘楼层每 batchMaxFloors 层左右
    * 合并为一次请求,只写摘要和时间。只用于补摘,重建时忽略。
@@ -1743,6 +1785,118 @@ export interface BatchPlan {
 
 /** 少于这么多层的连续待摘楼层(多为中间漏摘的洞)仍逐层完整摘要,不合并。 */
 const LITE_MIN_RUN = 3;
+
+/** chatMetadata 里全部重新摘要的运行记录键。 */
+export const REBUILD_RUN_KEY = 'prism_book_rebuild_run';
+
+/**
+ * 一次全部重新摘要:范围是开始时选定的起始楼层到开始时最后一个可处理的楼层(含)。之后新产生的楼层照常自动摘要,
+ * 不算进这次。每楼成功后叶子带上 id(LeafExtra.rebuildRun),中断后继续只处理范围内还没有这个标记的楼层。
+ */
+export interface RebuildRun {
+  id: string;
+  startFloor: number;
+  endFloor: number;
+  startedAt: number;
+}
+
+/** 运行记录变化时加一,界面据此刷新进度(chatMetadata 不是响应式数据)。 */
+export const rebuildRunState = reactive({ rev: 0 });
+
+/** 读运行记录;没有或格式不对时返回 null,不改动原数据。 */
+export function readRebuildRun(meta: Record<string, unknown> | undefined = getContext()?.chatMetadata as Record<string, unknown> | undefined): RebuildRun | null {
+  const raw = meta?.[REBUILD_RUN_KEY];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const floor = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0;
+  if (typeof r.id !== 'string' || !r.id || !floor(r.startFloor) || !floor(r.endFloor) || r.startFloor > r.endFloor) return null;
+  return { id: r.id, startFloor: r.startFloor, endFloor: r.endFloor, startedAt: typeof r.startedAt === 'number' ? r.startedAt : 0 };
+}
+
+/** 写入或删除(run=null)运行记录并保存聊天元数据。meta 须是这次运行所属聊天的元数据。 */
+function writeRebuildRun(meta: Record<string, unknown>, run: RebuildRun | null): void {
+  if (run) meta[REBUILD_RUN_KEY] = { ...run };
+  else delete meta[REBUILD_RUN_KEY];
+  rebuildRunState.rev++;
+  if (getContext()?.chatMetadata === meta) getContext()?.saveMetadataDebounced?.();
+}
+
+/**
+ * 全部重新摘要会处理的楼层(由旧到新):AI 楼,跳过继承种子、导入旧总结覆盖的楼层、无法确定分页归属的旧摘要,
+ * 以及清洗后没有故事正文的楼层(保留原摘要)。记忆受保护时为空。
+ */
+export function rebuildableFloors(chat: STMessage[] = getContext()?.chat ?? []): number[] {
+  if (getContext()?.chat === chat && memoryWriteIssue()) return [];
+  const imported = importedHistoryRanges();
+  const out: number[] = [];
+  chat.forEach((m, i) => {
+    if (!isAiFloor(m) || getLeaf(m)?.seed || floorInImportedRanges(i, imported) || legacyLeafIssue(m?.extra?.bbs_leaf, m)) return;
+    if (hasStoryBody(m.mes)) out.push(i);
+  });
+  return out;
+}
+
+/** 这一楼当前显示的回复是否已由这次运行重新摘要(翻页、重抽后不算)。 */
+function rebuiltIn(m: STMessage | undefined, runId: string): boolean {
+  return leafValid(m) && getLeaf(m)?.rebuildRun === runId;
+}
+
+/** 全部重新摘要的进度:范围内可处理的楼层数、已完成数和下一个要处理的楼层(全部完成为 null)。 */
+export interface RebuildProgress {
+  run: RebuildRun;
+  total: number;
+  done: number;
+  next: number | null;
+}
+
+/** 按运行记录和叶子标记算进度;没有记录时返回 null。 */
+export function rebuildProgress(
+  chat: STMessage[] = getContext()?.chat ?? [],
+  meta: Record<string, unknown> | undefined = getContext()?.chatMetadata as Record<string, unknown> | undefined,
+): RebuildProgress | null {
+  const run = readRebuildRun(meta);
+  if (!run) return null;
+  let done = 0;
+  let next: number | null = null;
+  const floors = rebuildableFloors(chat).filter(f => f >= run.startFloor && f <= run.endFloor);
+  for (const f of floors) {
+    if (rebuiltIn(chat[f], run.id)) done++;
+    else if (next === null) next = f;
+  }
+  return { run, total: floors.length, done, next };
+}
+
+/** 新开一次全部重新摘要时要处理的楼层:from 起(不填为第一个可处理的楼层)的全部可处理楼层。 */
+export function rebuildPlanFloors(from?: number, chat: STMessage[] = getContext()?.chat ?? []): number[] {
+  const floors = rebuildableFloors(chat);
+  return from === undefined ? floors : floors.filter(f => f >= from);
+}
+
+/**
+ * 新开一次全部重新摘要:从 from(不填为第一个可处理的楼层;不是可处理的楼层时从它之后的第一个开始)
+ * 到当前最后一个可处理的楼层。原有的未完成记录被替换。
+ */
+export function startRebuild(from?: number): Promise<BatchBackfillResult> {
+  const floors = rebuildPlanFloors(from);
+  if (!floors.length) return Promise.resolve({ done: 0, total: 0, cancelled: false });
+  const id = 'rb-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+  return batchBackfill({ rebuildRun: { id, startFloor: floors[0], endFloor: floors[floors.length - 1], startedAt: Date.now() } });
+}
+
+/** 继续未完成的全部重新摘要:只处理范围内还没有本次标记的楼层。没有记录时什么也不做。 */
+export function continueRebuild(): Promise<BatchBackfillResult> {
+  const run = readRebuildRun();
+  if (!run) return Promise.resolve({ done: 0, total: 0, cancelled: false });
+  return batchBackfill({ rebuildRun: run });
+}
+
+/** 结束未完成的全部重新摘要:只删运行记录,已有摘要不变。正在处理或记忆受保护时不删,返回 false。 */
+export function discardRebuildRun(): boolean {
+  const meta = getContext()?.chatMetadata as Record<string, unknown> | undefined;
+  if (busy || !meta || memoryWriteIssue()) return false;
+  if (readRebuildRun(meta)) writeRebuildRun(meta, null);
+  return true;
+}
 
 /** 某 AI 楼送去摘要的原文字数(含它前面的用户发言),用于给合并请求分组。 */
 function floorSourceChars(chat: STMessage[], floor: number): number {
@@ -1829,24 +1983,34 @@ async function batchBackfillWork(opts: BatchBackfillOpts): Promise<BatchBackfill
   const ctx = getContext();
   if (!ctx) return { done: 0, total: 0, cancelled: false };
   const chat = ctx.chat ?? [];
+  const run = opts.rebuildRun;
+  const regenerate = !!opts.regenerate || !!run;
+  const meta = ctx.chatMetadata as Record<string, unknown> | undefined;
+  const jobName = regenerate ? '全部重新摘要' : '批量补摘';
 
   // 目标楼层:显式传入则过滤成「当前确实待摘的 AI 楼」(防陈旧),否则取全部待摘
   // 重建跳过继承种子、导入历史覆盖的楼层,以及无法确定分页归属的旧摘要(不覆盖)
-  const pending = new Set(opts.regenerate
+  const pending = new Set(regenerate
     ? chat.map((m, i) => isAiFloor(m) && !getLeaf(m)?.seed && !importedHistoryCovers(i) && !legacyLeafIssue(m?.extra?.bbs_leaf, m) ? i : -1).filter(i => i >= 0)
     : pendingAiFloors(chat));
-  const requested = [...new Set(opts.floors ?? [...pending])].filter(f => pending.has(f)).sort((a, b) => a - b);
+  // 全部重新摘要:范围内可处理的楼层里,只做还没有本次标记的
+  const runFloors = run ? rebuildableFloors(chat).filter(f => f >= run.startFloor && f <= run.endFloor) : [];
+  const requested = run
+    ? runFloors.filter(f => !rebuiltIn(chat[f], run.id))
+    : [...new Set(opts.floors ?? [...pending])].filter(f => pending.has(f)).sort((a, b) => a - b);
   // 清洗后没有故事正文的楼层不请求 AI:补摘时跳过并在结束后说明改法(重建时保留原摘要)
   const bodyless = requested.filter(f => !hasStoryBody(chat[f].mes));
   const floors = requested.filter(f => hasStoryBody(chat[f].mes));
   const total = floors.length;
   const queued = new Map(floors.map(f => [f, { message: chat[f], text: chat[f].mes, swipe: chat[f].swipe_id }]));
   if (total === 0) {
-    if (bodyless.length && !opts.regenerate) { engineState.lastError = noStoryBodyMessage(bodyless); engineState.lastFailure = null; }
+    if (bodyless.length && !regenerate) { engineState.lastError = noStoryBodyMessage(bodyless); engineState.lastFailure = null; }
+    // 继续时已经没有剩下的楼层:这次运行已完成
+    if (run && meta && readRebuildRun(meta)?.id === run.id) writeRebuildRun(meta, null);
     await afterSummaryHideAndInject(chat);
     return { done: 0, total: 0, cancelled: false };
   }
-  const plan = planBatchBackfill(chat, floors, { lite: !!opts.lite && !opts.regenerate });
+  const plan = planBatchBackfill(chat, floors, { lite: !!opts.lite && !regenerate });
 
   const chatId = ctx.getCurrentChatId?.();
   console.log('[棱镜宝书] 批量记忆处理:', total, '楼,', plan.liteSteps ? `其中 ${plan.liteFloors} 楼合并为 ${plan.liteSteps} 次请求,` : '', sender.label);
@@ -1855,12 +2019,15 @@ async function batchBackfillWork(opts: BatchBackfillOpts): Promise<BatchBackfill
   engineState.running = true;
   engineState.lastError = '';
   engineState.lastFailure = null;
+  // 运行记录在真正开始时写入:取消、失败或刷新后据此从停下的楼层继续
+  if (run && meta) writeRebuildRun(meta, run);
   // 批量状态(模块级单例)→ UI 跨关窗重开可恢复进度/取消
   batchState.running = true;
   batchState.cancelRequested = false;
   batchState.done = 0;
   batchState.total = total;
-  batchState.mode = opts.regenerate ? 'rebuild' : 'backfill';
+  batchState.mode = regenerate ? 'rebuild' : 'backfill';
+  batchState.priorDone = run ? runFloors.length - requested.length : 0;
   batchState.lite = plan.liteSteps > 0;
   batchState.stage = '';
   batchState.steps = plan.steps.length;
@@ -1888,12 +2055,16 @@ async function batchBackfillWork(opts: BatchBackfillOpts): Promise<BatchBackfill
       const step = queue.shift()!;
       if (batchState.cancelRequested) { cancelled = true; break; }
       if (getContext()?.chat !== chat || getContext()?.getCurrentChatId?.() !== chatId) {
-        throw new Error('聊天切换了，批量补摘已停止，请回到原来的聊天继续。');
+        throw new Error(run
+          ? '聊天切换了，全部重新摘要已停止。回到原来的聊天后，可在摘要页点「继续」从停下的楼层接着处理。'
+          : `聊天切换了，${jobName}已停止，请回到原来的聊天继续。`);
       }
       for (const f of step.floors) {
         const source = queued.get(f)!;
         if (!isAiFloor(chat[f]) || chat[f] !== source.message || chat[f].mes !== source.text || chat[f].swipe_id !== source.swipe) {
-          throw new Error('有楼层被改动，批量补摘已停止。');
+          throw new Error(run
+            ? '有楼层被改动，全部重新摘要已停止。可在摘要页点「继续」，改动过的楼层按新内容重新摘要。'
+            : `有楼层被改动，${jobName}已停止。`);
         }
       }
       batchState.stage = step.lite ? 'lite' : 'full';
@@ -1923,13 +2094,13 @@ async function batchBackfillWork(opts: BatchBackfillOpts): Promise<BatchBackfill
         }
       } else {
         const f = step.floors[0];
-        const replaceLeaf = opts.regenerate ? getLeaf(chat[f]) ?? undefined : undefined;
-        await summarizeFloorWork(chat, f, sender, { replaceLeaf, rebuild: !!opts.regenerate });
+        const replaceLeaf = regenerate ? getLeaf(chat[f]) ?? undefined : undefined;
+        await summarizeFloorWork(chat, f, sender, { replaceLeaf, rebuild: regenerate, ...(run ? { rebuildRun: run.id } : {}) });
         done += 1;
         // 每楼写完跑一轮总结(与平时自动摘要一致),逐楼请求带的前情不会越积越长。
         // 重建时只合并覆盖楼层都早于下一个待重建楼层的根节点,免得合并后又被下一楼的重建作废。
-        const nextFloor = opts.regenerate ? queue[0]?.floors[0] : undefined;
-        const pass = await resummaryPass(opts.regenerate && nextFloor !== undefined ? { beforeFloor: nextFloor } : {});
+        const nextFloor = regenerate ? queue[0]?.floors[0] : undefined;
+        const pass = await resummaryPass(regenerate && nextFloor !== undefined ? { beforeFloor: nextFloor } : {});
         if (pass.failed) resummaryError = engineState.lastError;
         else if (pass.made) clearStaleResummaryError();
       }
@@ -1949,9 +2120,14 @@ async function batchBackfillWork(opts: BatchBackfillOpts): Promise<BatchBackfill
     batchState.cancelRequested = false;
     batchState.stage = '';
   }
-  if (bodyless.length && !opts.regenerate && !engineState.lastError) {
+  if (bodyless.length && !regenerate && !engineState.lastError) {
     engineState.lastError = noStoryBodyMessage(bodyless);
     engineState.lastFailure = null;
+  }
+  // 全部重新摘要:范围内都完成才删运行记录;取消、失败或切换聊天时保留,之后可以继续
+  if (run && meta && getContext()?.chat === chat && getContext()?.chatMetadata === meta) {
+    const progress = rebuildProgress(chat, meta);
+    if (progress?.run.id === run.id && progress.next === null) writeRebuildRun(meta, null);
   }
   if (getContext()?.chat === chat) await afterSummaryHideAndInject(chat);
   return { done, total, cancelled };

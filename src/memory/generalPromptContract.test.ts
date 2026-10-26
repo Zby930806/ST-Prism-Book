@@ -47,6 +47,17 @@ describe('v0.10 共享事实边界与冲突消除', () => {
     // 未接入设置页的宏说明已删除
     expect(p).not.toHaveProperty('QUERY_REWRITE_MACROS');
   });
+  it('检索重写固定5条查询,示例也是5条;不再按需减少条数', () => {
+    expect(p.QUERY_REWRITE_SYSTEM).toContain('固定写5条查询');
+    expect(p.QUERY_REWRITE_SYSTEM).toContain('之后恰好5行');
+    expect(p.QUERY_REWRITE_TAIL).toContain('之后恰好5行');
+    for (const text of [p.QUERY_REWRITE_SYSTEM, p.QUERY_REWRITE_TAIL]) {
+      expect(text).not.toMatch(/按需1—3|不硬凑数量|只给一条/);
+    }
+    const example = p.QUERY_REWRITE_SYSTEM.slice(p.QUERY_REWRITE_SYSTEM.indexOf('例(人名只演示格式)'));
+    expect(example.match(/^Q: /gm)).toHaveLength(5);
+    expect(example.match(/^INTENT: (.+)$/m)?.[1].length).toBeLessThanOrEqual(200);
+  });
   it('地点建档不再允许以短期现场状态凑描述', () => {
     for (const rule of ['临时现场状态即使加了日期也不作为地点特征入档', '空间结构、用途或稳定特征',
       '无稳定要点则不新建', '关键历史事件须确已发生并改变地点意义']) expect(p.RULE_SCENES).toContain(rule);

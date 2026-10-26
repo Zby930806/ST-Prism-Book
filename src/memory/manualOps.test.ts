@@ -67,6 +67,35 @@ describe('手动修改单独保存', () => {
     expect(memory.npcs[0].outfit).toBe('便服');
   });
 
+  it('角色页清空已有内容后保存:着装、状态、性别、年龄、ties、性格都清掉;原来就空的字段不记成清空', () => {
+    const chat = [leafMsg({ npcs: { add: [{ name: '洛伊', gender: '女', age: '二十', ties: '镇长之女', personality: '沉稳', outfit: '制服', condition: '左臂擦伤' }] } })];
+    useChat(chat);
+    expect(memory.npcs[0]).toMatchObject({ gender: '女', age: '二十', outfit: '制服', condition: '左臂擦伤' });
+    expect(editNpc('洛伊', { gender: '', age: '', ties: '', personality: '', outfit: '', condition: '', desc: '', title: '' })).toBe(true);
+    for (const key of ['gender', 'age', 'ageTime', 'ties', 'personality', 'outfit', 'condition', 'conditionTime'] as const) {
+      expect(memory.npcs[0][key], key).toBeUndefined();
+    }
+    const update = leafOf(chat[0]).manualOps?.npcs?.update?.[0];
+    expect(update).toMatchObject({ name: '洛伊', gender: '', age: '', ties: '', personality: '', outfit: '', condition: '' });
+    expect(update?.desc).toBeUndefined();
+    expect(update?.title).toBeUndefined();
+    // 重新摘要这一楼:原来就空的外貌、身份照常写入,清空过的着装仍按手动修改清空
+    leafOf(chat[0]).delta = { npcs: { add: [{ name: '洛伊', desc: '高个子', title: '店员', outfit: '雨衣' }] } };
+    recomputeDerived();
+    expect(memory.npcs[0]).toMatchObject({ desc: '高个子', title: '店员' });
+    expect(memory.npcs[0].outfit).toBeUndefined();
+  });
+
+  it('改名时没传的字段沿用原记录;模型输出里性别、年龄、ties、性格的空串仍当作省略', () => {
+    const chat = [leafMsg({ npcs: { add: [{ name: '洛伊', gender: '女', ties: '镇长之女', personality: '沉稳' }] } })];
+    useChat(chat);
+    expect(editNpc('洛伊', { name: '洛伊丝' })).toBe(true);
+    expect(memory.npcs.map(n => [n.name, n.gender, n.ties, n.personality])).toEqual([['洛伊丝', '女', '镇长之女', '沉稳']]);
+    const fromModel = finalizeDelta({ npcs: { update: [{ name: '洛伊', gender: '', age: '', ties: '', personality: '' }] } }, []);
+    const replayed = deriveMemory([leafMsg({ npcs: { add: [{ name: '洛伊', gender: '女', age: '二十', ties: '镇长之女', personality: '沉稳' }] } }), leafMsg(fromModel)]);
+    expect(replayed.npcs[0]).toMatchObject({ gender: '女', age: '二十', ties: '镇长之女', personality: '沉稳' });
+  });
+
   it('物品沿用原来的跨桶互斥:同一叶子里删了再加、加了再删都按最后一次操作', () => {
     const chat = [leafMsg({ items: { add: [{ name: '罗盘', qty: 1 }] } })];
     useChat(chat);

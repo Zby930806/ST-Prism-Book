@@ -18,6 +18,7 @@ import { toast } from '@/st/toast';
 import { apiSettings } from '@/api/settings';
 import { deriveMemory, makeLeafId } from './apply';
 import { pendingAiFloors, resolveKeepStart } from './engine';
+import { knowledgeId } from './knowledge';
 import { refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
 import { latestStoryTime } from './timeTag';
 import { assertMemoryWritable, memoryWriteIssue, memory, recomputeDerived } from './store';
@@ -94,6 +95,7 @@ function deltaHasData(delta: StoredDelta): boolean {
     delta.plans?.remove?.length ||
     delta.plans?.reopen?.length ||
     delta.secrets?.add?.length ||
+    delta.knowledge?.length ||
     delta.varOps?.length
   );
 }
@@ -203,6 +205,10 @@ function encodeStateAsDelta(state: ReturnType<typeof deriveMemory>, leafId: stri
       add: openSecrets.map(s => ({ content: s.content, knownBy: [...s.knownBy], unaware: [...s.unaware] })),
     };
   }
+  // 了解清单:全量带走(功能关闭时同样保留,之后开启照常使用);第 i 条落地为 know:种子叶#i,窗口内引用由 sanitizeCarryMessage 改写
+  if (state.knowledge.length) {
+    delta.knowledge = state.knowledge.map(k => ({ op: 'add' as const, subject: k.subject, text: k.text }));
+  }
   const initialVars = deriveMemory(null).vars;
   if (!sameJson(state.vars, initialVars)) {
     delta.varOps = [{ op: 'set', path: '', value: cloneJsonRecord(state.vars) }];
@@ -210,11 +216,12 @@ function encodeStateAsDelta(state: ReturnType<typeof deriveMemory>, leafId: stri
   return delta;
 }
 
-/** 窗口之前的条目改挂种子叶后的新旧 id 对照(生活档案、未结案信息差、未了结计划)。 */
+/** 窗口之前的条目改挂种子叶后的新旧 id 对照(生活档案、未结案信息差、未了结计划、了解清单)。 */
 interface CarryIdMaps {
   details: ReadonlyMap<string, string>;
   secrets: ReadonlyMap<string, string>;
   plans: ReadonlyMap<string, string>;
+  knowledge: ReadonlyMap<string, string>;
 }
 
 /** 把一份增量里对窗口前条目的引用改成种子叶上的新 id(就地修改;新增条目不动)。 */
@@ -242,6 +249,10 @@ function remapCarriedRefs(d: unknown, ids: CarryIdMaps): void {
     for (const key of ['remove', 'reopen'] as const) {
       if (plans[key]) plans[key] = plans[key].map(id => ids.plans.get(id) ?? id);
     }
+  }
+  // 了解清单的改写、删除引用跟着换到种子叶上的新 id;新增条目不动
+  if (Array.isArray(delta.knowledge)) {
+    for (const op of delta.knowledge) if (op && op.op !== 'add' && typeof op.id === 'string') op.id = ids.knowledge.get(op.id) ?? op.id;
   }
 }
 
@@ -359,7 +370,9 @@ export async function createNewChatWithCarryover(): Promise<boolean> {
     const secretIds = new Map(stateBefore.secrets.filter(s => s.status === 'open').map((s, i) => [s.id, `secret:${seedLeafId}#${i}`]));
     // 未了结计划同样改挂种子叶(序号与 encodeStateAsDelta 的 plans.add 一致)
     const planIds = new Map(stateBefore.plans.filter(p => p.status === 'open').map((p, i) => [p.id, `plan:${seedLeafId}#${i}`]));
-    const carryIds: CarryIdMaps = { details: detailIds, secrets: secretIds, plans: planIds };
+    // 了解清单同理(序号与 encodeStateAsDelta 的 knowledge add 一致)
+    const knowledgeIds = new Map(stateBefore.knowledge.map((k, i) => [k.id, knowledgeId(seedLeafId, i)]));
+    const carryIds: CarryIdMaps = { details: detailIds, secrets: secretIds, plans: planIds, knowledge: knowledgeIds };
 
     // 合并历史摘要(窗口之前的剧情) = 种子叶子 text
     const mergedSummary = renderHistoryNodes(selectHistoryNodesBefore(memory.summaries, sourceChat, carryStart));

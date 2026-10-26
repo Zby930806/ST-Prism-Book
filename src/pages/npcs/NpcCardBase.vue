@@ -4,6 +4,7 @@
  * 名字与小标签在左侧一块内换行，操作键始终与名字同一行靠右（手机上也不单独占一行）。
  * 字段标签一律用次要色；只有值需要提示时着色（如「跟主角在一起」）。
  * fields 为 null 时不显示字段表，改为显示 hint（若有）。
+ * footer 插槽是字段表下方的一行（档案缺项），below 插槽放在最下方（对主角的了解）。
  */
 import { computed } from 'vue';
 import type { CardChip, CardField } from './npcView';
@@ -47,6 +48,7 @@ const cardClass = computed(() => {
       </dl>
       <p v-else-if="hint" class="bbs-npc-mainhint">{{ hint }}</p>
       <div v-if="$slots.footer" class="bbs-npc-foot"><slot name="footer" /></div>
+      <div v-if="$slots.below" class="bbs-npc-below"><slot name="below" /></div>
     </div>
   </article>
 </template>
@@ -75,6 +77,8 @@ const cardClass = computed(() => {
 .bbs-npc-mainhint { margin: 4px 0; color: var(--bbs-ink-muted); font-size: 12px; line-height: 1.8; }
 /* 卡片底部一行（如「档案缺：外貌 · 从原文补全」）：与字段表之间留一条细线。 */
 .bbs-npc-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--bbs-line); }
+/* 卡片最下方的折叠区块（如对主角的了解）：同样以细线隔开。 */
+.bbs-npc-below { margin-top: 12px; padding-top: 4px; border-top: 1px dashed var(--bbs-line); }
 @media (max-width: 640px) {
   .bbs-npc { padding: 14px; }
   .bbs-npc-field { grid-template-columns: 54px minmax(0, 1fr); gap: 8px; }

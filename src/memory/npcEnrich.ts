@@ -44,7 +44,8 @@ export const ENRICH_MAX_ATTEMPTS = 2;
 export const ENRICH_TIMEOUT_MS = 90_000;
 
 /** 各字段的长度上限:超出多半是把整段原文抄了进来,不采用。 */
-const FIELD_MAX: Record<NpcEnrichField, number> = { gender: 12, age: 24, title: 60, desc: 240, personality: 160 };
+export const ENRICH_FIELD_MAX: Record<NpcEnrichField, number> = { gender: 12, age: 24, title: 60, desc: 240, personality: 160 };
+const FIELD_MAX = ENRICH_FIELD_MAX;
 export const ENRICH_FIELD_LABELS: Record<NpcEnrichField, string> = { gender: '性别', age: '年龄', title: '身份', desc: '外貌', personality: '性格' };
 
 const norm = (s: string) => s.trim().toLowerCase();
@@ -137,7 +138,7 @@ export function needsEnrichment(npc: Pick<MemNpc, NpcEnrichField>): boolean {
 }
 
 /** 能作为原文来源的楼层:真实的回复或用户发言,含已隐藏的,不含番外楼、提示楼和原生系统楼。 */
-function isSourceMessage(m: STMessage | undefined): boolean {
+export function isSourceMessage(m: STMessage | undefined): boolean {
   if (!m || m.extra?.bbs_omit) return false;
   if (typeof m.mes !== 'string' || !m.mes.trim()) return false;
   if (m.is_user) return !m.is_system || !!m.extra?.bbs_hidden;

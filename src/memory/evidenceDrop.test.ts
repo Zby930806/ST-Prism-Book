@@ -5,12 +5,11 @@ import type { MemLifeDetail } from './types';
 
 // 最后一次尝试的宽松解析:不合格的更新只去掉这几项,其余照常保存;不传回调时仍整份拒绝。
 const content = '次晨林舟在厨房见到小A。小A说手腕还疼。';
-const before = { protagonist: { condition: '左臂受伤' }, npcs: [{ name: '小A', condition: '手腕受伤，不能负重' }], content, strict: true };
 const openPlans = [{ id: 'plan:stable#0' }];
 function parse(body: Record<string, unknown>, lenient: boolean, extra: { skipped?: DroppedEvidence[]; details?: MemLifeDetail[] } = {}) {
   const dropped: DroppedEvidence[] = [];
   const d = parseSummaryResponse(JSON.stringify({ summary: '次晨重逢。', ...body }), {
-    requireStateChanges: true, sourceContent: content, sourceTexts: [content], conditionContext: before,
+    requireStateChanges: true, sourceContent: content, sourceTexts: [content],
     npcRoster: ['小A'], finalize: delta => finalizeDelta(delta, openPlans, extra.details ?? []),
     refCounts: { plans: openPlans.length, lifeDetails: 0, secrets: 0 },
     ...(extra.skipped ? { onSkipped: (list: DroppedEvidence[]) => { extra.skipped!.push(...list); } } : {}),
@@ -20,7 +19,7 @@ function parse(body: Record<string, unknown>, lenient: boolean, extra: { skipped
 }
 const stateChangesOf = (d: unknown) => (d as { stateChanges?: unknown }).stateChanges;
 
-describe('最后一次尝试时只去掉对不上正文的位置或伤情', () => {
+describe('最后一次尝试时只去掉对不上正文的位置', () => {
   it('位置引文对不上：去掉这次定位，同一角色的其他更新照常保存', () => {
     const body = { stateChanges: ['npcs'], npcs: { update: [{ name: '小A', location: '庭院', locationEvidence: '小A在庭院散步。', outfit: '灰色外套' }] } };
     expect(() => parse(body, false)).toThrow(SummaryResponseError);
@@ -36,37 +35,47 @@ describe('最后一次尝试时只去掉对不上正文的位置或伤情', () =
     expect(dropped).toEqual([{ kind: 'location', name: '小A', reason: 'mismatch' }]);
   });
 
+  it('新登场角色只写了名字和位置、位置原话对不上：只去掉位置，角色照常建档', () => {
+    for (const evidence of ['小B在庭院散步。', undefined]) {
+      const entry = { name: '小B', location: '庭院', ...(evidence ? { locationEvidence: evidence } : {}) };
+      const { d, dropped, stored } = parse({ stateChanges: ['npcs'], npcs: { add: [entry] } }, true);
+      expect(d.npcs?.add).toEqual([{ name: '小B' }]);
+      expect(stateChangesOf(d)).toEqual(['npcs']);
+      expect(stored.npcs?.add?.[0]).toMatchObject({ name: '小B' });
+      expect(stored.npcs?.add?.[0].location).toBeUndefined();
+      expect(dropped).toEqual([{ kind: 'location', name: '小B', reason: evidence ? 'mismatch' : 'missing' }]);
+    }
+  });
+
   it('有新地点却没给原话时按「缺原话」报告', () => {
     const { dropped } = parse({ stateChanges: ['npcs'], npcs: { update: [{ name: '小A', location: '庭院', outfit: '灰色外套' }] } }, true);
     expect(dropped).toEqual([{ kind: 'location', name: '小A', reason: 'missing' }]);
     expect(describeDropped(dropped[0]).why).toBe('没有给出正文原句');
   });
 
-  it('伤情补丁引文对不上：去掉这项更新、原伤情不动；主角的同样处理', () => {
-    const body = {
-      stateChanges: ['protagonist', 'npcs'],
-      protagonist: { conditionPatch: { replace: [{ id: 'c1', text: '', evidence: '林舟的左臂已经痊愈' }] } },
-      npcs: { update: [{ name: '小A', conditionPatch: { add: [{ text: '还疼', evidence: '小A说手腕还疼' }] } }] },
-    };
-    expect(() => parse(body, false)).toThrow(SummaryResponseError);
+  it('有伤情时直接整段改写 condition 照常保存，不再去掉', () => {
+    const body = { stateChanges: ['npcs'], npcs: { update: [{ name: '小A', condition: '手腕还疼', outfit: '灰色外套' }] } };
+    expect(parse(body, false).d.npcs?.update?.[0]).toEqual({ name: '小A', condition: '手腕还疼', outfit: '灰色外套' });
     const { d, dropped } = parse(body, true);
-    expect(d.protagonist).toBeUndefined();
-    expect(d.npcs?.update?.[0]).toEqual({ name: '小A', condition: '手腕受伤，不能负重；还疼' });
-    expect(stateChangesOf(d)).toEqual(['npcs']);
-    expect(dropped).toEqual([{ kind: 'condition', name: 'protagonist', reason: 'mismatch' }]);
-    expect(describeDropped(dropped[0], '林舟')).toEqual({ what: '林舟的伤情', why: '给出的原句与本楼正文对不上' });
+    expect(d.npcs?.update?.[0]).toEqual({ name: '小A', condition: '手腕还疼', outfit: '灰色外套' });
+    expect(dropped).toEqual([]);
   });
 
-  it('伤情片段编号不存在时按「编号或写法不对」报告，不说成原句对不上', () => {
-    const { dropped } = parse({ stateChanges: ['npcs'], npcs: { update: [{ name: '小A', conditionPatch: { replace: [{ id: 'c9', text: '好转', evidence: '小A说手腕还疼' }] } }] } }, true);
-    expect(dropped).toEqual([{ kind: 'condition', name: '小A', reason: 'invalid' }]);
-    expect(describeDropped(dropped[0]).why).toBe('伤情片段的编号或写法不符合要求');
+  it('照旧写法给的伤情补丁直接去掉，不报告，也不让整楼失败', () => {
+    const body = {
+      stateChanges: ['npcs'],
+      npcs: { update: [{ name: '小A', outfit: '灰色外套', conditionPatch: { add: [{ text: '还疼', evidence: '小A说手腕还疼' }] } }] },
+    };
+    for (const lenient of [false, true]) {
+      const { d, dropped } = parse(body, lenient);
+      expect(d.npcs?.update?.[0]).toEqual({ name: '小A', outfit: '灰色外套' });
+      expect(dropped).toEqual([]);
+    }
   });
 
-  it('有伤情时直接覆盖 condition 也按写法不对处理：保留原伤情', () => {
-    const { d, dropped } = parse({ stateChanges: ['npcs'], npcs: { update: [{ name: '小A', condition: '已痊愈', outfit: '灰色外套' }] } }, true);
-    expect(d.npcs?.update?.[0]).toEqual({ name: '小A', outfit: '灰色外套' });
-    expect(dropped).toEqual([{ kind: 'condition', name: '小A', reason: 'invalid' }]);
+  it('旧叶子上记着的伤情类未写入项仍能读出说明', () => {
+    expect(describeDropped({ kind: 'condition', name: 'protagonist', reason: 'mismatch' }, '林舟')).toEqual({ what: '林舟的伤情', why: '给出的原句与本楼正文对不上' });
+    expect(describeDropped({ kind: 'condition', name: '小A', reason: 'invalid' }).why).toBe('伤情片段的编号或写法不符合要求');
   });
 
   it('引文对得上时不去掉任何内容', () => {
@@ -141,13 +150,13 @@ describe('最后一次尝试时其他不合格的更新也只去掉这一项', (
     expect(describeDropped(dropped[0])).toEqual({ what: '地点的更新', why: '根层和 delta 里各写了一份，只保留根层的' });
   });
 
-  it('放错层级的伤情补丁去掉，其余照常；提示写明写在了哪里，不说成那一项的伤情', () => {
+  it('写在物品里的伤情补丁直接去掉，物品照常保存', () => {
     const body = { stateChanges: ['items'], items: { add: [{ name: '药', qty: 1, conditionPatch: { add: [{ text: '好转', evidence: '小A说手腕还疼' }] } }] } };
-    expect(() => parse(body, false)).toThrow(/conditionPatch 必须放在/);
-    const { stored, dropped } = parse(body, true);
-    expect(stored.items?.add).toEqual([{ name: '药', qty: 1 }]);
-    expect(dropped).toEqual([{ kind: 'condition', name: '', reason: 'invalid', detail: '伤情补丁写在了「药」里，须写在主角或对应角色的条目内' }]);
-    expect(describeDropped(dropped[0], '林舟').what).toBe('某个角色的伤情');
+    for (const lenient of [false, true]) {
+      const { stored, dropped } = parse(body, lenient);
+      expect(stored.items?.add).toEqual([{ name: '药', qty: 1 }]);
+      expect(dropped).toEqual([]);
+    }
   });
 
   it('内置模板的生活档案新增缺 subject：前几次附原因重试，最后一次去掉并报告', () => {
@@ -162,7 +171,7 @@ describe('最后一次尝试时其他不合格的更新也只去掉这一项', (
     let reported = false;
     for (const raw of [JSON.stringify({ stateChanges: [] }), '不是 JSON']) {
       expect(() => parseSummaryResponse(raw, {
-        requireStateChanges: true, sourceContent: content, sourceTexts: [content], conditionContext: before, npcRoster: ['小A'],
+        requireStateChanges: true, sourceContent: content, sourceTexts: [content], npcRoster: ['小A'],
         finalize: delta => finalizeDelta(delta, []), onDroppedEvidence: () => { reported = true; },
       })).toThrow(SummaryResponseError);
     }

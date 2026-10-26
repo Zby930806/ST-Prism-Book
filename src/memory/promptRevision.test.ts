@@ -179,7 +179,7 @@ describe('任务说明三态的实际请求', () => {
 });
 
 describe('检索语义与未知时间', () => {
-  it.each([1, 3, 5, 8])('允许按需 %s 条,最多5条', count => {
+  it.each([1, 3, 5, 8])('提示词要求5条;模型给出 %s 条时照用,最多取前5条', count => {
     const out = parseResponse('INTENT:核对之前的约定\n' + Array.from({ length: count }, (_, i) => 'Q:约定' + i).join('\n'));
     expect(out.queries).toHaveLength(Math.min(count, 5));
   });

@@ -314,6 +314,11 @@ export interface InjectionSections {
   secrets: boolean;
   /** 伤势进展提醒:伤情记录满一天(无故事时间时按回复楼层数)未更新时,提醒正文模型按轻重体现进展(不改记录) */
   injuryReminder: boolean;
+  /**
+   * 角色对主角的了解清单,默认关闭。与其他项不同,它同时控制记录:关闭时摘要请求不带相关规则和材料,模型输出也不收;
+   * 已有清单保留、照常重放。注入只看本项,不依赖 NPC 名册和场景信息(在场判定读的是记忆数据,不是注入文本)。
+   */
+  knowledge: boolean;
 }
 
 export interface ApiSettings {
@@ -528,7 +533,7 @@ function defaults(): ApiSettings {
     autoSummaryEnabled: true,
     summarizeOnReplyEnd: false,
     summaryOnlyMode: false,
-    injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, npcAffinity: true, items: true, scenes: true, secrets: true, injuryReminder: true },
+    injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, npcAffinity: true, items: true, scenes: true, secrets: true, injuryReminder: true, knowledge: false },
     keepRecent: 3,
     excludedChars: [],
     excludedWorldNames: [],
@@ -644,6 +649,7 @@ function normalize(raw: unknown): ApiSettings {
     scenes: typeof ri.scenes === 'boolean' ? ri.scenes : true,
     secrets: typeof ri.secrets === 'boolean' ? ri.secrets : true,
     injuryReminder: typeof ri.injuryReminder === 'boolean' ? ri.injuryReminder : true,
+    knowledge: ri.knowledge === true,
   };
   // vector 同为嵌套对象(且内含子对象),逐层兜底,老数据缺字段时回退默认。
   // 注:旧结构曾有 vector.channels + {channel,model};扁平化后弃用,逐角色按 url/key/model 兜底,

@@ -6,7 +6,7 @@ describe('摘要失败的阅读说明', () => {
     const view = summaryErrorPresentation(raw);
     expect(view.title).toContain('#206'); expect(view.title).toContain('引用与正文不一致');
     expect(view.title).not.toContain('conditionPatch');
-    expect(view.help).toContain('已有记录保持不变'); expect(view.help).toContain('无需重建整个聊天');
+    expect(view.help).toContain('已有记录保持不变'); expect(view.help).toContain('无需全部重新摘要');
     expect(view.details).toBe(raw);
   });
   it('区分漏证据与其他格式错误', () => {

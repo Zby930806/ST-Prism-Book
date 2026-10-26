@@ -4,8 +4,9 @@
  * 摘要卡片（SummaryNode）另用 ctx.ts 的 SUMMARY_CTX。
  */
 import { apiSettings, normalizeBatchFullRecent, normalizeBatchMaxFloors } from '@/api/settings';
-import { batchBackfill, batchState, engineState, planBatchBackfill } from '@/memory/engine';
+import { batchBackfill, batchState, continueRebuild, discardRebuildRun, engineState, planBatchBackfill, rebuildPlanFloors, rebuildProgress, rebuildRunState, startRebuild } from '@/memory/engine';
 import { refreshInjection } from '@/memory/inject';
+import { hasHoraeData } from '@/memory/migrate';
 import { compatibilityState, convertLegacyMemory, derivedMeta, LegacyBackupConflictError, memoryWriteIssue, recomputeDerived, repairBrokenSummaries } from '@/memory/store';
 import { getContext } from '@/st/context';
 import { toast } from '@/st/toast';
@@ -93,7 +94,7 @@ export function createSummaryPage() {
       backupConflict.value = error instanceof LegacyBackupConflictError;
       toast(backupConflict.value
         ? '没有转换：' + conversionError.value
-        : '转换没有成功：' + conversionError.value + ' 可重新载入聊天后再试；仍失败时先导出聊天检查，不要重建。', 'error');
+        : '转换没有成功：' + conversionError.value + ' 可重新载入聊天后再试；仍失败时先导出聊天检查，不要全部重新摘要。', 'error');
       convertConfirmOpen.value = false;
       replaceBackupConfirmOpen.value = false;
     } finally {
@@ -219,9 +220,68 @@ export function createSummaryPage() {
     batchState.lite ? '每次请求' : '每楼',
   ));
 
+  /* —— 全部重新摘要 ——
+   * 按楼层顺序重新摘要 AI 楼层（还没有摘要的一并摘要），替换摘要和模型记录的状态，手动修改保留。开始时在聊天元数据记一条运行记录，
+   * 每层完成后在叶子上标记；取消、失败、切换聊天或刷新后可以从停下的楼层继续。有未完成的记录时先问继续还是重新开始。 */
+  const rebuildOpen = ref(false);
+  /** resume：有未完成的记录，先选继续或重新开始；fresh：新开一次（可选起始楼层） */
+  const rebuildStep = ref<'resume' | 'fresh'>('fresh');
+  // 输入框为空时从第一个可处理的楼层开始（v-model.number 清空时为 ''）
+  const rebuildFromInput = ref<number | ''>('');
+  const rebuildHasHorae = ref(false);
+  // 运行记录在聊天元数据里，不是响应式数据：用叶子变化、记录变化和批量进度触发重算
+  const rebuildProgressView = computed(() => {
+    void derivedMeta.rev;
+    void rebuildRunState.rev;
+    void batchState.running;
+    void batchState.done;
+    return editingBlocked.value ? null : rebuildProgress();
+  });
+  const rebuildAll = computed(() => {
+    void derivedMeta.rev;
+    return rebuildOpen.value ? rebuildPlanFloors() : [];
+  });
+  const rebuildFloors = computed(() => {
+    const from = rebuildFromInput.value;
+    return from === '' || !Number.isFinite(from) ? rebuildAll.value : rebuildAll.value.filter(f => f >= from);
+  });
+  function openRebuild() {
+    if (!allowMemoryEdit()) return;
+    if (engineState.running || batchState.running) return;
+    const progress = rebuildProgress();
+    rebuildStep.value = progress && progress.next !== null ? 'resume' : 'fresh';
+    rebuildFromInput.value = '';
+    rebuildHasHorae.value = hasHoraeData(getContext()?.chat ?? []);
+    rebuildOpen.value = true;
+  }
+  /** 有未完成的记录时选「重新开始」：转到新开一次的说明和起始楼层 */
+  function chooseRebuildRestart() {
+    rebuildStep.value = 'fresh';
+  }
+  function runRebuild() {
+    if (!allowMemoryEdit()) return;
+    // 先取楼层再关窗：rebuildAll 只在弹窗打开时计算
+    const floors = rebuildFloors.value;
+    rebuildOpen.value = false;
+    if (engineState.running || batchState.running || !floors.length) return;
+    // 不 await：任务在 engine 里跑，进度走 batchState 单例
+    void startRebuild(floors[0]);
+  }
+  function resumeRebuild() {
+    if (!allowMemoryEdit()) return;
+    rebuildOpen.value = false;
+    if (engineState.running || batchState.running) return;
+    void continueRebuild();
+  }
+  function endRebuild() {
+    if (!allowMemoryEdit()) return;
+    if (!discardRebuildRun()) toast('正在生成摘要，暂时不能结束全部重新摘要。请等当前摘要完成后再试。', 'warning');
+  }
+
   function closeEditors() {
     batchConfirmOpen.value = false;
     batchScope.value = null;
+    rebuildOpen.value = false;
     for (const fn of closeHooks) fn();
   }
   // 弹窗会 Teleport，不能只依靠外层 fieldset 禁用。
@@ -266,6 +326,7 @@ export function createSummaryPage() {
       repairConfirmOpen, repairPending, openRepairConfirm, confirmRepair,
     },
     batch: { batchConfirmOpen, batchScope, batchFloors, batchCanMerge, batchMode, batchRecentInput, batchGroupInput, batchLiteText, batchEta, openBatchConfirm, runBatchBackfill },
+    rebuild: { rebuildOpen, rebuildStep, rebuildFromInput, rebuildHasHorae, rebuildProgressView, rebuildAll, rebuildFloors, openRebuild, chooseRebuildRestart, runRebuild, resumeRebuild, endRebuild },
     /** 只读保护开启、切换聊天时调用：关闭本区块的弹窗与编辑态。 */
     onCloseEditors: (fn: () => void) => register(closeHooks, fn),
     /** 切换聊天时调用：重置本区块的分页、搜索等临时视图态。 */

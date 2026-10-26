@@ -1,7 +1,7 @@
 import { NpcLocationEvidenceError, validateNpcLocationEvidence } from './npcLocationEvidence';
 import { NpcRenameError, validateNpcRenames } from './npcRename';
 import { extractJsonObject } from './json';
-import { ConditionPatchError, materializeConditionPatches, type ConditionContext } from './conditionPatch';
+import { knowledgeEntryProblem, knowledgeNames } from './knowledge';
 import type { EvidenceDropReason } from './sourceEvidence';
 import type { StoredDelta, SummaryDelta } from './types';
 
@@ -15,7 +15,7 @@ import type { StoredDelta, SummaryDelta } from './types';
  */
 export class SummaryResponseError extends Error {}
 
-const stateKeys = ['location', 'locationPath', 'sceneFocus', 'protagonist', 'items', 'scenes', 'npcs', 'plans', 'lifeDetails', 'secrets', 'vars'] as const;
+const stateKeys = ['location', 'locationPath', 'sceneFocus', 'protagonist', 'items', 'scenes', 'npcs', 'plans', 'lifeDetails', 'secrets', 'knowledge', 'vars'] as const;
 type StateKey = typeof stateKeys[number];
 const groups = ['items', 'scenes', 'npcs', 'plans', 'lifeDetails', 'secrets'] as const;
 type GroupKey = typeof groups[number];
@@ -35,7 +35,7 @@ const ALLOWED_OPS: Record<GroupKey, readonly string[]> = {
 /** 状态字段给用户看的名字(提示和楼层面板用)。 */
 export const STATE_LABELS: Record<StateKey, string> = {
   location: '地点', locationPath: '地点路径', sceneFocus: '局势', protagonist: '主角档案', items: '物品', scenes: '场景',
-  npcs: '角色', plans: '计划悬念', lifeDetails: '生活档案', secrets: '信息差', vars: '变量',
+  npcs: '角色', plans: '计划悬念', lifeDetails: '生活档案', secrets: '信息差', knowledge: '了解清单', vars: '变量',
 };
 
 /** 引号和空白不参与原文比对(模型摘原句时常加减引号、换行)。 */
@@ -68,7 +68,7 @@ export type DroppedReason = EvidenceDropReason;
 
 /** 没写入的更新属于哪一类。 */
 export type DroppedKind =
-  | 'location' | 'condition' | 'rename' | 'item' | 'scene' | 'npc' | 'plan' | 'lifeDetail' | 'secret'
+  | 'location' | 'condition' | 'rename' | 'item' | 'scene' | 'npc' | 'plan' | 'lifeDetail' | 'secret' | 'knowledge'
   | 'vars' | 'stateChanges' | 'format';
 
 /**
@@ -94,6 +94,7 @@ function stateKeyOfDrop(d: DroppedEvidence): string {
     case 'plan': return 'plans';
     case 'lifeDetail': return 'lifeDetails';
     case 'secret': return 'secrets';
+    case 'knowledge': return 'knowledge';
     case 'vars': return 'vars';
     case 'format': return d.name;
     default: return '';
@@ -101,21 +102,19 @@ function stateKeyOfDrop(d: DroppedEvidence): string {
 }
 
 /**
- * 宽松解析去掉定位或伤情后,清掉因此只剩名字的角色条目、空的主角对象和空分组,
- * 让其余内容照常通过后面的字段校验。只处理被去掉过内容的对象,原本就只写了名字的条目不动。
+ * 宽松解析去掉定位后,清掉因此只剩名字的 update 条目和空分组,让其余内容照常通过后面的字段校验。
+ * add 只剩名字时保留:角色本楼确实登场,定位对不上只是不记位置,不能连角色一起丢掉。
+ * 只处理被去掉过内容的对象,原本就只写了名字的条目不动。
  */
 function pruneTouched(parsed: Record<string, unknown>, touched: Set<object>): void {
-  if (record(parsed.protagonist) && touched.has(parsed.protagonist) && !Object.keys(parsed.protagonist).length) delete parsed.protagonist;
-  if (record(parsed.npcs)) {
-    for (const op of ['add', 'update']) {
-      const values = parsed.npcs[op];
-      if (!Array.isArray(values)) continue;
-      const kept = values.filter(entry => !(record(entry) && touched.has(entry) && Object.keys(entry).every(k => k === 'name')));
-      if (kept.length) parsed.npcs[op] = kept;
-      else delete parsed.npcs[op];
-    }
-    if (!Object.keys(parsed.npcs).length) delete parsed.npcs;
+  if (!record(parsed.npcs)) return;
+  const values = parsed.npcs.update;
+  if (Array.isArray(values)) {
+    const kept = values.filter(entry => !(record(entry) && touched.has(entry) && Object.keys(entry).every(k => k === 'name')));
+    if (kept.length) parsed.npcs.update = kept;
+    else delete parsed.npcs.update;
   }
+  if (!Object.keys(parsed.npcs).length) delete parsed.npcs;
 }
 
 const preview = (s: string) => {
@@ -211,6 +210,7 @@ export function describeDropped(d: DroppedEvidence, userName = '主角'): { what
     case 'plan': return { what: d.name ? `计划悬念 ${d.name}` : '一项计划悬念变化', why: d.detail || generic };
     case 'lifeDetail': return { what: d.name ? `生活档案「${d.name}」` : '一项生活档案变化', why: d.detail || generic };
     case 'secret': return { what: d.name ? `信息差 ${d.name}` : '一项信息差变化', why: d.detail || generic };
+    case 'knowledge': return { what: d.name ? `了解清单「${d.name}」` : '一项了解清单变化', why: d.detail || generic };
     case 'vars': return { what: '变量命令', why: d.detail || '命令无效，已跳过' };
     case 'stateChanges': return { what: `${isStateKey(d.name) ? STATE_LABELS[d.name] : d.name}的更新`, why: d.detail || '清单里声明了，但没有给出有效更新' };
     // 结构问题:状态字段用中文名,包在 delta/updates 里的整块写明是哪一块
@@ -236,8 +236,7 @@ export function parseSummaryResponse(raw: string, options: {
   sourceContent?: string;
   /** 未附来源编号/提示的原消息，每条独立匹配，不允许跨消息拼接。 */
   sourceTexts?: readonly string[];
-  conditionContext?: ConditionContext;
-  /** 本楼之前的名册名字(校验 npcs.rename);缺省时取 conditionContext 的名册 */
+  /** 本楼之前的名册名字(校验 npcs.rename) */
   npcRoster?: readonly string[];
   /** 主角名;改名不能改成主角 */
   userName?: string;
@@ -245,6 +244,8 @@ export function parseSummaryResponse(raw: string, options: {
   finalize: (delta: SummaryDelta) => StoredDelta;
   /** 本楼之前可引用的条目数;编号错误的提示据此写出可用范围 */
   refCounts?: RefCounts;
+  /** 了解清单开启时传:提示词里展示了几条(k1–kN)。不传 = 功能关闭,模型输出的 knowledge 直接去掉 */
+  knowledge?: { shown: number };
   /**
    * 最后一次尝试:不合格的更新只去掉这几项(保留原记录),其余照常保存,不再让整楼摘要失败;去掉了哪些交给它。
    * 不传时任何问题都整份拒绝,由调用方带着原因重试。
@@ -278,57 +279,24 @@ export function parseSummaryResponse(raw: string, options: {
       else parsed[key] = value;
     }
   }
-  const npcOps = record(parsed.npcs) ? parsed.npcs : {};
-  const patchTargets = new Set<object>();
-  if (record(parsed.protagonist)) patchTargets.add(parsed.protagonist);
-  for (const op of ['add', 'update']) {
-    const entries = npcOps[op];
-    if (Array.isArray(entries)) for (const entry of entries) if (record(entry)) patchTargets.add(entry);
-  }
-  let hasPatch = false;
-  function validatePatchPlacement(value: unknown): void {
-    if (Array.isArray(value)) { value.forEach(validatePatchPlacement); return; }
+  // 伤情按 condition 整段覆盖,不接受片段补丁:模型照旧写法输出的 conditionPatch 不论放在哪里都直接去掉,
+  // 不让整楼失败;同时给了 condition 的,以 condition 为准。
+  (function stripConditionPatches(value: unknown): void {
+    if (Array.isArray(value)) { value.forEach(stripConditionPatches); return; }
     if (!record(value)) return;
-    if ('conditionPatch' in value) {
-      if (patchTargets.has(value)) hasPatch = true;
-      else if (!lenient) throw new SummaryResponseError('conditionPatch 必须放在对应 protagonist 或 npcs.add/update 的角色对象内，不能放在物品、分组或嵌套字段中。');
-      else {
-        delete value.conditionPatch;
-        // 放错位置的补丁不属于它所在的物品或分组,不能写成「药的伤情」:不归到某个角色,说明写在了哪里
-        const where = typeof value.name === 'string' && value.name.trim() ? `「${value.name.trim()}」` : '物品、分组或嵌套字段';
-        dropped.push({ kind: 'condition', name: '', reason: 'invalid', detail: `伤情补丁写在了${where}里，须写在主角或对应角色的条目内` });
-      }
-    }
-    Object.values(value).forEach(validatePatchPlacement);
-  }
-  validatePatchPlacement(parsed);
-  if (hasPatch && !options.conditionContext) throw new SummaryResponseError('conditionPatch 缺少本楼前状态，不能静默丢弃操作。');
-  // 改名先于伤情补丁校验:同一楼改名后的角色用新名字更新伤情,要能找回改名前的旧伤情片段。
-  let renames = new Map<string, string>();
+    delete value.conditionPatch;
+    Object.values(value).forEach(stripConditionPatches);
+  })(parsed);
   if (record(parsed.npcs) && 'rename' in parsed.npcs) {
-    const roster = options.npcRoster ?? options.conditionContext?.npcs.map(n => n.name);
+    const roster = options.npcRoster;
     if (!roster) throw new SummaryResponseError('npcs.rename 缺少本楼之前的名册，不能静默丢弃改名。');
     try {
-      renames = validateNpcRenames(parsed, {
+      validateNpcRenames(parsed, {
         roster, userName: options.userName, sourceTexts: options.sourceTexts ?? options.sourceContent ?? '',
         ...(lenient ? { onDrop: d => { dropped.push({ kind: 'rename', name: d.from || d.to ? `${d.from} → ${d.to}` : 'npcs.rename', reason: d.reason, ...(d.detail ? { detail: d.detail } : {}) }); } } : {}),
       });
     } catch (error) {
       if (error instanceof NpcRenameError) throw new SummaryResponseError(error.message);
-      throw error;
-    }
-  }
-  if (options.conditionContext) {
-    const ctx = options.conditionContext;
-    const npcsAfterRename = renames.size
-      ? ctx.npcs.map(n => ({ ...n, name: renames.get(n.name.trim().toLowerCase()) ?? n.name }))
-      : ctx.npcs;
-    try {
-      materializeConditionPatches(parsed, { ...ctx, npcs: npcsAfterRename, sourceTexts: options.sourceTexts ?? ctx.sourceTexts },
-        lenient ? { onDrop: (who, reason, target) => { touched.add(target); dropped.push({ kind: 'condition', name: who, reason }); } } : {});
-    }
-    catch (error) {
-      if (error instanceof ConditionPatchError) throw new SummaryResponseError(error.message);
       throw error;
     }
   }
@@ -387,6 +355,52 @@ export function parseSummaryResponse(raw: string, options: {
       if (kept.length) parsed.lifeDetails.add = kept;
       else delete parsed.lifeDetails.add;
       if (!Object.keys(parsed.lifeDetails).length) delete parsed.lifeDetails;
+    }
+  }
+  // 了解清单:功能关闭时模型硬给也不收,清单里声明的一并去掉,不让整楼失败。
+  // 开启时逐条核对编号、角色和内容(与固化时同一口径):前几次附原因重试,最后一次只去掉不合格的几条。
+  if (!options.knowledge) {
+    delete parsed.knowledge;
+    if (Array.isArray(parsed.stateChanges)) parsed.stateChanges = parsed.stateChanges.filter(k => k !== 'knowledge');
+  } else if ('knowledge' in parsed) {
+    const group = parsed.knowledge;
+    // 本楼新登场、更新到的角色和改名后的名字按固化后的 npcs 算,与 finalizeDelta 看到的名册一致
+    const npcs = record(parsed.npcs) ? options.finalize({ npcs: parsed.npcs } as SummaryDelta).npcs : undefined;
+    const ctx = { ...knowledgeNames(options.npcRoster ?? [], npcs), shownCount: options.knowledge.shown, userName: options.userName };
+    const problems: string[] = [];
+    if (!record(group)) {
+      if (!lenient) throw new SummaryResponseError('knowledge 必须是包含 add、update、remove 操作数组的对象。');
+      delete parsed.knowledge;
+      dropped.push({ kind: 'knowledge', name: 'knowledge', reason: 'invalid', detail: '不是包含操作数组的对象' });
+    } else {
+      for (const op of Object.keys(group)) {
+        const valid = ['add', 'update', 'remove'].includes(op);
+        if (!valid || !Array.isArray(group[op])) {
+          if (!lenient) throw new SummaryResponseError(`knowledge.${op} 不是合法操作数组；knowledge 只允许 add、update、remove，值为数组。`);
+          if (!valid || group[op] == null) {
+            delete group[op];
+            if (!valid) dropped.push({ kind: 'knowledge', name: 'knowledge.' + op, reason: 'invalid', detail: '不是合法操作（只允许 add、update、remove）' });
+            continue;
+          }
+          group[op] = [group[op]];
+        }
+        const kept: unknown[] = [];
+        (group[op] as unknown[]).forEach((entry, index) => {
+          const problem = knowledgeEntryProblem(op, entry, ctx);
+          if (!problem) { kept.push(entry); return; }
+          const text = record(entry) && typeof entry.text === 'string' ? entry.text : '';
+          const label = op === 'add' ? preview(text) : idOf(entry);
+          problems.push(`knowledge.${op}[${index}]${label && !problem.detail.includes(label) ? `「${label}」` : ''}${problem.detail}`);
+          if (lenient) dropped.push({ kind: 'knowledge', name: label, reason: problem.reason, detail: problem.detail });
+        });
+        if (kept.length) group[op] = kept;
+        else delete group[op];
+      }
+      if (!Object.keys(group).length) delete parsed.knowledge;
+    }
+    if (problems.length && !lenient) {
+      const shown = problems.slice(0, 6).join('；') + (problems.length > 6 ? `；另有 ${problems.length - 6} 处` : '');
+      throw new SummaryResponseError('了解清单含无效条目：' + shown + '。请按原因修正后重写完整 JSON；拿不准的条目可以不写。');
     }
   }
   // 分组结构与逐条清洗:写入时会被清洗掉的条目(缺名字、编号不存在、字段类型不对等)不能悄悄丢掉。
@@ -518,7 +532,7 @@ export function parseSummaryResponse(raw: string, options: {
       }
       const unknown = declared.filter(k => !isStateKey(k));
       if (unknown.length) {
-        throw new SummaryResponseError('stateChanges 含非法字段名 ' + unknown.map(k => JSON.stringify(k)).join('、') + '；只能填 ' + stateKeys.join('、') + '，不含 summary、conditionPatch 和时间字段。');
+        throw new SummaryResponseError('stateChanges 含非法字段名 ' + unknown.map(k => JSON.stringify(k)).join('、') + '；只能填 ' + stateKeys.join('、') + '，不含 summary 和时间字段。');
       }
       const extra = declared.filter(k => !actual.includes(k as StateKey));
       const missing = actual.filter(k => !declared.includes(k));

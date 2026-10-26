@@ -48,7 +48,7 @@ export function memoryWriteIssue(): string {
     return `旧记忆保护中：${compatibilityState.repairable.length} 条总结引用了当前聊天里不存在的楼层（多为删除楼层后残留）。`
       + '请先用酒馆的「管理聊天文件」导出聊天备份，再在摘要页的只读保护说明中点「清理残缺的总结」；逐楼摘要会保留。';
   }
-  return '旧记忆保护中：' + compatibilityState.issues.join('；') + '。请先备份并核对，勿全量重建。';
+  return '旧记忆保护中：' + compatibilityState.issues.join('；') + '。请先备份并核对，不要全部重新摘要。';
 }
 export function assertMemoryWritable(): void {
   const issue = memoryWriteIssue();
@@ -119,7 +119,7 @@ export async function convertLegacyMemory(options: { replaceBackup?: boolean } =
     for (const op of operations) op.message.extra = op.extra;
     meta[MEMORY_KEY] = raw;
     // 备份保留；它与当前旧记录相同，重新载入聊天后可以直接重试。
-    throw new Error('转换保存未确认成功，已恢复内存中的原记录并保留备份。可重新载入聊天后在摘要页重试转换；仍失败时先导出聊天核对，不要重建。' + String(error));
+    throw new Error('转换保存未确认成功，已恢复内存中的原记录并保留备份。可重新载入聊天后在摘要页重试转换；仍失败时先导出聊天核对，不要全部重新摘要。' + String(error));
   } finally {
     compatibilityState.converting = false;
     if (stillHere()) loadMemory();
@@ -212,7 +212,7 @@ export function recomputeDerived(): void {
   const ctx = getContext();
   if (memoryWriteIssue()) {
     const empty = createEmptyMemory();
-    for (const key of ['state', 'protagonist', 'items', 'plans', 'scenes', 'npcs', 'itemLog', 'lifeDetails', 'secrets', 'vars'] as const) Object.assign(memory, { [key]: empty[key] });
+    for (const key of ['state', 'protagonist', 'items', 'plans', 'scenes', 'npcs', 'itemLog', 'lifeDetails', 'secrets', 'knowledge', 'vars'] as const) Object.assign(memory, { [key]: empty[key] });
     Object.assign(derivedMeta, { hasLeaf: false, leaves: [], pendingFloors: [], latestStoryTime: '', rev: derivedMeta.rev + 1 });
     return;
   }
@@ -236,6 +236,7 @@ export function recomputeDerived(): void {
   memory.itemLog.splice(0, memory.itemLog.length, ...d.itemLog);
   memory.lifeDetails.splice(0, memory.lifeDetails.length, ...d.lifeDetails);
   memory.secrets.splice(0, memory.secrets.length, ...d.secrets);
+  memory.knowledge.splice(0, memory.knowledge.length, ...d.knowledge);
   // vars 是 JSON 对象:清空后按派生结果重填(不换 reactive 引用,保持页面响应式绑定)
   for (const k of Object.keys(memory.vars)) delete memory.vars[k];
   Object.assign(memory.vars, d.vars);

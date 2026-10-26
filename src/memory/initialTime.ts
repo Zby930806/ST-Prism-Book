@@ -20,7 +20,7 @@ function hasStoredHistory(raw: unknown): boolean {
   if (data.version !== MEMORY_VERSION || !Array.isArray(data.summaries) || data.summaries.length) return true;
   const empty = (v: unknown): boolean => v == null || v === '' ||
     (Array.isArray(v) ? v.length === 0 : typeof v === 'object' && Object.values(v).every(empty));
-  const caches = ['state', 'protagonist', 'items', 'plans', 'lifeDetails', 'secrets', 'scenes', 'npcs', 'itemLog', 'vars'];
+  const caches = ['state', 'protagonist', 'items', 'plans', 'lifeDetails', 'secrets', 'knowledge', 'scenes', 'npcs', 'itemLog', 'vars'];
   return Object.entries(data).some(([key, value]) => {
     if (['version', 'summaries', 'varsTemplate', 'varTemplates'].includes(key)) return false;
     return !caches.includes(key) || !empty(value);
@@ -56,7 +56,7 @@ export function initialTimeEditIssue(): string {
   if (memory.summaries.length || ctx.chat.some(m => m.extra?.bbs_leaf) ||
       ctx.chat.filter(isAiFloor).length > 1) {
     const first = ctx.chat.findIndex(m => m.extra?.bbs_leaf);
-    return `这个聊天已经开始了，开场时间不能再改。${first >= 0 ? `要修正时间的话，请在摘要列表里编辑 #${first} 楼的起止时间。` : '要修正时间的话，请编辑对应楼层摘要的起止时间。'}不需要重建。`;
+    return `这个聊天已经开始了，开场时间不能再改。${first >= 0 ? `要修正时间的话，请在摘要列表里编辑 #${first} 楼的起止时间。` : '要修正时间的话，请编辑对应楼层摘要的起止时间。'}不需要全部重新摘要。`;
   }
   return '';
 }
@@ -107,7 +107,7 @@ export function currentStoryTimeTarget(): { floor: number; issue: string } {
   const timedFloor = latestTimedFloor(chat);
   if (known || timedFloor >= 0) {
     const where = timedFloor >= 0 ? `，来自 #${timedFloor} 楼` : '';
-    return { floor: -1, issue: `这个聊天已经有故事时间${known ? `（${known}${where}）` : ''}。要修正的话，请在摘要列表里编辑那层摘要的起止时间；时间来自正文里的时间标签时，修改那层正文的标签。不需要重建。` };
+    return { floor: -1, issue: `这个聊天已经有故事时间${known ? `（${known}${where}）` : ''}。要修正的话，请在摘要列表里编辑那层摘要的起止时间；时间来自正文里的时间标签时，修改那层正文的标签。不需要全部重新摘要。` };
   }
   let floor = -1;
   for (let i = chat.length - 1; i >= 0; i--) {

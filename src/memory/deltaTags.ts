@@ -3,7 +3,7 @@
  * 两处显示同一份变动时说法一致。纯函数:不改聊天,计划、生活档案只通过已有叶子查内容。
  */
 import { getContext } from '@/st/context';
-import { describeVarOp, getLeaf, MANUAL_ADD_BASE, MIGRATED_ADD_BASE, planContentById, secretContentById } from './apply';
+import { describeVarOp, getLeaf, knowledgeEntryById, MANUAL_ADD_BASE, MIGRATED_ADD_BASE, planContentById, secretContentById } from './apply';
 import { fmtNpcAffinity } from './npcRelations';
 import type { ItemDelta, LifeDetailAdd, NpcDelta, StoredDelta, VarOp } from './types';
 
@@ -233,6 +233,23 @@ function lifeTags(d: Delta, floor: number): DeltaTag[] {
   return out;
 }
 
+// 了解清单:有序日志逐条映射。新增显示内容与角色;改写、删除存的是稳定 id,反查新增时的内容(按「该楼之前及本楼」查)。
+// 只读展示,可删除(按序号从日志里剔除,见 useLeafEdit.deleteTag)。
+function knowledgeTags(d: Delta, floor: number): DeltaTag[] {
+  const ops = d?.knowledge;
+  if (!Array.isArray(ops) || !ops.length) return [];
+  return ops.map((op, i) => {
+    const key = `know:op:${i}`;
+    if (op.op === 'add') return { key, op: 'add', bucket: 'op', idx: i, text: op.text, sub: op.subject, editable: false };
+    const found = knowledgeEntryById(op.id, floor + 1);
+    if (op.op === 'remove') {
+      return { key, op: 'remove', bucket: 'op', idx: i, text: found ? `删除:${found.text}` : '删除一项', sub: found?.subject, editable: false };
+    }
+    const owner = op.subject ? `归属改为 ${op.subject}` : found?.subject;
+    return { key, op: 'update', bucket: 'op', idx: i, text: op.text || found?.text || '修改一项', sub: owner, editable: false };
+  });
+}
+
 // 局势卡:省略=不动,null=清空,对象=整卡覆盖;一楼最多一条。
 function focusTags(d: Delta): DeltaTag[] {
   if (!d || d.sceneFocus === undefined) return [];
@@ -253,6 +270,7 @@ export function deltaTagGroups(d: Delta, floor: number): DeltaTagGroup[] {
     { title: '场景', icon: 'scenes', tags: sceneTags(d) },
     { title: '悬念簿', icon: 'plans', tags: planTags(d, floor) },
     { title: '信息差', icon: 'eye-off', tags: secretTags(d, floor) },
+    { title: '了解清单', icon: 'eye', tags: knowledgeTags(d, floor) },
     { title: '变量', icon: 'vars', tags: varTags(d) },
   ];
 }

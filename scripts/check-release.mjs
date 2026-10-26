@@ -66,7 +66,7 @@ for (const p of paths) {
   const text = await read(p);
   for (const [kind, pattern] of checks) assert(!pattern.test(text), kind + '（只报告位置，不输出内容）：' + p);
 }
-const PROMPT_EXPORT_COUNT = 16;
+const PROMPT_EXPORT_COUNT = 17;
 const promptFiles = paths.filter(p => /^docs\/prompts\/.*\.txt$/.test(p));
 if (promptFiles.length !== PROMPT_EXPORT_COUNT) problems.push('提示词导出必须包含 ' + PROMPT_EXPORT_COUNT + ' 份 txt，现有 ' + promptFiles.length + ' 份，请先 pnpm export:prompts');
 // 提示词导出是否与当前源码一致：导出到临时目录，再与 docs/prompts 逐字比较（统一换行后）。
