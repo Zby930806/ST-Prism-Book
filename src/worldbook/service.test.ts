@@ -71,6 +71,24 @@ describe('手动生成', () => {
     expect(messages[0].content).not.toContain('内容边界');
   });
 
+  it('内容边界按设置：始终发送时 DeepSeek 也带，不发送时其他模型也不带', async () => {
+    const before = api.apiSettings.contentBoundary;
+    try {
+      api.apiSettings.contentBoundary = 'always';
+      worldbookSettings.channel.model = 'deepseek-chat';
+      await generateSuggestions();
+      expect(completion.mock.calls[0][1][0].content).toContain('内容边界');
+
+      api.apiSettings.contentBoundary = 'never';
+      worldbookSettings.channel.model = 'mock-model';
+      addTurn();
+      await generateSuggestions();
+      expect(completion.mock.calls[1][1][0].content).not.toContain('内容边界');
+    } finally {
+      api.apiSettings.contentBoundary = before;
+    }
+  });
+
   it('没有建议时只推进读取进度，不保存空批次；丢弃的动作说明原因', async () => {
     completion.mockResolvedValueOnce(reply([{ action: 'delete', uid: 0 }]));
     await generateSuggestions();

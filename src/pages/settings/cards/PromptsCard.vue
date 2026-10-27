@@ -15,15 +15,27 @@ const TASK_MODE_OPTIONS: { value: ApiSettings['taskContextMode']; label: string 
   { value: 'disabled', label: '禁用' },
 ];
 
+const BOUNDARY_OPTIONS: { value: ApiSettings['contentBoundary']; label: string }[] = [
+  { value: 'auto', label: '自动（按模型名）' },
+  { value: 'always', label: '始终发送' },
+  { value: 'never', label: '不发送' },
+];
+
 const dialog = ref<InstanceType<typeof PromptDialog> | null>(null);
 </script>
 
 <template>
   <Collapsible class="prism-settings-card" title="自定义提示词" :open="false">
     <p class="prism-card-intro">点击一项打开编辑，可插入宏或恢复默认。修改过的提示词不随内置版本更新；内置版本更新后，此处标有「内置已更新」，打开可查看内置的改动。</p>
-    <p class="bbs-field-hint">摘要和总结使用的模型名里含 deepseek（不区分大小写，带平台前缀或后缀的也算，如 deepseek-ai/DeepSeek-V3、deepseek-r1:14b）时，发送时省略内置规则开头的「内容边界」，沿用原来的提示词；其他模型照常发送。跟随主 API 时看酒馆当前选中的模型。中转站把 DeepSeek 改成不含 deepseek 的别名时识别不了。自己模板里写的内容边界不会被去掉。检索改写不加内容边界。</p>
     <SettingRow kind="num" as="div" label="任务说明模式" hint="已有的自定义内容会保留。模式为内置或自定义时，保存与内置不同的任务说明自动切换为「自定义」，恢复默认后保存即使用内置说明；模式为「禁用」时，保存只修改内容，不会启用。「禁用」只是不发送这段说明，输出格式要求照常发送。">
-      <BbsSelect v-model="apiSettings.taskContextMode" :options="TASK_MODE_OPTIONS" class="prism-task-mode" aria-label="任务说明模式" />
+      <BbsSelect v-model="apiSettings.taskContextMode" :options="TASK_MODE_OPTIONS" class="prism-mode-select" aria-label="任务说明模式" />
+    </SettingRow>
+    <SettingRow
+      kind="num" as="div" label="内容边界"
+      hint="内置规则开头的一段，规定未成年人、成年人亲密内容、非自愿情节等如何记录。默认「自动」：模型名含 deepseek 时不发送，其他模型发送。"
+      details="用于单楼摘要、合并摘要、总结、二次总结、回看原文补档案、角色重新建档和世界书建议；检索改写、创作规划、推进条件检查、规划讨论和双子札记不使用内容边界。选「自动」时按各项所用的模型判断，不区分大小写，带平台前缀或后缀的也算（如 deepseek-ai/DeepSeek-V3、deepseek-r1:14b）；跟随主 API 时看酒馆当前选中的模型。中转站把 DeepSeek 改成不含 deepseek 的别名时无法识别，可改选「不发送」。自定义模板里自己写的内容边界不受此项影响。"
+    >
+      <BbsSelect v-model="apiSettings.contentBoundary" :options="BOUNDARY_OPTIONS" class="prism-mode-select" aria-label="内容边界" />
     </SettingRow>
     <ul class="bbs-prompt-list">
       <li v-for="m in PROMPT_METAS" :key="m.key" class="bbs-prompt-item">
@@ -42,13 +54,13 @@ const dialog = ref<InstanceType<typeof PromptDialog> | null>(null);
 </template>
 
 <style scoped>
-/* 任务说明模式下拉：按选项文字定宽，与其他设置行的控件同在右侧。带父级压过 BbsSelect 根节点的 width:100% */
-.bbs-num-row .prism-task-mode {
+/* 任务说明模式、内容边界两个下拉：按选项文字定宽，与其他设置行的控件同在右侧。带父级压过 BbsSelect 根节点的 width:100% */
+.bbs-num-row .prism-mode-select {
   width: auto;
   min-width: 156px;
   max-width: 100%;
 }
-.prism-task-mode :deep(.bbs-select-trigger) {
+.prism-mode-select :deep(.bbs-select-trigger) {
   font-size: 12px;
 }
 

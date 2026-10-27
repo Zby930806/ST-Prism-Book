@@ -70,6 +70,16 @@ describe('v0.18 内容边界（不代表模型语义通过）', () => {
     }
   });
 
+  it('内容边界设置：自动时按模型名判断，始终发送与不发送不看模型名', () => {
+    const models = ['deepseek-chat', 'deepseek-ai/DeepSeek-V3', 'qwen3-32b', 'google/gemini-4-argon', '', undefined];
+    expect(apiSettings.contentBoundary).toBe('auto');
+    expect(models.map(m => p.sendsContentBoundary(m))).toEqual([false, false, true, true, true, true]);
+    apiSettings.contentBoundary = 'always';
+    expect(models.map(m => p.sendsContentBoundary(m))).toEqual(models.map(() => true));
+    apiSettings.contentBoundary = 'never';
+    expect(models.map(m => p.sendsContentBoundary(m))).toEqual(models.map(() => false));
+  });
+
   it('关闭内容边界时内置摘要与两层压缩都回到原规则，开头是任务说明，执行顺序紧随其后', () => {
     const variants = [
       { system: p.buildSummaryPrompt(args, { contentBoundary: false }).system, body: p.SUMMARY_TASK_ORDER },

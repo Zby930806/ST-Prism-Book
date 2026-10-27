@@ -180,7 +180,7 @@ const API_GROUPS: Array<{ label: string; keys: string[] }> = [
   { label: '批量补摘的合并参数', keys: ['batchMaxChars', 'batchMaxFloors', 'batchFullRecent'] },
   { label: '注入设置', keys: ['summaryOnlyMode', 'memoryBudgetTokens', 'injection'] },
   { label: '向量记忆（开关、端点地址与模型、召回参数）', keys: ['vector'] },
-  { label: '自定义提示词与任务说明', keys: ['prompts', 'promptBases', 'taskContextMode'] },
+  { label: '自定义提示词、任务说明与内容边界', keys: ['prompts', 'promptBases', 'taskContextMode', 'contentBoundary'] },
   { label: '世界书模板渲染', keys: ['renderWorldInfoTemplates'] },
   { label: '变量模板', keys: ['varsGlobalTemplate', 'varsTemplateByChar'] },
 ];

@@ -14,7 +14,7 @@ import { planAutoEnrichment, readEnrichRecord, runAutoEnrichment, writeEnrichRec
 import { parseSummaryResponse, SummaryResponseError, describeDropped, type DroppedEvidence } from './summaryResponse';
 import { selectKnowledgeForSummary } from './knowledge';
 import { clearInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
-import { BATCH_SUMMARY_THINKING_CHECKLIST, buildBatchSummaryPrompt, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, isDeepSeekModel, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
+import { BATCH_SUMMARY_THINKING_CHECKLIST, buildBatchSummaryPrompt, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, sendsContentBoundary, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
 import { clampToTimeTags, cleanBody, explicitOpeningTime, hasStoryBody, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, latestStoryTime, parseTimeRange, storyTimeValue, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import { memory, memoryWriteIssue, checkCompatibility, recomputeDerived, scheduleLeafFlush } from './store';
@@ -1124,9 +1124,9 @@ interface Sender {
   /** 出错时告诉用户去哪里改设置。 */
   settings: string;
   mainApi: boolean;
-  /** 实际处理请求的模型名;用于决定是否发送内容边界(DeepSeek 沿用原提示词)。 */
+  /** 实际处理请求的模型名;内容边界设为自动时据此判断是否发送(DeepSeek 沿用原提示词)。 */
   model: string;
-  /** 是否发送内容边界:DeepSeek 模型不发,其余模型发。 */
+  /** 是否发送内容边界:按设置,自动时 DeepSeek 模型不发、其余模型发。每次组装提示词时读取。 */
   contentBoundary: boolean;
 }
 export type { Sender };
@@ -1140,7 +1140,7 @@ export function resolveSender(task: TaskType): Sender | { error: string } {
       settings: `设置 → 副 API → ${channel.name || '未命名渠道'}`,
       mainApi: false,
       model: channel.model,
-      contentBoundary: !isDeepSeekModel(channel.model),
+      get contentBoundary() { return sendsContentBoundary(channel.model); },
     };
   }
   if (!mainApiAvailable()) {
@@ -1154,7 +1154,7 @@ export function resolveSender(task: TaskType): Sender | { error: string } {
     settings: '酒馆的主 API 设置',
     mainApi: true,
     get model() { return mainModel(); },
-    get contentBoundary() { return !isDeepSeekModel(mainModel()); },
+    get contentBoundary() { return sendsContentBoundary(mainModel()); },
   };
 }
 

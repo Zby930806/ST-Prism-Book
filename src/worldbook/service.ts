@@ -10,7 +10,7 @@ import { ApiError, apiFailure, describeFailure, looksLikeUnfinishedJson } from '
 import { engineActiveHere } from '@/api/settings';
 import { getContext, type STContext } from '@/st/context';
 import { toast } from '@/st/toast';
-import { isDeepSeekModel } from '@/memory/prompts';
+import { sendsContentBoundary } from '@/memory/prompts';
 import { messageHash } from '@/notes/source';
 import { resolveWorldbookChannel, worldbookApiPath, worldbookSettings } from './settings';
 import { hostApiIssue, loadBook, refreshWorldHost, worldHost, type BookBindings } from './host';
@@ -133,7 +133,7 @@ export async function generateSuggestions(opts: { auto?: boolean } = {}): Promis
     if (!plan) throw new Error(auto ? '没有新的楼层。' : '当前聊天还没有可以读取的正文。');
     const range = makeRange(ctx, plan.floors[0], plan.floors[plan.floors.length - 1]);
     const permission = worldbookSettings.permission;
-    const built = buildWorldbookContext({ ctx, target: { name: book, data: target }, references, plan, read: worldbookSettings.read, permission, contentBoundary: !isDeepSeekModel(channel.model) });
+    const built = buildWorldbookContext({ ctx, target: { name: book, data: target }, references, plan, read: worldbookSettings.read, permission, contentBoundary: sendsContentBoundary(channel.model) });
     const ctrl = new AbortController(); controller = ctrl; own = ++runId;
     Object.assign(worldbookRun, { busy: true, auto, received: 0, lastStats: built.stats, lastDropped: [] });
     const modeText = plan.mode === 'first' ? '（本聊天第一次读取，从最近的楼层开始）' : plan.mode === 'reread' ? '（没有新楼层，重新读取最近的楼层）' : '';

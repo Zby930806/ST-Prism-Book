@@ -1,6 +1,6 @@
 /**
  * 世界书建议的提示词。按修改权限分三档，代码里同样拦截超出权限的动作（见 protocol.ts）。
- * 发送时，模型名不含 deepseek 的在最前面加上摘要提示词同样的「内容边界」（复用 memory/prompts.ts）。
+ * 发送时按内容边界设置（默认模型名不含 deepseek 的才发）在最前面加上摘要提示词同样的「内容边界」（复用 memory/prompts.ts）。
  */
 import { RULE_CONTENT_BOUNDARY } from '@/memory/prompts';
 import { WB_LIMITS as L } from './limits';
@@ -95,7 +95,7 @@ ${TIER_ACTIONS[permission].map(k => ACTION_SPECS[k]).join('\n')}
 ${EXAMPLES[permission]}`;
 }
 
-/** 实际发送的系统提示词：contentBoundary 为 false（DeepSeek 模型）时省略开头的内容边界。 */
+/** 实际发送的系统提示词：contentBoundary 为 false（设置为不发送，或自动时的 DeepSeek 模型）时省略开头的内容边界。 */
 export function buildWorldbookSystem(permission: WorldbookPermission, opts: { contentBoundary?: boolean } = {}): string {
   const body = worldbookPromptBody(permission);
   return opts.contentBoundary === false ? body : RULE_CONTENT_BOUNDARY + '\n\n' + body;

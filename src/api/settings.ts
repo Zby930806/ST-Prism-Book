@@ -335,6 +335,8 @@ export interface ApiSettings {
   promptBases: Partial<Record<keyof CustomPrompts, string>>;
   /** 任务说明三态;旧 jailbreak 字段保留作自定义内容。 */
   taskContextMode: 'default' | 'custom' | 'disabled';
+  /** 内置规则开头的「内容边界」:auto 按模型名判断(含 deepseek 的不发送,其余发送),always 始终发送,never 不发送。 */
+  contentBoundary: 'auto' | 'always' | 'never';
   /** 主对话四类记忆槽的总估算token预算,0=不限(默认);不是模型精确token数。 */
   memoryBudgetTokens: number;
   /** 预算默认值改为不限制时的一次性迁移标记:旧版本按原默认值保存的 6000 改成 0,之后用户自己填的值不再改动。 */
@@ -502,6 +504,7 @@ function defaults(): ApiSettings {
     prompts: { summary: '', resummary: '', resummary2: '', jailbreak: '', timeTag: '' },
     promptBases: {},
     taskContextMode: 'default',
+    contentBoundary: 'auto',
     memoryBudgetTokens: 0,
     memoryBudgetMigrated: false,
     verbosity: 'detailed',
@@ -581,6 +584,8 @@ function normalize(raw: unknown): ApiSettings {
   const savedMode = (raw as Partial<ApiSettings>).taskContextMode;
   merged.taskContextMode = savedMode === 'default' || savedMode === 'custom' || savedMode === 'disabled'
     ? savedMode : (typeof merged.prompts.jailbreak === 'string' && merged.prompts.jailbreak.trim() ? 'custom' : 'default');
+  const savedBoundary = (raw as Partial<ApiSettings>).contentBoundary;
+  merged.contentBoundary = savedBoundary === 'always' || savedBoundary === 'never' ? savedBoundary : 'auto';
   const budget = (raw as Partial<ApiSettings>).memoryBudgetTokens;
   merged.memoryBudgetTokens = normalizeMemoryBudgetTokens(budget);
   merged.memoryBudgetMigrated = (raw as Partial<ApiSettings>).memoryBudgetMigrated === true;
@@ -831,6 +836,7 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.prompts = src.prompts;
   target.promptBases = src.promptBases;
   target.taskContextMode = src.taskContextMode;
+  target.contentBoundary = src.contentBoundary;
   target.memoryBudgetTokens = src.memoryBudgetTokens;
   target.memoryBudgetMigrated = src.memoryBudgetMigrated;
   target.verbosity = src.verbosity;

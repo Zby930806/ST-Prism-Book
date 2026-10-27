@@ -39,6 +39,13 @@ describe('数值设置的规整', () => {
     expect(s.vector.enabled).toBe(false);
     expect(normalizeApiSettings({ enabled: false, summaryOnlyMode: true, vector: { enabled: true } })).toMatchObject({ enabled: false, summaryOnlyMode: true, vector: { enabled: true } });
   });
+
+  it('内容边界：旧设置没有这一项时为自动，认不出的值也按自动', () => {
+    expect(normalizeApiSettings({}).contentBoundary).toBe('auto');
+    expect(normalizeApiSettings({ contentBoundary: 'always' }).contentBoundary).toBe('always');
+    expect(normalizeApiSettings({ contentBoundary: 'never' }).contentBoundary).toBe('never');
+    for (const bad of ['', 'off', true, false, 1, null]) expect(normalizeApiSettings({ contentBoundary: bad }).contentBoundary).toBe('auto');
+  });
 });
 
 describe('跟随主 API 时的最大回复与预填充', () => {
