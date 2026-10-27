@@ -9,7 +9,7 @@ const openPlans = [{ id: 'plan:stable#0' }];
 function parse(body: Record<string, unknown>, lenient: boolean, extra: { skipped?: DroppedEvidence[]; details?: MemLifeDetail[] } = {}) {
   const dropped: DroppedEvidence[] = [];
   const d = parseSummaryResponse(JSON.stringify({ summary: '次晨重逢。', ...body }), {
-    requireStateChanges: true, sourceContent: content, sourceTexts: [content],
+    builtin: true, sourceContent: content, sourceTexts: [content],
     npcRoster: ['小A'], finalize: delta => finalizeDelta(delta, openPlans, extra.details ?? []),
     refCounts: { plans: openPlans.length, lifeDetails: 0, secrets: 0 },
     ...(extra.skipped ? { onSkipped: (list: DroppedEvidence[]) => { extra.skipped!.push(...list); } } : {}),
@@ -19,42 +19,36 @@ function parse(body: Record<string, unknown>, lenient: boolean, extra: { skipped
 }
 const stateChangesOf = (d: unknown) => (d as { stateChanges?: unknown }).stateChanges;
 
-describe('最后一次尝试时只去掉对不上正文的位置', () => {
-  it('位置引文对不上：去掉这次定位，同一角色的其他更新照常保存', () => {
-    const body = { stateChanges: ['npcs'], npcs: { update: [{ name: '小A', location: '庭院', locationEvidence: '小A在庭院散步。', outfit: '灰色外套' }] } };
-    expect(() => parse(body, false)).toThrow(SummaryResponseError);
-    const { d, dropped } = parse(body, true);
-    expect(d.npcs?.update?.[0]).toEqual({ name: '小A', outfit: '灰色外套' });
-    expect(dropped).toEqual([{ kind: 'location', name: '小A', reason: 'mismatch' }]);
-  });
-
-  it('只剩名字的条目和空分组一并去掉，stateChanges 随之更正', () => {
-    const { d, dropped } = parse({ stateChanges: ['npcs'], npcs: { update: [{ name: '小A', location: '庭院', locationEvidence: '小A在庭院散步。' }] } }, true);
-    expect(d.npcs).toBeUndefined();
-    expect(stateChangesOf(d)).toEqual([]);
-    expect(dropped).toEqual([{ kind: 'location', name: '小A', reason: 'mismatch' }]);
-  });
-
-  it('新登场角色只写了名字和位置、位置原话对不上：只去掉位置，角色照常建档', () => {
-    for (const evidence of ['小B在庭院散步。', undefined]) {
-      const entry = { name: '小B', location: '庭院', ...(evidence ? { locationEvidence: evidence } : {}) };
-      const { d, dropped, stored } = parse({ stateChanges: ['npcs'], npcs: { add: [entry] } }, true);
-      expect(d.npcs?.add).toEqual([{ name: '小B' }]);
-      expect(stateChangesOf(d)).toEqual(['npcs']);
-      expect(stored.npcs?.add?.[0]).toMatchObject({ name: '小B' });
-      expect(stored.npcs?.add?.[0].location).toBeUndefined();
-      expect(dropped).toEqual([{ kind: 'location', name: '小B', reason: evidence ? 'mismatch' : 'missing' }]);
+describe('角色位置不再要求正文原句', () => {
+  it('写位置不附原句、原句对不上或对得上，都照常保存位置，原句不入库', () => {
+    for (const evidence of [undefined, '小A在庭院散步。', '次晨林舟在厨房见到小A。']) {
+      const body = { npcs: { update: [{ name: '小A', location: '庭院', outfit: '灰色外套', ...(evidence ? { locationEvidence: evidence } : {}) }] } };
+      for (const lenient of [false, true]) {
+        const { d, dropped, stored } = parse(body, lenient);
+        expect(stored.npcs?.update?.[0]).toEqual({ name: '小A', location: '庭院', outfit: '灰色外套' });
+        expect(JSON.stringify(stored)).not.toContain('locationEvidence');
+        expect(d).not.toHaveProperty('stateChanges');
+        expect(dropped).toEqual([]);
+      }
     }
   });
 
-  it('有新地点却没给原话时按「缺原话」报告', () => {
-    const { dropped } = parse({ stateChanges: ['npcs'], npcs: { update: [{ name: '小A', location: '庭院', outfit: '灰色外套' }] } }, true);
-    expect(dropped).toEqual([{ kind: 'location', name: '小A', reason: 'missing' }]);
-    expect(describeDropped(dropped[0]).why).toBe('没有给出正文原句');
+  it('新登场角色只写了名字和位置：角色和位置照常建档', () => {
+    for (const evidence of ['小B在庭院散步。', undefined]) {
+      const entry = { name: '小B', location: '庭院', ...(evidence ? { locationEvidence: evidence } : {}) };
+      const { stored, dropped } = parse({ npcs: { add: [entry] } }, false);
+      expect(stored.npcs?.add).toEqual([{ name: '小B', location: '庭院' }]);
+      expect(dropped).toEqual([]);
+    }
+  });
+
+  it('旧叶子上记着的位置类未写入项仍能读出说明', () => {
+    expect(describeDropped({ kind: 'location', name: '小A', reason: 'missing' })).toEqual({ what: '小A的位置', why: '没有给出正文原句' });
+    expect(describeDropped({ kind: 'location', name: '小A', reason: 'mismatch' }).why).toBe('给出的原句与本楼正文对不上');
   });
 
   it('有伤情时直接整段改写 condition 照常保存，不再去掉', () => {
-    const body = { stateChanges: ['npcs'], npcs: { update: [{ name: '小A', condition: '手腕还疼', outfit: '灰色外套' }] } };
+    const body = { npcs: { update: [{ name: '小A', condition: '手腕还疼', outfit: '灰色外套' }] } };
     expect(parse(body, false).d.npcs?.update?.[0]).toEqual({ name: '小A', condition: '手腕还疼', outfit: '灰色外套' });
     const { d, dropped } = parse(body, true);
     expect(d.npcs?.update?.[0]).toEqual({ name: '小A', condition: '手腕还疼', outfit: '灰色外套' });
@@ -63,7 +57,6 @@ describe('最后一次尝试时只去掉对不上正文的位置', () => {
 
   it('照旧写法给的伤情补丁直接去掉，不报告，也不让整楼失败', () => {
     const body = {
-      stateChanges: ['npcs'],
       npcs: { update: [{ name: '小A', outfit: '灰色外套', conditionPatch: { add: [{ text: '还疼', evidence: '小A说手腕还疼' }] } }] },
     };
     for (const lenient of [false, true]) {
@@ -76,12 +69,6 @@ describe('最后一次尝试时只去掉对不上正文的位置', () => {
   it('旧叶子上记着的伤情类未写入项仍能读出说明', () => {
     expect(describeDropped({ kind: 'condition', name: 'protagonist', reason: 'mismatch' }, '林舟')).toEqual({ what: '林舟的伤情', why: '给出的原句与本楼正文对不上' });
     expect(describeDropped({ kind: 'condition', name: '小A', reason: 'invalid' }).why).toBe('伤情片段的编号或写法不符合要求');
-  });
-
-  it('引文对得上时不去掉任何内容', () => {
-    const { d, dropped } = parse({ stateChanges: ['npcs'], npcs: { update: [{ name: '小A', location: '厨房', locationEvidence: '次晨林舟在厨房见到小A。' }] } }, true);
-    expect(d.npcs?.update?.[0]).toEqual({ name: '小A', location: '厨房' });
-    expect(dropped).toEqual([]);
   });
 });
 
@@ -96,20 +83,22 @@ describe('最后一次尝试时其他不合格的更新也只去掉这一项', (
     expect(dropped).toEqual([{ kind: 'item', name: '钥匙', reason: 'missing', detail: '没有明确数量' }]);
   });
 
-  it('stateChanges 以实际有效字段为准：漏写的补上，声明了却没有有效更新的写进提示', () => {
+  it('状态清单不再对账：旧模板写的 stateChanges 与实际字段不一致也照常保存，不重试也不报告', () => {
     const body = { stateChanges: ['items', 'plans'], npcs: { update: [{ name: '小A', outfit: '灰色外套' }] } };
-    expect(() => parse(body, false)).toThrow(/清单是 \[items, plans\]，实际有效输出的是 \[npcs\]/);
-    const { d, dropped } = parse(body, true);
-    expect(stateChangesOf(d)).toEqual(['npcs']);
-    expect(dropped.map(x => [x.kind, x.name, x.reason])).toEqual([['stateChanges', 'items', 'missing'], ['stateChanges', 'plans', 'missing']]);
-    expect(describeDropped(dropped[0]).what).toBe('物品的更新');
+    for (const lenient of [false, true]) {
+      const { d, dropped } = parse(body, lenient);
+      expect(stateChangesOf(d)).toBeUndefined();
+      expect(d.npcs?.update?.[0]).toEqual({ name: '小A', outfit: '灰色外套' });
+      expect(dropped).toEqual([]);
+    }
+    // 旧叶子上记着的清单类未写入项仍能读出说明
+    expect(describeDropped({ kind: 'stateChanges', name: 'items', reason: 'missing' }).what).toBe('物品的更新');
   });
 
-  it('缺 stateChanges 时最后一次按实际字段补上，前几次附原因重试', () => {
-    const body = { location: '厨房' };
-    expect(() => parse(body, false)).toThrow(/必须填写 stateChanges/);
-    const { d, dropped } = parse(body, true);
-    expect(stateChangesOf(d)).toEqual(['location']);
+  it('不写 stateChanges 也照常保存', () => {
+    const { d, dropped } = parse({ location: '厨房' }, false);
+    expect(d.location).toBe('厨房');
+    expect(stateChangesOf(d)).toBeUndefined();
     expect(dropped).toEqual([]);
   });
 
@@ -128,7 +117,7 @@ describe('最后一次尝试时其他不合格的更新也只去掉这一项', (
     expect(() => parse(body, false)).toThrow('targetTime 必须是字符串；撤销期限填空字符串');
     const { d, dropped } = parse(body, true);
     expect(d.plans).toBeUndefined();
-    expect(stateChangesOf(d)).toEqual([]);
+    expect(stateChangesOf(d)).toBeUndefined();
     expect(dropped.map(x => x.kind)).toEqual(['plan']);
   });
 
@@ -171,7 +160,7 @@ describe('最后一次尝试时其他不合格的更新也只去掉这一项', (
     let reported = false;
     for (const raw of [JSON.stringify({ stateChanges: [] }), '不是 JSON']) {
       expect(() => parseSummaryResponse(raw, {
-        requireStateChanges: true, sourceContent: content, sourceTexts: [content], npcRoster: ['小A'],
+        builtin: true, sourceContent: content, sourceTexts: [content], npcRoster: ['小A'],
         finalize: delta => finalizeDelta(delta, []), onDroppedEvidence: () => { reported = true; },
       })).toThrow(SummaryResponseError);
     }
@@ -180,7 +169,7 @@ describe('最后一次尝试时其他不合格的更新也只去掉这一项', (
 });
 
 describe('变量命令无效时照常跳过并提示', () => {
-  it('清单写了 vars、命令全部无效时不让整楼失败（任何一次尝试），保存后提示跳过了几条', () => {
+  it('命令全部无效时不让整楼失败（任何一次尝试），保存后提示跳过了几条', () => {
     const skipped: DroppedEvidence[] = [];
     const { d, stored } = parse({ stateChanges: ['vars'], vars: [{ op: 'update', path: '好感', value: 3 }, { op: 'delete', path: '旧' }] }, false, { skipped });
     expect(d.summary).toBe('次晨重逢。');

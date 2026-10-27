@@ -37,11 +37,11 @@ describe('v0.16 请求合同（不代表模型语义通过）', () => {
     expect(p.buildSummaryPrompt({...args,hasTimeTags:false}).system).toContain('范围端点不分配给动作');
   });
   it('快照去重与字段示范一致，不重播来路', () => {
-    expect(p.RULE_SCENE_FOCUS).toContain('situation 只写末态，不重述到达末态的经过');
-    expect(p.RULE_SCENE_FOCUS).toContain('pendingBeat 不重复 situation');
-    expect(p.buildSummaryPrompt(args).system).toContain('独立于 situation 的明确后续事项；重复则省略');
+    expect(p.RULE_SCENE_FOCUS).toContain('situation:本楼结束时的局面');
+    expect(p.RULE_SCENE_FOCUS).toContain('只是把 situation 换成将来时的不写');
+    expect(p.buildSummaryPrompt(args).system).toContain('正文明确预告的即将发生之事(可选,禁预测,不重复 situation)');
     expect(p.RULE_SCENE_FOCUS).toContain('整卡覆盖');
-    expect(p.RULE_SCENE_FOCUS).toContain('所见写所见,口述写“某人称”,判断写“某人认为/估计”');
+    expect(p.RULE_SCENE_FOCUS).toContain('所见写所见,口述写「某人称」,判断写「某人认为」');
   });
   it('组织指令用中性记录词，总结核查不混入状态操作', () => {
     for (const result of [p.buildSummaryPrompt(args), ...[1,2].map(level => p.buildResummaryPrompt({...args,level}))]) {

@@ -23,7 +23,8 @@ function useChat(chat: STMessage[]) {
   recomputeDerived();
   return ctx;
 }
-function response(summary: string, delta: SummaryDelta = {}) {
+/** 模拟模型回复:可带旧模板写法的字段(stateChanges、locationEvidence),验证它们被忽略、不入库。 */
+function response(summary: string, delta: object = {}) {
   return JSON.stringify({ summary, ...delta, stateChanges: Object.keys(delta).filter(k => !['time', 'timeStart', 'timeEnd'].includes(k)) });
 }
 beforeEach(() => {
@@ -174,13 +175,13 @@ describe('逐楼完整重建的生产入口', () => {
     expect(memory.summaries.some(s => s.id === 'old-l1')).toBe(false);
     expect(memory.summaries.some(s => s.id === 'import')).toBe(true);
   });
-  it('缺状态清单时附原因重试一次；最后一次按实际字段补上清单，摘要照常保存', async () => {
+  it('不写状态清单也一次保存，不重试', async () => {
     settings.apiSettings.summaryMaxRetries = 1;
     const chat = [msg('原文', true)]; useChat(chat);
     vi.mocked(client.requestViaMainApi).mockResolvedValue(JSON.stringify({ summary: '小A重新出现在厨房。' }));
     expect(await batchBackfill({ regenerate: true })).toMatchObject({ done: 1 });
-    expect(client.requestViaMainApi).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(client.requestViaMainApi).mock.calls[1][0].at(-2)?.content).toContain('stateChanges');
+    expect(client.requestViaMainApi).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(client.requestViaMainApi).mock.calls[0][0].map(m => m.content).join('\n')).not.toContain('stateChanges');
     expect(chat[0].extra?.bbs_leaf?.text).toBe('小A重新出现在厨房。');
     expect(engineState.lastError).toBe('');
   });
@@ -259,7 +260,7 @@ describe('伤情整段覆盖的生产链', () => {
 });
 
 
-describe('v0.8 NPC定位证据的生产链', () => {
+describe('角色位置的生产链(1.4.4 起不要求正文原句)', () => {
   function fixture() {
     const seed = msg('早晨小A在归雁客栈厨房，右腕缠绷带。', true);
     seed.extra!.bbs_leaf = { ...seed.extra!.bbs_leaf!, seed: true, delta: {
@@ -272,15 +273,15 @@ describe('v0.8 NPC定位证据的生产链', () => {
   const good = () => response('林舟与小B到南门，小B赠予铜哨；小A未同行，暂无新消息。', {
     timeEnd: '2031/4/13 08:35', location: '南门', items: { add: [{ name: '铜哨', qty: 1, carried: true }] },
   });
-  it('真实错误形态触发纠错，旧位置不刷新，伤势不丢，重摘不重复物品', async () => {
+  it('模型按规则不重报未同行角色的旧地点时，旧位置标为未确认，伤情不丢，重摘不重复物品', async () => {
     const chat = fixture(); settings.apiSettings.summaryMaxRetries = 1;
     const previous = deriveMemory(chat, 1).npcs[0].lastKnownLocation;
-    vi.mocked(client.requestViaMainApi)
-      .mockResolvedValueOnce(response('小A仍在归雁客栈。', { location: '南门', npcs: { update: [{ name: '小A', location: '归雁客栈' }] } }))
-      .mockResolvedValueOnce(good());
+    vi.mocked(client.requestViaMainApi).mockResolvedValueOnce(good());
     expect(await regenerateFloor(1)).toBe(true);
-    expect(client.requestViaMainApi).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(client.requestViaMainApi).mock.calls[1][0].at(-2)?.content).toContain('locationEvidence');
+    expect(client.requestViaMainApi).toHaveBeenCalledTimes(1);
+    const sent = vi.mocked(client.requestViaMainApi).mock.calls[0][0].map(m => m.content).join('\n');
+    expect(sent).not.toContain('locationEvidence');
+    expect(sent).toContain('主角换景而定点角色未同行、此前打算留守或暂无新消息 → 不重报旧 location');
     expect(deriveMemory(chat).npcs[0]).toMatchObject({ locationStale: true, lastKnownLocation: previous, condition: '右腕受伤，爬不了沉降井' });
     expect(chat[1].extra!.bbs_leaf!.delta.npcs).toBeUndefined();
     vi.mocked(client.requestViaMainApi).mockResolvedValue(good());
@@ -290,27 +291,24 @@ describe('v0.8 NPC定位证据的生产链', () => {
     expect(deriveMemory(chat).npcs[0].lastKnownLocation).toEqual(previous);
     expect(JSON.stringify(chat[1])).not.toContain('locationEvidence');
   });
-  it('旧历史引文不能充当本楼证据：纠错耗尽后只去掉这次定位，旧位置记录不变，其余照常保存并提示', async () => {
+  it('模型重报地点时一次保存,不再因原句重试或去掉位置;旧模板多给的原句不入库', async () => {
     const chat = fixture(); chat.push(msg('后续楼', true));
-    const previous = deriveMemory(chat, 1).npcs[0].lastKnownLocation;
     settings.apiSettings.summaryMaxRetries = 1;
     vi.mocked(client.requestViaMainApi).mockResolvedValue(response('小A仍在客栈。', { npcs: { update: [{ name: '小A', location: '归雁客栈', locationEvidence: '早晨小A在归雁客栈厨房' }] } }));
     expect(await batchBackfill({ regenerate: true })).toMatchObject({ done: 2 });
-    expect(client.requestViaMainApi).toHaveBeenCalledTimes(4);
-    expect(vi.mocked(client.requestViaMainApi).mock.calls[1][0].at(-2)?.content).toContain('locationEvidence');
-    expect(deriveMemory(chat).npcs[0]).toMatchObject({ location: '归雁客栈', lastKnownLocation: previous, condition: '右腕受伤，爬不了沉降井' });
-    expect(chat[1].extra!.bbs_leaf!.delta.npcs).toBeUndefined();
+    expect(client.requestViaMainApi).toHaveBeenCalledTimes(2);
+    expect(deriveMemory(chat).npcs[0]).toMatchObject({ location: '归雁客栈', locationStale: false, condition: '右腕受伤，爬不了沉降井' });
+    expect(chat[1].extra!.bbs_leaf!.delta.npcs?.update?.[0]).toEqual({ name: '小A', location: '归雁客栈' });
     expect(JSON.stringify(chat)).not.toContain('locationEvidence');
     expect(engineState.lastError).toBe('');
-    expect(notices.toast).toHaveBeenCalledWith(expect.stringContaining('小A的位置（给出的原句与本楼正文对不上）'), 'warning');
+    expect(notices.toast).not.toHaveBeenCalledWith(expect.stringContaining('的位置'), 'warning');
   });
-  it('纠错后引文对得上时照常定位，不提示', async () => {
+  it('原句与正文对不上也照常定位，不重试、不提示', async () => {
     const chat = fixture(); chat[1].mes = '午后林舟在菜市遇到小A。';
     settings.apiSettings.summaryMaxRetries = 1;
-    const located = (evidence: string) => response('林舟在菜市与小A重逢。', { timeEnd: '2031/4/13 14:00', location: '菜市', npcs: { update: [{ name: '小A', location: '菜市', locationEvidence: evidence }] } });
-    vi.mocked(client.requestViaMainApi).mockResolvedValueOnce(located('小A在菜市等林舟')).mockResolvedValueOnce(located('林舟在菜市遇到小A'));
+    vi.mocked(client.requestViaMainApi).mockResolvedValueOnce(response('林舟在菜市与小A重逢。', { timeEnd: '2031/4/13 14:00', location: '菜市', npcs: { update: [{ name: '小A', location: '菜市', locationEvidence: '小A在菜市等林舟' }] } }));
     expect(await regenerateFloor(1)).toBe(true);
-    expect(client.requestViaMainApi).toHaveBeenCalledTimes(2);
+    expect(client.requestViaMainApi).toHaveBeenCalledTimes(1);
     expect(deriveMemory(chat).npcs[0]).toMatchObject({ location: '菜市', locationStale: false });
     expect(notices.toast).not.toHaveBeenCalledWith(expect.stringContaining('没有更新'), 'warning');
   });
@@ -399,7 +397,7 @@ describe('v0.10 跨题材正式重建合同（预设模型响应）', () => {
     vi.mocked(client.requestViaMainApi).mockImplementation(async messages => {
       const system = messages.filter(m => m.role === 'system').map(m => m.content).join('\n');
       expect(system).toContain('分段移动按先后保留');
-      expect(system).toContain('完整是指已证实的父子链,不是补齐世界地图');
+      expect(system).toContain('按常识或世界地图补出的上级');
       expect(system).toContain('只消耗其中一件不等于清空整组');
       return response(test.summary, { location: test.next, locationPath: [], items: { update: [{ name: '补给剂', qty: 3 }] } });
     });

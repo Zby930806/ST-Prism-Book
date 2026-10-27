@@ -7,6 +7,8 @@ import * as notices from '@/st/toast';
 import { batchBackfill, checkResummary, currentSummaryPromise, handleGenerationIntercept, openingPendingFloor, cancelBatchBackfill, engineState, summarizeFloor, summarizeSelected } from './engine';
 import { buildResummaryPrompt, buildSummaryThinking, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, RULE_SUMMARY_COMPOSITION, SUMMARY_OUTPUT_PROTOCOL } from './prompts';
 import { renderSourceHints, SOURCE_HINTS_HEADER } from './sourceHints';
+// 发送时 {{user}} 已展开为测试里的主角名 User。
+const COMPOSITION = RULE_SUMMARY_COMPOSITION.replaceAll('{{user}}', 'User');
 import { memory, memoryWriteIssue } from './store';
 import { createEmptyMemory, type LeafExtra, type SummaryDelta } from './types';
 
@@ -198,7 +200,7 @@ describe('summary request roles', () => {
     expect(tail[1].content).toContain('[M1-P1] The first response.');
     expect(tail[1].content).not.toContain('═══ 【物品规则】');
     expect(tail[1].content).not.toContain(SOURCE_HINTS_HEADER);
-    expect(tail.map(m => m.content).join('\n').split(RULE_SUMMARY_COMPOSITION)).toHaveLength(custom ? 1 : 2);
+    expect(tail.map(m => m.content).join('\n').split(COMPOSITION)).toHaveLength(custom ? 1 : 2);
     expect(tail.map(m => m.content).join('\n').split(SUMMARY_OUTPUT_PROTOCOL)).toHaveLength(2);
     expect(chat[0].extra?.bbs_leaf?.text).toBe(summary.summary);
   });
@@ -357,7 +359,7 @@ describe('summary request roles', () => {
     if (mode === 'single') await summarizeFloor(1);
     else expect(await batchBackfill({ floors: [1] })).toMatchObject({done:1,total:1});
     const tail = vi.mocked(client.requestViaMainApi).mock.calls[0][0].slice(-4);
-    expect(tail[0].content).toContain('content 是完整替换文本，不是新增半句');
+    expect(tail[0].content).toContain('content 是整段替换,不是追加半句');
     expect(tail[0].content).toContain('借用期限、违约后果交给 summary 与符合准入的 plans');
     expect(tail[0].content).toContain('没有本次位置证据，就不在摘要末尾补写离场者仍在旧处');
     expect(tail[1].content).toContain(body);
@@ -548,7 +550,7 @@ describe.each(['automatic', 'manual'] as const)('compression audit output (%s)',
     expect(messages.at(-3)?.content).toContain('[2] ');
     expect(messages.at(-3)?.content).not.toMatch(/\[M\d+-P\d+\]/);
     expect(messages.at(-4)?.content).not.toContain(sourceText);
-    expect(messages.at(-4)?.content).toContain(RULE_SUMMARY_COMPOSITION);
+    expect(messages.at(-4)?.content).toContain(COMPOSITION);
     expect(messages.at(-3)?.content).not.toContain('【输出要求】');
     expect(messages.at(-3)?.content).not.toContain(SOURCE_HINTS_HEADER);
     expect(messages.map(m => m.content).join('\n').split(SUMMARY_OUTPUT_PROTOCOL)).toHaveLength(2);
@@ -568,7 +570,7 @@ describe.each(['automatic', 'manual'] as const)('compression audit output (%s)',
     const system = messages.at(-4)!.content;
     for(const rule of ['旧条款未被明确替代就独立保留', '明确撤销或替代的只更新对应条款', '此前/以后、当次/后续、部分/全部逐词对照', '没有本次位置证据，就不在摘要末尾补写离场者仍在旧处', '留下动作不等于留下信息', '只写归还及验收结果，不附加一遍旧惩罚']) expect(system).toContain(rule);
     for(const text of texts) expect(messages.at(-3)!.content).toContain(text);
-    expect(messages.at(-2)!.content).toContain('保留的每个后果能否在来源中找到相同触发条件');
+    expect(messages.at(-2)!.content).toContain('条件与后果是否仍逐条对应');
     expect(memory.summaries.at(-1)).toMatchObject({text:result,level:level+1,childIds:ids});
   });
 
@@ -583,7 +585,7 @@ describe.each(['automatic', 'manual'] as const)('compression audit output (%s)',
     const system = messages.at(-4)!.content;
     for (const rule of ['先确定共用事实，再分发到摘要和必要状态字段', '歧义未消除时只保留必要原话和限定', '中央的展台、边缘的楼梯不能互换位置', '范围端点不分配给动作']) expect(system).toContain(rule);
     for (const text of texts) expect(messages.at(-3)!.content).toContain(text);
-    expect(messages.at(-2)!.content).toContain('横向核对同一事实');
+    expect(messages.at(-2)!.content).toContain('合并前后是否仍绑定原对象');
     expect(memory.summaries.at(-1)).toMatchObject({ text: result, level: level + 1, childIds: ids });
   });
 
@@ -602,7 +604,7 @@ describe.each(['automatic', 'manual'] as const)('compression audit output (%s)',
     expect(system).toContain('同句并列不证明同行、归属或因果');
     expect(system).toContain('段落起止是范围，不是每个事件的发生时刻');
     for (const text of texts) expect(messages.at(-3)!.content).toContain(text);
-    expect(messages.at(-2)!.content).toContain('行动转变与有效限制是否被装饰细节挤掉');
+    expect(messages.at(-2)!.content).toContain('先找输入结束时仍有效的结果、未完目标、限制与关系边界');
     expect(memory.summaries.at(-1)).toMatchObject({ text: result, level: level + 1, childIds: ids });
   });
 

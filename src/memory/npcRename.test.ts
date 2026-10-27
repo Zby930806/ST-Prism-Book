@@ -21,7 +21,7 @@ const ai = (mes: string, delta?: StoredDelta): STMessage => ({
 const source = ['酒保A擦了擦手，笑道：“叫我老周就行。”他的右手伤口已经结痂。'];
 const parse = (body: Record<string, unknown>, roster = ['酒保A', '梅芙']) =>
   parseSummaryResponse(JSON.stringify({ summary: '酒保报出名字。', ...body }), {
-    requireStateChanges: false, sourceTexts: source, sourceContent: source[0], npcRoster: roster, userName: '沈遥',
+    builtin: false, sourceTexts: source, sourceContent: source[0], npcRoster: roster, userName: '沈遥',
     finalize: d => finalizeDelta(d, []),
   });
 const rename = (extra: Record<string, unknown> = {}) => ({ npcs: { rename: [{ from: '酒保A', to: '老周', evidence: '叫我老周就行', ...extra }] } });
@@ -76,7 +76,7 @@ describe('最后一次尝试时不合格的改名只去掉这一条', () => {
   const lenient = (body: Record<string, unknown>, roster = ['酒保A', '梅芙']) => {
     const dropped: DroppedEvidence[] = [];
     const d = parseSummaryResponse(JSON.stringify({ summary: '酒保报出名字。', ...body }), {
-      requireStateChanges: false, sourceTexts: source, sourceContent: source[0], npcRoster: roster, userName: '沈遥',
+      builtin: false, sourceTexts: source, sourceContent: source[0], npcRoster: roster, userName: '沈遥',
       finalize: v => finalizeDelta(v, []), onDroppedEvidence: list => { dropped.push(...list); },
     });
     return { d, dropped };

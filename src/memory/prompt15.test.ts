@@ -23,8 +23,8 @@ describe('v0.15 三层通用请求合同（仅验证指令与材料传递，不�
  });
  it('单楼不受长期计划准入门槛限制，快照不重复下一步',()=>{
    expect(p.RULE_SUMMARY_WRITE).toContain('即时决定即使不够资格新增长期计划，也须进入摘要');
-   expect(p.RULE_SCENE_FOCUS).toContain('pendingBeat 不重复 situation');
-   expect(p.RULE_PLANS).toContain('先逐条修改完整条款，再组合成 content');
+   expect(p.RULE_SCENE_FOCUS).toContain('只是把 situation 换成将来时的不写');
+   expect(p.RULE_PLANS).toContain('把旧 content 按条款拆开,只改本楼有新说法的那条,其余仍有效的照抄');
  });
  it('总结按事件链重建而不是摘要逐段缩写',()=>{
    const s=p.buildResummaryPrompt({...args,level:1}).system;
@@ -41,9 +41,8 @@ describe('v0.15 三层通用请求合同（仅验证指令与材料传递，不�
    expect(s).toContain('不能把尚未执行的方案写成经历');
  });
  it('最终检查同步语义关系而非只核对字词',()=>{
-   for(const s of [p.buildSummaryThinking('测试者').checklist,p.RESUMMARY_THINKING_CHECKLIST]){
-     expect(s).toContain('检查条件与后果是否仍逐条对应');
-     expect(s).toContain('行动转变与有效限制是否被装饰细节挤掉');
-   }
+   for(const s of [p.buildSummaryThinking('测试者').checklist,p.RESUMMARY_THINKING_CHECKLIST]) expect(s).toContain('条件与后果是否仍逐条对应');
+   expect(p.buildSummaryThinking('测试者').checklist).toContain('行动转变与有效限制是否被装饰细节挤掉');
+   expect(p.RESUMMARY_THINKING_CHECKLIST).toContain('先找输入结束时仍有效的结果、未完目标、限制与关系边界');
  });
 });

@@ -180,9 +180,13 @@ describe('信息差与记录冲突：实际摘要（本地 mock 模型回复）'
     expect(memory.secrets.map(s => s.id)).toEqual([`secret:${leaf.id}#0`]);
   });
 
-  it('内置模板输出了 secrets 却没写进 stateChanges 时拒收', () => {
-    expect(() => parseSummaryResponse(JSON.stringify({ summary: '摘要', stateChanges: [], secrets: { add: [secretAdd] } }), {
-      requireStateChanges: true, sourceTexts: ['正文'], finalize: d => finalizeDelta(d, []),
+  it('内置模板输出了 secrets 但旧清单没写时照常保存(状态清单已停用)', () => {
+    const d = parseSummaryResponse(JSON.stringify({ summary: '摘要', stateChanges: [], secrets: { add: [secretAdd] } }), {
+      builtin: true, sourceTexts: ['正文'], finalize: v => finalizeDelta(v, []),
+    });
+    expect(d.secrets?.add?.[0].content).toBe(secretAdd.content);
+    expect(() => parseSummaryResponse(JSON.stringify({ summary: '摘要', secrets: { add: [{ knownBy: ['甲'] }] } }), {
+      builtin: true, sourceTexts: ['正文'], finalize: v => finalizeDelta(v, []),
     })).toThrow(SummaryResponseError);
   });
 });

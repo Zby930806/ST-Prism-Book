@@ -26,8 +26,8 @@ describe('v0.17 通用三层修订合同（不代表模型语义通过）', () =
     expect(p.buildSummaryPrompt(args).system).toContain('不复制借用条款或违约后果');
   });
   it('计划更新入口给出完整替换而非交叉条件', () => {
-    expect(p.RULE_PLANS).toContain('content 是完整替换文本，不是新增半句');
-    expect(p.RULE_PLANS).toContain('按后果及适用对象逐条定位');
+    expect(p.RULE_PLANS).toContain('content 是整段替换,不是追加半句');
+    expect(p.RULE_PLANS).toContain('新条件只挂在它对应的后果上,不挪给旧条款');
     expect(p.RULE_SUMMARY_EXAMPLES).toContain('更新后：泄露资料则终止后续合作；泄露资料或迟交则扣本次补贴');
   });
   it('压缩示范删除无信息动作但保留决定、临时限制和必要数字', () => {
@@ -36,15 +36,15 @@ describe('v0.17 通用三层修订合同（不代表模型语义通过）', () =
     expect(p.RULE_SUMMARY_EXAMPLES).toContain('只示范取舍，不把动作细节改写成“确认无误”保留');
   });
   it('局势与摘要分工不是强制填满句子或字数', () => {
-    expect(p.RULE_SCENE_FOCUS).toContain('能用一句表达就不补第二句');
+    expect(p.RULE_SCENE_FOCUS).toContain('一句话为主');
     expect(p.RULE_SUMMARY_WRITE).toContain('不按输入长度等比例缩写');
     expect(p.RULE_SUMMARY_WRITE).toContain('没有最低篇幅任务');
   });
   it('核查明确查范围词与异地人物，仍不要求完整逐字段表', () => {
-    for (const check of [p.buildSummaryThinking('主角').checklist, p.RESUMMARY_THINKING_CHECKLIST]) {
-      expect(check).toContain('保留的每个后果能否在来源中找到相同触发条件');
-      expect(check).toContain('离场者有无本次定位证据');
-    }
+    const single = p.buildSummaryThinking('主角').checklist;
+    expect(single).toContain('保留的每个后果能否在来源中找到相同触发条件');
+    expect(single).toContain('离场者有无本次位置依据');
+    expect(p.RESUMMARY_THINKING_CHECKLIST).toContain('条件与后果是否仍逐条对应');
     expect(p.RESUMMARY_THINKING_CHECKLIST).not.toMatch(/plans\.update|items\.add/);
   });
   it('自定义三层模板不强行加入本次内置改版', () => {

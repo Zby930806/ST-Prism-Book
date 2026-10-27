@@ -1586,7 +1586,7 @@ async function summarizeFloorWork(
     }
     skipped = [];
     const d = parseSummaryResponse(raw, {
-      requireStateChanges: builtin,
+      builtin,
       sourceContent: content,
       sourceTexts: targets.map(i => cleanBody(chat[i].mes)),
       npcRoster: stateBefore.npcs.map(n => n.name),

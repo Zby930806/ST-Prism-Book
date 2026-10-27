@@ -59,17 +59,19 @@ describe('v0.10 共享事实边界与冲突消除', () => {
     expect(example.match(/^INTENT: (.+)$/m)?.[1].length).toBeLessThanOrEqual(200);
   });
   it('地点建档不再允许以短期现场状态凑描述', () => {
-    for (const rule of ['临时现场状态即使加了日期也不作为地点特征入档', '空间结构、用途或稳定特征',
-      '无稳定要点则不新建', '关键历史事件须确已发生并改变地点意义']) expect(p.RULE_SCENES).toContain(rule);
+    // 1.4.4 起建点不要求描述:写不出稳定特征就只建节点,描述仍不收临时状态
+    for (const rule of ['临时情况即使加了日期也不作为地点特征', '写不出就省略 desc 只建节点,不编、不凑',
+      '发生改变其意义的关键事件时 update', '关键事件保留时间或阶段,不伪造日期']) expect(p.RULE_SCENES).toContain(rule);
+    expect(p.RULE_SCENES).not.toContain('无稳定要点则不新建');
     expect(p.RULE_SCENES).not.toContain('确需记入 desc,必须保留时间范围');
   });
   it('既有地点纠错不继续累积旧的临时或无据描述', () => {
-    expect(p.RULE_SCENES).toContain('完整覆盖只保留仍成立的稳定要点和重要历史事件');
-    expect(p.RULE_SCENES).toContain('清除错填的临时状态或无依据描述');
+    expect(p.RULE_SCENES).toContain('只保留仍成立的稳定要点和重要历史事件,已证伪或过时的临时内容不继承');
+    expect(p.RULE_SCENES).toContain('旧描述全是错填的临时状态时,desc 填空字符串清除,节点保留');
   });
   it('路径宁可短而有据，不为完整层级制造父级', () => {
-    for (const rule of ['完整是指已证实的父子链,不是补齐世界地图', '缺少父级证据可独立记录地点',
-      '在途且无法确认所属节点时给 []', '只有新的明确归属证据才 reparent']) expect(p.RULE_SCENES).toContain(rule);
+    for (const rule of ['按常识或世界地图补出的上级', '新地点可以单独作顶级',
+      '真在两地之间赶路、连上级都确认不了时才给 []', '已记录的地点后来查明从属于另一地点 → reparent']) expect(p.RULE_SCENES).toContain(rule);
     expect(p.RULE_SCENES).not.toContain('后来角色出门到');
   });
   it('物品既支持取得与支出，也允许不增数量的寄存和属性变化', () => {
@@ -93,8 +95,8 @@ describe('v0.10 共享事实边界与冲突消除', () => {
     expect(p.RULE_VARS).toContain('既有路径同义事实不重复另建');
   });
   it('局势卡取本楼结束状态，排除回忆、被提及者和上一场角色', () => {
-    expect(p.RULE_SCENE_FOCUS).toContain('以本楼结束时的场面为准');
-    expect(p.RULE_SCENE_FOCUS).toContain('远程联络、回忆和被提及不等于肉身在场');
+    expect(p.RULE_SCENE_FOCUS).toContain('本楼结束时的局面');
+    expect(p.RULE_SCENE_FOCUS).toContain('远程联络、回忆、被提及不算在场');
   });
   it('正文简报不将地理或当时的临时管制永续化', () => {
     expect(p.MEMORY_BRIEFING_END).toContain('临时管制、天气和人群只在记录时点成立');
@@ -126,8 +128,9 @@ describe('v0.11 全字段保真与取舍合同', () => {
   it('地点描述和路径同样逐个空间关系取证', () => {
     expect(p.RULE_SPATIAL_EVIDENCE).toContain('方位修饰只管原句对应对象');
     expect(p.RULE_SPATIAL_EVIDENCE).toContain('没有同一地点证据就不把两个名称合并');
-    expect(p.RULE_SCENES).toContain('不以临时摆放物给地点增加固定设施');
-    expect(p.SUMMARY_PROMPT).toContain('已证实父子链,允许独立地点');
+    expect(p.RULE_SCENES).toContain('当次摆设');
+    expect(p.RULE_SCENES).toContain('上下级要有依据');
+    expect(p.SUMMARY_PROMPT).toContain('"path": ["上级区域","具体地点"]');
   });
   it('结果复核覆盖补丁字段，紧预算删除命题而不是来源', () => {
     expect(p.SUMMARY_FACT_VERIFICATION).toContain('summary及每个状态字段');

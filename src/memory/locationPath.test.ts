@@ -16,7 +16,7 @@ function fixture(pathValue: string[] | undefined) {
 describe('显式空定位路径跨边界合同', () => {
   it('正式解析和固化保留空路径及状态清单', () => {
     const parsed = parseSummaryResponse(JSON.stringify({ summary: '在途中。', locationPath: [], stateChanges: ['locationPath'] }), {
-      requireStateChanges: true, finalize: d => finalizeDelta(d, []),
+      builtin: true, finalize: d => finalizeDelta(d, []),
     });
     expect(JSON.parse(JSON.stringify(finalizeDelta(parsed, [])))).toEqual({ locationPath: [] });
   });

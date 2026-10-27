@@ -212,8 +212,8 @@ function closeComposer() {
 }
 function addScene() {
   const name = newName.value.trim();
-  // 描述必填:写不出描述的地点不记(与 AI 同规则)
-  if (!name || !newDesc.value.trim()) return;
+  // 描述可以留空:写不出稳定特征就只建地点(与摘要同规则)
+  if (!name) return;
   const parent = memory.scenes.find(s => s.id === newParentId.value);
   const path = parent ? [...parent.path, name] : [name];
   if (memory.scenes.some(s => s.id === sceneId(path))) {
@@ -266,7 +266,7 @@ const editParentOptions = computed(() => {
 function saveEdit() {
   const e = editing.value;
   const name = e?.name.trim();
-  if (!e || !name || !e.desc.trim()) return; // 描述必填
+  if (!e || !name) return; // 描述可以留空,留空保存即清除描述
   const parent = memory.scenes.find(s => s.id === e.parentId);
   const newPath = parent ? [...parent.path, name] : [name];
   const pathChanged = sceneId(newPath) !== sceneId(e.path);
@@ -412,12 +412,12 @@ function confirmTravel() {
         <input ref="nameInput" v-model="newName" class="bbs-input" type="text" placeholder="新地点名" @keydown.enter="onNameEnter" />
       </label>
       <label class="bbs-modal-field">
-        <span class="bbs-modal-label">描述（必填）</span>
-        <textarea v-model="newDesc" class="bbs-input bbs-modal-textarea" rows="3" placeholder="地点的性质与特征"></textarea>
+        <span class="bbs-modal-label">描述（可留空）</span>
+        <textarea v-model="newDesc" class="bbs-input bbs-modal-textarea" rows="3" placeholder="地点的性质与稳定特征"></textarea>
       </label>
       <template #footer>
         <button class="bbs-btn" type="button" @click="closeComposer">取消</button>
-        <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!newName.trim() || !newDesc.trim()" @click="addScene">添加</button>
+        <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!newName.trim()" @click="addScene">添加</button>
       </template>
     </ModalShell>
 
@@ -434,13 +434,13 @@ function confirmTravel() {
           <BbsSelect v-model="editing.parentId" :options="parentOptions(editParentOptions)" aria-label="上级地点" />
         </div>
         <label class="bbs-modal-field">
-          <span class="bbs-modal-label">描述（必填）</span>
-          <textarea v-model="editing.desc" class="bbs-input bbs-modal-textarea" rows="3" placeholder="地点的性质与特征"></textarea>
+          <span class="bbs-modal-label">描述（可留空；清空后保存即删除原描述）</span>
+          <textarea v-model="editing.desc" class="bbs-input bbs-modal-textarea" rows="3" placeholder="地点的性质与稳定特征"></textarea>
         </label>
       </template>
       <template #footer>
         <button class="bbs-btn" type="button" @click="cancelEdit">取消</button>
-        <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!editing?.name.trim() || !editing?.desc.trim()" @click="saveEdit">保存</button>
+        <button class="bbs-btn bbs-btn-primary" type="button" :disabled="!editing?.name.trim()" @click="saveEdit">保存</button>
       </template>
     </ModalShell>
 

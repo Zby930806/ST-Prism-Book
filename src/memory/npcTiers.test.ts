@@ -52,8 +52,8 @@ describe('三类人物的记录规则', () => {
     for (const rule of ['以名册为准', '以前只被提到、本楼才真正登场的', '在主角不在场的场景或其他角色视角的段落里登场的', '只在一段支线中出场的',
       '历史摘要、角色卡或世界书提到过不等于已经建档', '同一份 JSON 必须有对应的 npcs.add']) expect(RULE_NPC_LIST).toContain(rule);
     expect(RULE_NPCS).toContain('视角切回其他人物、支线告一段落、角色暂时不再出场都不是退场');
-    expect(RULE_NPCS).toContain('新登场的角色不能因为定位不确定就不建档');
-    expect(THINKING_CHECKLIST).toContain('名册中没有的登场人物(含此前只被提到、主角不在场或其他角色视角中登场的)都要 add');
+    expect(RULE_NPCS).toContain('位置拿不准时只省略 location,建档和其他字段照常输出');
+    expect(THINKING_CHECKLIST).toContain('本楼登场而名册中没有的人都要 npcs.add(含此前只被提到、主角不在场或其他角色视角中登场的)');
     // 是否与主角互动不是建档条件(旧版的准入门槛)
     expect(RULE_NPCS).not.toContain('与 {{user}} 发生过');
   });
@@ -62,7 +62,8 @@ describe('三类人物的记录规则', () => {
     expect(SUMMARY_PROMPT).toContain('"name": "NPC名;没有名字用职业或身份加大写字母,如酒保A"');
     expect(SUMMARY_PROMPT).toContain('"important": "NPC升为主要角色填true,主要角色降为NPC填false');
     expect(SUMMARY_PROMPT).toContain('"rename": [{ "from": "名册中的原名,如酒保A", "to": "本楼报出的真名", "evidence"');
-    expect(THINKING_CHECKLIST).toContain('人物分三类');
+    expect(THINKING_CHECKLIST).toContain('人物盘点');
+    expect(THINKING_CHECKLIST).toContain('主要角色带 important:true,无名的用「职业+字母」标签并复用,报出真名用 rename 接续');
     const system = buildSummaryPrompt(args).system;
     expect(system.indexOf('【主角当前档案规则】')).toBeLessThan(system.indexOf('【主要角色规则】'));
     expect(system.indexOf('【主要角色规则】')).toBeLessThan(system.indexOf('【NPC 规则】'));

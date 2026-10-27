@@ -251,7 +251,7 @@ describe('了解清单:摘要请求与解析', () => {
     expect(fmtKnowledgeForSummary([])).toBe('  (无)');
   });
 
-  it('内置模板:关闭时没有任何相关文字;开启时带规则、输出字段、清单、stateChanges 字段名和核查项', () => {
+  it('内置模板:关闭时没有任何相关文字;开启时带规则、输出字段、清单和核查项', () => {
     const off = buildSummaryPrompt(args);
     const on = buildSummaryPrompt({ ...args, knowledge: shown });
     for (const p of [off, on]) expect(`${p.system}${p.user}`).not.toMatch(/\{\{\w+\}\}/);
@@ -259,13 +259,13 @@ describe('了解清单:摘要请求与解析', () => {
     expect(buildSummaryThinking('林舟').checklist).not.toMatch(/knowledge|了解清单/);
     expect(on.system).toContain('【了解清单规则】');
     expect(on.system).toContain('"knowledge": {');
-    expect(on.system).toContain('"lifeDetails", "knowledge", "vars"');
-    expect(on.system).toContain('secrets、lifeDetails、knowledge、vars');
+    expect(`${on.system}${off.system}`).not.toContain('stateChanges');
     expect(on.system).toContain('【信息差规则】记'); // 分工里引用信息差规则
     expect(on.user).toContain('- 角色对主角的了解(相关角色已记下的认知,用编号 k1、k2… 指代');
     expect(on.user).toContain('k1. 认定主角是行商');
     expect(on.user).toContain('k2. 听说主角会医术');
-    expect(buildSummaryThinking('林舟', true).checklist).toMatch(/\n6\. 了解清单只记角色本楼亲耳听到/);
+    // 了解清单盘点挂在人物盘点的最后一项之后,{{user}} 已展开
+    expect(buildSummaryThinking('林舟', true).checklist).toMatch(/离场同步 follow\/location.*\n {3}- 了解清单:对照「角色对主角的了解」,本楼有谁亲耳听到、亲眼看到或听人转告了林舟的名字/);
     // 内置模板文本本身只多了几个宏占位,关闭时展开为空
     expect(SUMMARY_PROMPT).toContain('{{knowledge_rule}}');
   });
@@ -283,7 +283,7 @@ describe('了解清单:摘要请求与解析', () => {
   const parseK = (data: object, lenient = false) => {
     const dropped: DroppedEvidence[] = [];
     const d = parseSummaryResponse(JSON.stringify({ summary: '对话。', ...data }), {
-      requireStateChanges: true, npcRoster: ['艾琳'], userName: '林舟',
+      builtin: true, npcRoster: ['艾琳'], userName: '林舟',
       finalize: v => finalizeDelta(v, [], [], [], { shown: [{ id: 'know:a#0' }], roster: ['艾琳'], userName: '林舟' }),
       knowledge: { shown: 1 },
       ...(lenient ? { onDroppedEvidence: (list: DroppedEvidence[]) => { dropped.push(...list); } } : {}),
@@ -306,18 +306,18 @@ describe('了解清单:摘要请求与解析', () => {
     expect(describeDropped(dropped[2]).what).toBe('了解清单「k3」');
   });
 
-  it('有效输出要写进 stateChanges;本楼新登场的角色可以直接记', () => {
+  it('不需要状态清单;本楼新登场的角色可以直接记', () => {
     const fresh = { npcs: { add: [{ name: '小夏', title: '药铺学徒' }] }, knowledge: { add: [{ who: '小夏', text: '听说林舟会医术' }] } };
-    expect(() => parseK({ ...fresh, stateChanges: ['npcs'] })).toThrow(/knowledge 有更新，但没写进清单/);
-    expect(parseK({ ...fresh, stateChanges: ['npcs', 'knowledge'] }).d.knowledge).toEqual({ add: [{ who: '小夏', text: '听说林舟会医术' }] });
+    expect(parseK(fresh).d.knowledge).toEqual({ add: [{ who: '小夏', text: '听说林舟会医术' }] });
+    expect(parseK({ ...fresh, stateChanges: ['npcs'] }).d.knowledge).toEqual({ add: [{ who: '小夏', text: '听说林舟会医术' }] });
   });
 
-  it('功能关闭时模型硬给的 knowledge 和清单里的字段名一并去掉,不让整楼失败', () => {
+  it('功能关闭时模型硬给的 knowledge 直接去掉,不让整楼失败', () => {
     const d = parseSummaryResponse(JSON.stringify({ summary: '对话。', stateChanges: ['knowledge'], knowledge: { add: [{ who: '艾琳', text: 'x' }] } }), {
-      requireStateChanges: true, npcRoster: ['艾琳'], finalize: v => finalizeDelta(v, []),
+      builtin: true, npcRoster: ['艾琳'], finalize: v => finalizeDelta(v, []),
     });
     expect(d).not.toHaveProperty('knowledge');
-    expect((d as { stateChanges?: unknown }).stateChanges).toEqual([]);
+    expect(d).not.toHaveProperty('stateChanges');
   });
 });
 
@@ -340,7 +340,7 @@ describe('了解清单:实际摘要接线(本地 mock 模型回复)', () => {
     await summarizeFloor(1);
     expect(requestText()).toContain('【了解清单规则】');
     expect(requestText()).toContain('k1. 认定林舟是行商');
-    expect(requestText()).toContain('6. 了解清单只记');
+    expect(requestText()).toContain('- 了解清单:对照「角色对主角的了解」');
     expect(leafOf(chat[1]).delta.knowledge).toEqual([
       { op: 'update', id: knowledgeId(leafId(chat[0]), 0), text: '得知林舟其实是王子,此前一直被瞒' },
       { op: 'add', subject: '艾琳', text: '知道主角名叫林舟' },

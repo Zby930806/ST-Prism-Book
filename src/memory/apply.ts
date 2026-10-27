@@ -118,15 +118,24 @@ function cleanItemList(v: unknown): ItemDelta[] {
   return arr(v).map(cleanItemDelta).filter((x): x is ItemDelta => !!x);
 }
 
-function cleanSceneDelta(raw: unknown, allowEmpty = false): SceneDelta | null {
+/**
+ * 建点宽、描述严:add 可以不带 desc(写不出稳定特征就只建节点);update 须带 desc,
+ * 空字符串=清除错填的描述(节点保留),不带 desc 的 update 无事可做,丢弃。
+ */
+function cleanSceneDelta(raw: unknown, op: 'add' | 'update'): SceneDelta | null {
   if (!isRecord(raw)) return null;
   const path = cleanPath(raw.path);
-  const desc = allowEmpty ? patchText(raw.desc) : optText(raw.desc);
-  return path.length && desc !== undefined ? { path, desc } : null;
+  if (!path.length) return null;
+  if (op === 'add') {
+    const desc = optText(raw.desc);
+    return desc ? { path, desc } : { path };
+  }
+  const desc = patchText(raw.desc);
+  return desc === undefined ? null : { path, desc };
 }
 
-function cleanSceneList(v: unknown, allowEmpty = false): SceneDelta[] {
-  return arr(v).map(x => cleanSceneDelta(x, allowEmpty)).filter((x): x is SceneDelta => !!x);
+function cleanSceneList(v: unknown, op: 'add' | 'update'): SceneDelta[] {
+  return arr(v).map(x => cleanSceneDelta(x, op)).filter((x): x is SceneDelta => !!x);
 }
 
 function cleanSceneReparent(raw: unknown): SceneReparent | null {
@@ -152,7 +161,7 @@ function cleanSceneReparentList(v: unknown): SceneReparent[] {
 function cleanSceneOp(raw: unknown): SceneOp | null {
   if (!isRecord(raw)) return null;
   if (raw.op === 'add' || raw.op === 'update') {
-    const entry = cleanSceneDelta(raw, raw.op === 'update');
+    const entry = cleanSceneDelta(raw, raw.op);
     return entry ? { op: raw.op, ...entry } : null;
   }
   if (raw.op === 'reparent') {
@@ -405,7 +414,7 @@ function cleanStoredPlanResolveList(v: unknown): PlanResolveItem[] {
   return arr(v).map(cleanStoredPlanResolve).filter((x): x is PlanResolveItem => !!x);
 }
 
-function cleanStoredDelta(raw: StoredDelta, seed = false): StoredDelta {
+function cleanStoredDelta(raw: StoredDelta): StoredDelta {
   if (!isRecord(raw)) return {};
   const out: StoredDelta = {};
   const time = optText(raw.time);
@@ -432,8 +441,8 @@ function cleanStoredDelta(raw: StoredDelta, seed = false): StoredDelta {
 
   if (isRecord(raw.scenes)) {
     const scenes: NonNullable<StoredDelta['scenes']> = {};
-    const add = cleanSceneList(raw.scenes.add, seed);
-    const update = cleanSceneList(raw.scenes.update, true);
+    const add = cleanSceneList(raw.scenes.add, 'add');
+    const update = cleanSceneList(raw.scenes.update, 'update');
     const reparent = cleanSceneReparentList(raw.scenes.reparent);
     const remove = arr(raw.scenes.remove).map(cleanPath).filter(p => p.length);
     const ops = cleanSceneOpList(raw.scenes.ops);
@@ -803,7 +812,7 @@ function sameFreeLocation(a: string | undefined, b: string): boolean {
 }
 
 /**
- * 位置已过期的角色(主角换了场景或过了一天,之后没有新的定位证据),其最后确认的地点与主角当前所在的关系:
+ * 位置已过期的角色(主角换了场景或过了一天,之后没有新的位置记录),其最后确认的地点与主角当前所在的关系:
  * 'same' 就是这里,'near' 在附近,否则 null。用于提醒正文模型「最后记录在此处」,
  * 不改变在场分档本身(仍按位置未确认处理)。去向已明确不明(location 被清空)的不算。
  */
@@ -1574,7 +1583,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: ReplayLeafI
   const log = (kind: ItemLogEntry['kind'], name: string, from?: number, to?: number): void => {
     mem.itemLog.push({ name, kind, from, to, time: logTime });
   };
-  d = cleanStoredDelta(d, leaf.seed === true);
+  d = cleanStoredDelta(d);
 
   // 场景身份改变或明确跨日才使定点定位失去连续证据,不能用楼数当时长。
   const oldScene = JSON.stringify(mem.state.locationPath) + '|' + mem.state.location;
@@ -2164,7 +2173,7 @@ export function finalizeDelta(
   const location = optText(delta.location);
   if (time) out.time = time;
   if (location) out.location = location;
-  // 显式 [] 是清除树锚点的有效状态操作，必须保存并参与 stateChanges 对账。
+  // 显式 [] 是清除树锚点的有效状态操作，必须保存。
   if (Array.isArray(delta.locationPath)) out.locationPath = cleanPath(delta.locationPath);
   const sceneFocus = cleanSceneFocus(delta.sceneFocus);
   if (sceneFocus !== undefined) out.sceneFocus = sceneFocus;
@@ -2183,10 +2192,10 @@ export function finalizeDelta(
   }
 
   if (isRecord(delta.scenes)) {
-    // 规范化路径；add 要非空描述，update 允许显式空字符串清除错填描述。
+    // 规范化路径；add 可不带描述(只建节点)，update 须带描述，显式空字符串清除错填描述。
     const scenes: NonNullable<StoredDelta['scenes']> = {};
-    const add = cleanSceneList(delta.scenes.add);
-    const update = cleanSceneList(delta.scenes.update, true);
+    const add = cleanSceneList(delta.scenes.add, 'add');
+    const update = cleanSceneList(delta.scenes.update, 'update');
     const reparent = cleanSceneReparentList(delta.scenes.reparent);
     if (add.length) scenes.add = add;
     if (update.length) scenes.update = update;
@@ -2948,18 +2957,18 @@ export function appendEnrichmentToLatestLeaf(entry: NpcEnrichment): boolean {
 
 /* ============ 场景手动 op(写回最新叶子,与 editItem 同范式) ============ */
 
-/** 手动新增/补全一个地点(逐级地理路径)。无有效叶子返回 false。 */
+/** 手动新增/补全一个地点(逐级地理路径),描述可以留空。无有效叶子返回 false。 */
 export function upsertScene(path: string[], desc?: string): boolean {
   const clean = normScenePath(path);
   if (!clean.length) return false;
   return appendOpToLatestLeaf({ scenes: { ops: [{ op: 'add', path: clean, desc: desc?.trim() || undefined }] } });
 }
 
-/** 手动更新一个地点的描述(覆盖)。 */
+/** 手动更新一个地点的描述(覆盖);留空即清除描述,地点保留。 */
 export function editSceneDesc(path: string[], desc: string): boolean {
   const clean = normScenePath(path);
   if (!clean.length) return false;
-  return appendOpToLatestLeaf({ scenes: { ops: [{ op: 'update', path: clean, desc: desc.trim() || undefined }] } });
+  return appendOpToLatestLeaf({ scenes: { ops: [{ op: 'update', path: clean, desc: desc.trim() }] } });
 }
 
 /**
@@ -2982,7 +2991,8 @@ export function renameScene(oldPath: string[], newName: string, desc?: string): 
 /**
  * 手动重设父级 / 改名 / 插层(连子树平移),用一条 reparent 表达。
  *  - newPath:目标完整路径(末段可与原名不同 = 顺带改名;前缀即新上级,空前缀=顶级)。
- *  - descs:newPath 上各级的描述(键=该级地名),用于补建父级 + 更新被移动节点自身的描述。
+ *  - descs:newPath 上各级的描述(键=该级地名),用于补建父级 + 更新被移动节点自身的描述;
+ *    只认非空描述。被移动节点自己的描述给了空串时,移动后紧跟一条 update 清除原描述。
  * 复用与 AI 同一套 reparent 重放逻辑。
  */
 export function reparentScene(nodePath: string[], newPath: string[], descs?: Record<string, string>): boolean {
@@ -2990,7 +3000,12 @@ export function reparentScene(nodePath: string[], newPath: string[], descs?: Rec
   const to = normScenePath(newPath);
   if (!node.length || !to.length) return false;
   if (sceneId(to) === sceneId(node)) return false; // 路径没变
-  return appendOpToLatestLeaf({ scenes: { ops: [{ op: 'reparent', node, newPath: to, descs }] } });
+  const ops: SceneOp[] = [{ op: 'reparent', node, newPath: to, descs }];
+  const own = descs?.[to[to.length - 1]];
+  if (own !== undefined && !own.trim() && memory.scenes.find(s => s.id === sceneId(node))?.desc) {
+    ops.push({ op: 'update', path: to, desc: '' });
+  }
+  return appendOpToLatestLeaf({ scenes: { ops } });
 }
 
 /** 手动删除一个地点(连带其后代)。 */

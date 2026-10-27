@@ -8,6 +8,7 @@ import {
   NPC_ENRICH_PROMPT,
   RESUMMARY_PROMPT,
   RESUMMARY2_PROMPT,
+  RESUMMARY_FACT_REVIEW,
   RESUMMARY_THINKING_CHECKLIST,
   RESUMMARY_THINKING_PREFILL,
   RULE_ABSOLUTE_TIME_LANGUAGE,
@@ -76,6 +77,16 @@ function expectFactWorkflow(text: string) {
   expect(text).not.toMatch(/候选记录:|取舍记录:|漏提取复查:|覆盖核对:|数量核对:|修正结论:|字段核对:|描述证据:|计划核对:|F编号|步骤一至七/);
 }
 
+function expectCompressionWorkflow(text: string) {
+  expect(text.split(RESUMMARY_FACT_REVIEW)).toHaveLength(2);
+  expect(text).not.toContain(SUMMARY_FACT_PREPARATION);
+  expect(text).not.toContain(SUMMARY_FACT_VERIFICATION);
+  expect(text).not.toMatch(/候选记录:|取舍记录:|漏提取复查:|覆盖核对:|数量核对:|修正结论:|字段核对:|描述证据:|计划核对:|F编号|步骤一至七/);
+}
+
+/** 发送时 {{user}}/{{char}} 已展开;比较整段规则时用展开后的文字。 */
+const filled = (rule: string) => rule.replaceAll('{{user}}', args.user).replaceAll('{{char}}', args.char);
+
 function combined(parts: ReturnType<typeof buildSummaryPrompt>): string {
   return `${parts.system}\n\n${parts.user}`;
 }
@@ -126,7 +137,7 @@ describe('summary composition contract', () => {
 describe('summary fact workflow', () => {
   it('prepares shared facts before structured state and verifies afterwards', () => {
     expectFactWorkflow(THINKING_CHECKLIST);
-    for (const heading of ['档案与快照分工', '在场核对', '物品/计划/变量']) {
+    for (const heading of ['本楼定位', '人物盘点', '物品盘点', '计划与悬念盘点', '档案与快照分工']) {
       expect(THINKING_CHECKLIST.indexOf(heading)).toBeGreaterThan(0);
       expect(THINKING_CHECKLIST.indexOf(heading)).toBeGreaterThan(THINKING_CHECKLIST.indexOf(SUMMARY_FACT_PREPARATION));
       expect(THINKING_CHECKLIST.indexOf(heading)).toBeLessThan(THINKING_CHECKLIST.indexOf(SUMMARY_FACT_VERIFICATION));
@@ -140,10 +151,10 @@ describe('summary fact workflow', () => {
   it('keeps specialized rules in the system rather than duplicating a full checklist', () => {
     const system = buildSummaryPrompt(args).system;
     for (const rule of [RULE_ITEMS, RULE_SCENES, RULE_NPCS, RULE_PLANS, RULE_SCENE_FOCUS]) expect(system).toContain(rule.replaceAll('{{user}}', args.user).replaceAll('{{char}}', args.char));
-    expect(THINKING_CHECKLIST).toContain('物品/计划/变量按本楼新事件更新记录,不重复结算');
-    expect(THINKING_CHECKLIST).toContain('暂时离场不删除NPC');
-    expect(THINKING_CHECKLIST).toContain('已取消/失败与已完成分清');
-    expect(THINKING_CHECKLIST).toContain('只有新证据才能刷新位置、衣着和伤情');
+    expect(THINKING_CHECKLIST).toContain('【近期物品变动】里已生效的不再结算');
+    expect(THINKING_CHECKLIST).toContain('暂时离场不 remove');
+    expect(THINKING_CHECKLIST).toContain('被明确替代、撤回、当场化解或因客观事实已彻底不可能 → resolve cancelled,不是 done');
+    expect(THINKING_CHECKLIST).toContain('正文没写的保持旧值,不重报');
   });
 
   it('covers evidence, temporal boundaries, comparisons and reverse verification without story examples', () => {
@@ -178,11 +189,11 @@ describe('summary fact workflow', () => {
   });
 
   it('uses brief visible records and keeps each checklist within a compact size budget', () => {
-    for (const [checklist, maxChars] of [
-      [THINKING_CHECKLIST, 6500],
-      [RESUMMARY_THINKING_CHECKLIST, 1300],
+    for (const [checklist, maxChars, check] of [
+      [THINKING_CHECKLIST, 6500, expectFactWorkflow],
+      [RESUMMARY_THINKING_CHECKLIST, 1600, expectCompressionWorkflow],
     ] as const) {
-      expectFactWorkflow(checklist);
+      check(checklist);
       expect(checklist.length).toBeLessThan(maxChars);
       expect(checklist).toContain(SUMMARY_OUTPUT_PROTOCOL);
     }
@@ -195,13 +206,15 @@ describe('summary fact workflow', () => {
     expect(SUMMARY_OUTPUT_PROTOCOL).toContain('没有预填充则自行打开');
     expect(SUMMARY_OUTPUT_PROTOCOL).toContain('最终 JSON 不要新增核查编号、来源列表或审计字段');
     expect(SUMMARY_OUTPUT_PROTOCOL).toContain('人物称述、推测与限定属于剧情事实');
-    expect(THINKING_CHECKLIST).toContain('不逐字段输出“无变化”');
+    expect(THINKING_CHECKLIST).toContain('无变化的不逐项写“无变化”');
   });
 
   it('gives compression its own checklist and prefill without ledger updates', () => {
-    expectFactWorkflow(RESUMMARY_THINKING_CHECKLIST);
+    expectCompressionWorkflow(RESUMMARY_THINKING_CHECKLIST);
     expect(RESUMMARY_THINKING_CHECKLIST).toContain(SUMMARY_OUTPUT_PROTOCOL);
-    expect(RESUMMARY_THINKING_CHECKLIST).toContain('待融合的摘要或总结就是本次事实来源');
+    expect(RESUMMARY_THINKING_CHECKLIST).toContain('待融合的摘要或总结就是本次唯一事实来源');
+    expect(RESUMMARY_THINKING_CHECKLIST).toContain('同一事项合并成“起因—转折—末态”');
+    expect(RESUMMARY_THINKING_CHECKLIST).not.toContain('普通收纳和收场动作默认零篇幅');
     expect(RESUMMARY_THINKING_CHECKLIST).toContain('不得恢复输入中已缺失的事实');
     expect(RESUMMARY_THINKING_CHECKLIST).toContain('需要定位时沿用输入的 [编号]');
     expect(RESUMMARY_THINKING_CHECKLIST).toContain('不逐段填表');
@@ -211,24 +224,24 @@ describe('summary fact workflow', () => {
   });
 
   it('checks state operations without permitting off-screen invention', () => {
-    for (const rule of ['明确变化同时更新对应状态', '删除、清空或 resolve 须有依据', '整体覆盖保留未失效的旧要点', '只有新证据才能刷新位置、衣着和伤情', '不重复结算']) expect(THINKING_CHECKLIST).toContain(rule);
+    for (const rule of ['明确变化同时更新对应状态', '删除、清空或 resolve 须有依据', '整体覆盖保留未失效的旧要点', '正文没写的保持旧值,不重报', '已生效的不再结算']) expect(THINKING_CHECKLIST).toContain(rule);
     expect(THINKING_CHECKLIST).not.toContain('主要 NPC 离场演变');
-    expect(RULE_SCENES).toContain('当次观察、实时读数、短暂在场或一次遭遇不能改写为地点的长期属性');
-    expect(RULE_SCENES).toContain('不能为满足 desc 必填而编造恒常特征');
+    expect(RULE_SCENES).toContain('一次停留或遭遇等临时情况不进 desc');
+    expect(RULE_SCENES).toContain('写不出就省略 desc 只建节点,不编、不凑');
   });
 
   it('separates deadlines from outcomes and scene observations from decisions', () => {
     for (const rule of ['不同纪年或模糊期限不可可靠比较时不强判', '已过期但结果未确认,保持原条目', '不得自动 resolve', '不能用现实日期替代故事时间']) expect(THINKING_CHECKLIST).toContain(rule);
     expect(RULE_SCENE_FOCUS).toContain('其余可选');
-    expect(RULE_SCENE_FOCUS).toContain('明确预告/约定/已启动等待结果');
+    expect(RULE_SCENE_FOCUS).toContain('明确预告、约定或已启动等待结果');
     expect(RULE_SCENE_FOCUS).toContain('禁止预测未发生剧情');
   });
 
   it('keeps admission evidence in the field rules instead of repeating it', () => {
     expect(RULE_SCENE_FOCUS).toContain('只有明确的、正在持续的社交张力才写');
     expect(RULE_SCENE_FOCUS).toContain('无则省略');
-    expect(RULE_SCENES).toContain('不能为满足 desc 必填而编造恒常特征');
-    expect(RULE_SCENES).toContain('当次观察、实时读数、短暂在场或一次遭遇不能改写为地点的长期属性');
+    expect(RULE_SCENES).toContain('写不出就省略 desc 只建节点,不编、不凑');
+    expect(RULE_SCENES).toContain('一次停留推不出长期用途或容量');
   });
 });
 
@@ -264,9 +277,9 @@ describe('relationship retention and departure protocol', () => {
     }
     expect(SUMMARY_PROMPT).toContain('按本楼开始前的状态算好');
     expect(SUMMARY_PROMPT).toContain('离场去向未明填空字符串');
-    expect(SUMMARY_PROMPT).toContain('同步修正 participants');
-    expect(THINKING_CHECKLIST).toContain('在场核对');
-    expect(THINKING_CHECKLIST).toContain('去向不明明确清空location');
+    expect(SUMMARY_PROMPT).toContain('participants 同步修正');
+    expect(THINKING_CHECKLIST).toContain('离场同步 follow/location');
+    expect(THINKING_CHECKLIST).toContain('去向不明明确清空 location');
   });
 
   it('frames the briefing as past-only context that does not cap relationships or set prose style', () => {
@@ -280,7 +293,7 @@ describe('relationship retention and departure protocol', () => {
     // 伤情:离场本身不等于康复或恶化,但不再要求时间流逝后一直维持原伤(由伤势进展提醒配合)。
     // prism.18 起加了一句「只在相关时体现」,上限从 260 放宽到 280,仍要求简短(最低注入预算下框定文字挤占状态份额)。
     expect(Array.from(MEMORY_BRIEFING_END).length).toBeLessThan(280);
-    for (const reminder of ['自然续写', '不要复述简报', '最后确认的位置可能已变', '不等于马上执行', '遵守其中的暂缓和前提',
+    for (const reminder of ['自然续写', '不要复述简报', '最后确认的位置与着装可能已变', '不等于马上执行', '遵守其中的暂缓和前提',
       '离场不等于康复或恶化', '伤情随时间按轻重好转', '人物只知道自己经历或得知的事', '文风跟随角色卡']) {
       expect(MEMORY_BRIEFING_END).toContain(reminder);
     }
@@ -319,7 +332,7 @@ describe.each(['detailed', 'concise'] as const)('prompt assembly (%s)', verbosit
       expect(parts.system).not.toContain(RULE_SUMMARY_COMPOSITION);
     } else {
       expect(prompt).toContain('持续事实与背景参照');
-      expect(parts.system.split(RULE_SUMMARY_COMPOSITION)).toHaveLength(2);
+      expect(parts.system.split(filled(RULE_SUMMARY_COMPOSITION))).toHaveLength(2);
     }
     // The existing caller sends this system checklist for both template paths.
     expectFactWorkflow(THINKING_CHECKLIST);
@@ -327,7 +340,7 @@ describe.each(['detailed', 'concise'] as const)('prompt assembly (%s)', verbosit
 
   it('uses the same built-in state contract and character budget for every floor', () => {
     const parts = buildSummaryPrompt(args);
-    expect(parts.system).toContain('stateChanges');
+    expect(parts.system).not.toContain('stateChanges');
     expect(parts.system).toContain('【状态核对】');
     expect(parts.system).toContain('summary 不超过 300 字（含标点）');
     expect(parts.system).not.toMatch(/\{\{\w+\}\}/);
@@ -346,7 +359,7 @@ describe.each(['detailed', 'concise'] as const)('prompt assembly (%s)', verbosit
     apiSettings.summaryMaxChars = verbosity === 'detailed' ? 300 : 150;
     const parts = buildResummaryPrompt({ ...args, content: 'x'.repeat(1000), level });
     const prompt = combined(parts);
-    expectFactWorkflow(RESUMMARY_THINKING_CHECKLIST);
+    expectCompressionWorkflow(RESUMMARY_THINKING_CHECKLIST);
     expect(prompt).toContain(RULE_ABSOLUTE_TIME_LANGUAGE);
     expect(prompt).not.toContain(SUMMARY_OUTPUT_PROTOCOL);
     expect(RESUMMARY_THINKING_CHECKLIST).toContain(SUMMARY_OUTPUT_PROTOCOL);
@@ -359,7 +372,7 @@ describe.each(['detailed', 'concise'] as const)('prompt assembly (%s)', verbosit
       expect(parts.system).not.toContain(RULE_SUMMARY_COMPOSITION);
     } else {
       expect(prompt).toContain(level === 1 ? '规则条件和比较参照' : '其中明确揭示且有后续意义的持续事实');
-      expect(parts.system.split(RULE_SUMMARY_COMPOSITION)).toHaveLength(2);
+      expect(parts.system.split(filled(RULE_SUMMARY_COMPOSITION))).toHaveLength(2);
     }
     if (level === 1) {
       expect(prompt).toContain(verbosity === 'detailed' ? '300-500' : '150-300');
@@ -517,8 +530,8 @@ describe('v0.4 事件取舍与因果保真', () => {
       buildResummaryPrompt({ ...args, level: 2 }).system,
     ];
     for (const system of systems) {
-      expect(system.split(RULE_SUMMARY_COMPOSITION)).toHaveLength(2);
-      expect(system.split(RULE_SUMMARY_FIDELITY)).toHaveLength(2);
+      expect(system.split(filled(RULE_SUMMARY_COMPOSITION))).toHaveLength(2);
+      expect(system.split(filled(RULE_SUMMARY_FIDELITY))).toHaveLength(2);
       expect(system).toContain('先选事件,再写句子');
       expect(system).toContain('篇幅是上限而非填满任务');
       expect(system).not.toMatch(/语言冷峻|厚实段落|信息密度极高/);
@@ -556,8 +569,9 @@ describe('v0.4 事件取舍与因果保真', () => {
 
   it('最后复核检查不误改因果,不增加新的输出字段', () => {
     expect(SUMMARY_FACT_VERIFICATION).toContain('不把邻近设施写成致因');
+    expect(THINKING_CHECKLIST).toContain(SUMMARY_FACT_VERIFICATION);
+    expect(RESUMMARY_THINKING_CHECKLIST).toContain(RESUMMARY_FACT_REVIEW);
     for (const checklist of [THINKING_CHECKLIST, RESUMMARY_THINKING_CHECKLIST]) {
-      expect(checklist).toContain(SUMMARY_FACT_VERIFICATION);
       expect(checklist).not.toContain(RULE_SUMMARY_FIDELITY);
     }
   });
@@ -569,8 +583,8 @@ describe('v0.4 事件取舍与因果保真', () => {
     const outputs = [buildSummaryPrompt(args), ...[1, 2].map(level => buildResummaryPrompt({ ...args, level }))];
     for (const output of outputs) {
       expect(output.user).toContain('CUSTOM');
-      expect(output.system + output.user).not.toContain(RULE_SUMMARY_COMPOSITION);
-      expect(output.system + output.user).not.toContain(RULE_SUMMARY_FIDELITY);
+      expect(output.system + output.user).not.toContain(filled(RULE_SUMMARY_COMPOSITION));
+      expect(output.system + output.user).not.toContain(filled(RULE_SUMMARY_FIDELITY));
     }
   });
 });
@@ -616,40 +630,42 @@ describe('v0.5 伤势保留及通用压缩示范', () => {
 
 describe('v0.8 位置时效与程度来源限定', () => {
   it('内置NPC规则不再强迫未同行者重复确认旧地点', () => {
-    expect(RULE_NPCS).toContain('locationEvidence');
-    expect(RULE_NPCS).toContain('主角换景、定点NPC未同行且无新消息 → 不重报旧 location');
-    expect(RULE_NPCS).toContain('不能机械抄【当前地点】');
+    expect(RULE_NPCS).not.toContain('locationEvidence');
+    expect(RULE_NPCS).toContain('主角换景而定点角色未同行、此前打算留守或暂无新消息 → 不重报旧 location');
+    expect(RULE_NPCS).toContain('location 通常就填{{user}}本楼所在地点');
+    expect(RULE_NPCS).toContain('只被提起、通话或传信联系的角色不算同处');
     expect(RULE_NPCS).not.toContain('被留在原地而主角离开 → 必须更新');
   });
   it.each([SUMMARY_PROMPT, RESUMMARY_PROMPT, RESUMMARY2_PROMPT].map((template, i) => ({ template, level: i })))('第 $level 层均保留程度、来源和临时性规则', ({ template }) => {
     for (const clause of ['极少≠零', '至少≠约', '人物口述保留来源', '保留时间适用范围', '没放过去两个', '场景 desc']) expect(template).toContain(clause);
   });
-  it('地点临时管制必须带时间范围和来源，不固化为永久制度', () => {
-    for (const clause of ['当日临检/管制', '时间范围', '据掌柜称', '永久通行制度', '临时状态优先留在 summary/sceneFocus']) expect(RULE_SCENES).toContain(clause);
+  it('地点临时管制不进描述，口述保留来源，不固化为长期规律', () => {
+    for (const clause of ['临检或管制', '据掌柜称', '一次停留或遭遇等临时情况不进 desc', '写 summary 或 sceneFocus']) expect(RULE_SCENES).toContain(clause);
+    expect(RULE_SUMMARY_FIDELITY).toContain('当日临检、眼前所见不升级为长期规律');
   });
 });
 
 
 describe('v0.9 通用交易、来源和地理规则', () => {
   it('物品按主角归属及实际转移记账，不把NPC财产或计划入账', () => {
-    for (const clause of ['不是全体人物的财产表', 'NPC互相交易', '借出/归还/赠出/支付不算获得', '首次提到已有物品不等于刚获得', '从口袋取出再放回不增减']) expect(RULE_ITEMS).toContain(clause);
+    for (const clause of ['不是全体人物的财产表', 'NPC互相交易', '借出/归还/赠出/支付不算获得', '首次提到早就带着的东西不是刚获得', '从口袋取出再放回不增减']) expect(RULE_ITEMS).toContain(clause);
   });
   it('增量、绝对余额和未知数分开，免债或结清不虚构付款', () => {
-    for (const clause of ['本次新增量而非结算后总量', '用 update.qty 写剩余总量', '不能反推原有量或剩余量', '不以默认1、支出量或欠款冒充余额', '免债/结清/不退款不等于收款或付款']) expect(RULE_ITEMS).toContain(clause);
-    expect(SUMMARY_PROMPT).toContain('本次转入量(必填正数,非余额)');
+    for (const clause of ['不是加完的总数', 'update.qty 写剩下的总数', '原数未知时拿支出量、欠款或默认 1 反推余额', '免债、结清、不退款既不是收款也不是付款', '按包装记一份']) expect(RULE_ITEMS).toContain(clause);
+    expect(SUMMARY_PROMPT).toContain('本次新增量(必填正数,不是加完的总数;数不清的按包装算 1 份)');
   });
   it('地点结构与临时所见分开，不能以先后移动推断包含关系', () => {
-    for (const clause of ['稳定与临时事实混在一句时必须拆分', '先后到访', '不证明包含关系', '不能为补齐路径新造父级', '无法对应已知节点则给 []']) expect(RULE_SCENES).toContain(clause);
+    for (const clause of ['稳定与临时事实混在一句时拆开', '先后到访不等于从属', '相邻或望见', '按常识或世界地图补出的上级', '真在两地之间赶路、连上级都确认不了时才给 []']) expect(RULE_SCENES).toContain(clause);
   });
   it('一句话局势仍分清口述、判断、所见，不统一改写成得知', () => {
-    expect(RULE_SCENE_FOCUS).toContain('所见写所见,口述写“某人称”,判断写“某人认为/估计”');
+    expect(RULE_SCENE_FOCUS).toContain('所见写所见,口述写「某人称」,判断写「某人认为」');
     for (const template of [SUMMARY_PROMPT, RESUMMARY_PROMPT, RESUMMARY2_PROMPT]) expect(template).toContain('压缩到一句话也须逐命题保留来源');
   });
   it.each(['detailed', 'concise'] as const)('正式模板同时包含通用规则，不依赖具体故事：%s', verbosity => {
     apiSettings.verbosity = verbosity;
     const rendered = buildSummaryPrompt(args);
     expect(rendered.system + rendered.user).toContain('不是全体人物的财产表');
-    expect(rendered.system + rendered.user).toContain('不以默认1、支出量或欠款冒充余额');
+    expect(rendered.system + rendered.user).toContain('原数未知时拿支出量、欠款或默认 1 反推余额');
     expect(rendered.system + rendered.user).toContain('先后到访');
     expect(rendered.system + rendered.user).toContain('所见写所见');
   });
@@ -710,9 +726,9 @@ describe('提示词细节修订', () => {
     const withTags = buildSummaryPrompt({ ...args, hasTimeTags: true }).system;
     expect(withTags).not.toMatch(/^\s*\/\//m);
     expect(withTags).toContain('无需输出 time / timeStart / timeEnd 字段');
-    expect(withTags).toMatch(/"vars"\],\n\n {2}"location"/);
+    expect(withTags).toMatch(/"summary": "本轮剧情摘要,见【摘要撰写规则】。",\n\n {2}"location"/);
     const noTags = buildSummaryPrompt({ ...args, hasTimeTags: false }).system;
-    expect(noTags).toMatch(/"vars"\],\n {2}"timeStart": "本段开始时的故事内时间/);
+    expect(noTags).toMatch(/"summary": "本轮剧情摘要,见【摘要撰写规则】。",\n {2}"timeStart": "本段开始时的故事内时间/);
     expect(noTags).toMatch(/"timeEnd": "本段结束时的故事内时间,见下方【时间规则】。",\n {2}"location"/);
   });
   it('合并摘要写明 floor 填标题里的楼层编号,不是段落编号里的消息序号', () => {

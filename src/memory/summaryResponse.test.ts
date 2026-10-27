@@ -4,8 +4,8 @@ import { parseSummaryResponse, SummaryResponseError } from './summaryResponse';
 import type { MemPlan } from './types';
 
 const plans: MemPlan[] = [{ id: 'plan:stable', kind: 'plan', content: '还图', status: 'open', createdAt: 0 }];
-const parse = (data: unknown, requireStateChanges = true) => parseSummaryResponse(JSON.stringify(data), {
-  requireStateChanges, finalize: d => finalizeDelta(d, plans),
+const parse = (data: unknown, builtin = true) => parseSummaryResponse(JSON.stringify(data), {
+  builtin, finalize: d => finalizeDelta(d, plans),
 });
 
 describe('摘要结果合同', () => {
@@ -13,21 +13,23 @@ describe('摘要结果合同', () => {
     const summary = '字'.repeat(limit) + '😀，后半句仍保留。';
     expect(parse({ summary, stateChanges: [] }).summary).toBe(summary);
   });
-  it('内置必须对账，自定义未采用新合同时保持兼容', () => {
-    expect(() => parse({ summary: '原文。' })).toThrow(SummaryResponseError);
+  it('状态清单已停用：内置与自定义模板都不要求 stateChanges，旧模板输出时直接忽略', () => {
+    expect(parse({ summary: '原文。' }).summary).toBe('原文。');
     expect(parse({ summary: '原文。' }, false).summary).toBe('原文。');
     expect(parse({ summary: '原文。', npcs: { add: [{ title: '无名角色' }] } }, false).summary).toBe('原文。');
-    expect(() => parse({ summary: '原文。', stateChanges: ['npcs'] }, false)).toThrow('不一致');
+    // 清单与实际字段对不上也不再拒收:声明了却没写的不补,写了却没声明的照常保存
+    const d = parse({ summary: '原文。', stateChanges: ['items', 'plans'], npcs: { add: [{ name: '小A' }] } });
+    expect(d).not.toHaveProperty('stateChanges');
+    expect(d.npcs?.add?.[0].name).toBe('小A');
+    expect(finalizeDelta(d, plans)).not.toHaveProperty('items');
+    expect(parse({ summary: '原文。', stateChanges: ['npcs'] }, false)).not.toHaveProperty('stateChanges');
   });
   it.each([
-    { stateChanges: ['npcs'] },
-    { stateChanges: [], npcs: { add: [{ name: '小A' }] } },
-    { stateChanges: ['npcs', 'npcs'], npcs: { add: [{ name: '小A' }] } },
-    { stateChanges: ['npcs'], npcs: { add: [{ title: '无名' }] } },
-    { stateChanges: ['plans'], plans: { resolve: ['p99'] } },
-    { stateChanges: ['npcs'], npcs: { patch: [] } },
-    { stateChanges: [], delta: { npcs: {} } },
-    { stateChanges: [], updates: {} },
+    { npcs: { add: [{ title: '无名' }] } },
+    { plans: { resolve: ['p99'] } },
+    { npcs: { patch: [] } },
+    { delta: { npcs: {} } },
+    { updates: {} },
   ])('错误或被清洗丢弃的状态不能作为成功结果：%j', data => {
     expect(() => parse({ summary: '简述。', ...data })).toThrow(SummaryResponseError);
   });

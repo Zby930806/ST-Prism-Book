@@ -3,7 +3,7 @@ import { finalizeDelta } from './apply';
 import { parseSummaryResponse, SummaryResponseError } from './summaryResponse';
 function parse(entry: Record<string, unknown>, strict = true) {
   return parseSummaryResponse(JSON.stringify({ summary: '本轮交易。', stateChanges: ['items'], items: { add: [entry] } }), {
-    requireStateChanges: strict, finalize: d => finalizeDelta(d, []),
+    builtin: strict, finalize: d => finalizeDelta(d, []),
   });
 }
 describe('内置摘要物品转入数量合同', () => {
@@ -21,7 +21,7 @@ describe('内置摘要物品转入数量合同', () => {
   });
   it('部分消耗仍允许update绝对余额，耗尽允许remove', () => {
     const d = parseSummaryResponse(JSON.stringify({ summary: '用掉一部分，另一件已耗尽。', stateChanges: ['items'],
-      items: { update: [{ name: '燃料', qty: 2 }], remove: ['电池'] } }), { requireStateChanges: true, finalize: d => finalizeDelta(d, []) });
+      items: { update: [{ name: '燃料', qty: 2 }], remove: ['电池'] } }), { builtin: true, finalize: d => finalizeDelta(d, []) });
     expect(d.items).toEqual({ update: [{ name: '燃料', qty: 2 }], remove: ['电池'] });
   });
 });

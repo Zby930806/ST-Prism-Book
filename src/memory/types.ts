@@ -721,7 +721,7 @@ export interface NpcRename {
 export interface SceneDelta {
   /** 完整地理路径,由粗到细(如 ["王都","城西区","归雁客栈"]) */
   path: string[];
-  /** 地点描述：AI add 要非空；update 显式空串只清既有描述；种子可恢复无描述的既有节点 */
+  /** 地点描述：可省略(只建节点)；update 显式空串只清既有描述 */
   desc?: string;
 }
 
@@ -730,7 +730,7 @@ export interface SceneDelta {
  * 覆盖三种情形(都是同一操作):给顶级加父、在已有父子间插入中间节点、改换父级。
  *  - node:该节点**当前**的完整路径(由粗到细)。
  *  - newPath:它应在的**新**完整路径(末段通常与 node 末段同名)。
- *  - descs:newPath 上新建/需补描述的层级,键=该级地名,值=描述(desc 必填原则的延伸)。
+ *  - descs:newPath 上有稳定特征可写的层级的描述,键=该级地名,值=描述;只认非空描述。
  */
 export interface SceneReparent {
   node: string[];
@@ -788,9 +788,9 @@ export interface SummaryDelta {
   /** 指令型:NPC 增删改 */
   npcs?: {
     /** 新登场/新记录的 NPC */
-    add?: (NpcDelta & { locationEvidence?: string })[];
+    add?: NpcDelta[];
     /** 按名字更新已有 NPC(身份/描述/性格/随行/所在地) */
-    update?: (NpcDelta & { locationEvidence?: string })[];
+    update?: NpcDelta[];
     /** 改名接续(evidence 为本楼原句,仅校验,存储前移除);在同一叶子的 add/update/remove 之前施加 */
     rename?: (NpcRename & { evidence?: string })[];
     /** 按名字移除(永久退场/死亡) */

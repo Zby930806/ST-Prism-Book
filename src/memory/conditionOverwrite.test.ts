@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { STMessage } from '@/st/context';
 import { deriveMemory, finalizeDelta } from './apply';
 import * as p from './prompts';
-import { parseSummaryResponse, SummaryResponseError } from './summaryResponse';
+import { parseSummaryResponse } from './summaryResponse';
 import type { StoredDelta } from './types';
 
 // 伤情(condition)整段覆盖:不再有片段补丁协议,旧叶子里存的本来就是完整的伤情文本,无需迁移。
@@ -12,8 +12,8 @@ function leafMsg(delta: StoredDelta): STMessage {
   return { name: '角色', is_user: false, is_system: false, mes: '正文。', swipe_id: 0,
     extra: { bbs_leaf: { id, text: '摘要。', delta, createdAt: seq, swipe: 0, v: 1 } } };
 }
-const parse = (data: object, requireStateChanges = true) => parseSummaryResponse(JSON.stringify({ summary: '伤情变化。', ...data }), {
-  requireStateChanges, finalize: d => finalizeDelta(d, []), npcRoster: ['小A'],
+const parse = (data: object, builtin = true) => parseSummaryResponse(JSON.stringify({ summary: '伤情变化。', ...data }), {
+  builtin, finalize: d => finalizeDelta(d, []), npcRoster: ['小A'],
 });
 
 describe('伤情整段覆盖', () => {
@@ -55,15 +55,16 @@ describe('伤情整段覆盖', () => {
   });
 
   it('补丁写在物品、分组等任何位置都直接去掉,不再报错', () => {
-    for (const requireStateChanges of [true, false]) {
-      const d = parse({ stateChanges: ['items'], items: { add: [{ name: '药', qty: 1, conditionPatch: { add: [] } }] }, conditionPatch: { add: [] } }, requireStateChanges);
+    for (const builtin of [true, false]) {
+      const d = parse({ stateChanges: ['items'], items: { add: [{ name: '药', qty: 1, conditionPatch: { add: [] } }] }, conditionPatch: { add: [] } }, builtin);
       expect(JSON.stringify(d)).not.toContain('conditionPatch');
       expect(d.items?.add?.[0]).toMatchObject({ name: '药', qty: 1 });
     }
   });
 
-  it('只给补丁、没有其他更新时,清单里声明的更新不存在,仍按清单不一致让模型重写', () => {
-    expect(() => parse({ stateChanges: ['protagonist'], protagonist: { conditionPatch: { add: [{ text: '需休养', evidence: '无' }] } } }))
-      .toThrow(SummaryResponseError);
+  it('只给补丁、没有其他更新时,补丁去掉后只保存摘要,不改主角档案', () => {
+    const d = parse({ stateChanges: ['protagonist'], protagonist: { conditionPatch: { add: [{ text: '需休养', evidence: '无' }] } } });
+    expect(JSON.stringify(d)).not.toContain('conditionPatch');
+    expect(finalizeDelta(d, [])).not.toHaveProperty('protagonist');
   });
 });

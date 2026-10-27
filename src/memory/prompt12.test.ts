@@ -10,7 +10,7 @@ const args: Parameters<typeof p.buildSummaryPrompt>[0] = { user:'主角', char:'
 beforeEach(() => Object.assign(apiSettings.prompts, {summary:'',resummary:'',resummary2:''}));
 afterEach(() => Object.assign(apiSettings, JSON.parse(saved)));
 function parse(plans: unknown, before: MemPlan[]) {
-  return finalizeDelta(parseSummaryResponse(JSON.stringify({summary:'安排发生调整。',stateChanges:['plans'],plans}), {requireStateChanges:true,finalize:d=>finalizeDelta(d,before)}), before);
+  return finalizeDelta(parseSummaryResponse(JSON.stringify({summary:'安排发生调整。',stateChanges:['plans'],plans}), {builtin:true,finalize:d=>finalizeDelta(d,before)}), before);
 }
 function floor(id: string, delta: unknown): STMessage { return {extra:{bbs_leaf:{id,delta,createdAt:1}}} as STMessage; }
 function seed() { return [floor('origin', finalizeDelta({plans:{add:[{kind:'plan',content:'工程队待许可后检修设备',targetTime:'周二'},{kind:'plan',content:'档案员递交报告'}]}},[]))]; }
@@ -21,16 +21,18 @@ describe('v0.12 跨字段与取舍请求合同（非模型语义测试）',()=>{
     expect(s.match(/^【命题原义传递】/gm)).toHaveLength(1);
   });
   it('局势卡示意不再诱导把多来源压成单一确认',()=>{
-    expect(p.SUMMARY_PROMPT).toContain('末态行动/阻碍;口述与判断各带来源,不合并背书');
-    expect(p.RULE_SCENE_FOCUS).toContain('无需复述沿途全部情报');
+    expect(p.SUMMARY_PROMPT).toContain('当前局面一句话(日常写氛围,剧情写处境;口述带来源)');
+    expect(p.RULE_SCENE_FOCUS).toContain('把经过和沿途情报塞进卡里');
+    expect(p.RULE_SCENE_FOCUS).toContain('把听来的写成确认');
   });
   it('旧计划先对账，暂缓与被替代不混为同一种结案',()=>{
     for(const clause of ['每楼先核对旧条目,再考虑新增','同一事项改期、暂缓或改变执行条件','plans.update','替代旧方案且不再执行旧方案','未定期限用空字符串清除']) expect(p.RULE_PLANS).toContain(clause);
-    expect(p.RULE_PLANS).not.toContain('彻底不可能再发生');
+    // 只认客观上的彻底不可能,离场、过期、暂时受阻不能据此结案
+    expect(p.RULE_PLANS).toContain('因客观事实已彻底不可能再发生(如约定的对象已死;离场、过期、暂时受阻都不算)');
   });
   it('地点先删除临时修饰，再判断是否值得建档',()=>{
-    expect(p.RULE_SCENES).toContain('先去掉临时修饰再判断准入');
-    expect(p.RULE_SCENES).toContain('一次停留不证明长期用途或容量');
+    expect(p.RULE_SCENES).toContain('稳定与临时事实混在一句时拆开');
+    expect(p.RULE_SCENES).toContain('一次停留推不出长期用途或容量');
   });
 });
 describe('v0.12 计划调整的正式解析与重放',()=>{
@@ -59,7 +61,7 @@ describe('v0.12 计划调整的正式解析与重放',()=>{
   });
   it('只有摘要关键词不自动猜出取消或暂缓操作',()=>{
     const chat=seed(); const before=deriveMemory(chat).plans;
-    const delta=parseSummaryResponse(JSON.stringify({summary:'他们讨论取消原安排，尚未决定。',stateChanges:[]}),{requireStateChanges:true,finalize:d=>finalizeDelta(d,before)});
+    const delta=parseSummaryResponse(JSON.stringify({summary:'他们讨论取消原安排，尚未决定。',stateChanges:[]}),{builtin:true,finalize:d=>finalizeDelta(d,before)});
     chat.push(floor('discussion',finalizeDelta(delta,before)));
     expect(deriveMemory(chat).plans).toEqual(before);
   });

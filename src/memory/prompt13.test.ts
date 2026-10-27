@@ -25,8 +25,8 @@ describe('v0.13 通用请求合同（不等于模型语义通过）',()=>{
     expect(p.RULE_NPCS).not.toContain('近日因 X 事争吵');
   });
   it('场面只保留末态而非已完成动作和器械外观',()=>{
-    expect(p.RULE_SCENE_FOCUS).toContain('不重放已完成动作或器械外观');
-    expect(p.RULE_SCENE_FOCUS).toContain('离场者无新消息不在整卡反复占位');
+    expect(p.RULE_SCENE_FOCUS).toContain('已完成的动作和器械外观不重放');
+    expect(p.RULE_SCENE_FOCUS).toContain('已离场的人不在卡里占位');
   });
   it('停止条件不靠砍伤势、技术参数或互动来缩短',()=>{
     expect(p.RULE_SUMMARY_COMPOSITION).toContain('候选细节默认不入选');
@@ -53,7 +53,7 @@ describe('v0.13 关系纠错的正式解析与重放（手工响应夹具）',()
   function floor(id:string,delta:unknown):STMessage {return {extra:{bbs_leaf:{id,delta,createdAt:1}}} as STMessage;}
   it.each(['主角的队友',''])('纠错为%j且重载后不丢伤势与随行状态',relation=>{
     const chat=[floor('before',finalizeDelta({npcs:{add:[{name:'观察员',title:'研究员',relation:'主角的队友，准备赴北站',condition:'左臂扭伤',follow:true}]}},[]))];
-    const delta=parseSummaryResponse(JSON.stringify({summary:'队伍改变目的地。',stateChanges:['npcs'],npcs:{update:[{name:'观察员',relation}]}}),{requireStateChanges:true,finalize:d=>finalizeDelta(d,[])});
+    const delta=parseSummaryResponse(JSON.stringify({summary:'队伍改变目的地。',stateChanges:['npcs'],npcs:{update:[{name:'观察员',relation}]}}),{builtin:true,finalize:d=>finalizeDelta(d,[])});
     chat.push(floor('correction',finalizeDelta(delta,[])));
     const state=deriveMemory(JSON.parse(JSON.stringify(chat)));
     expect(state.npcs).toHaveLength(1);

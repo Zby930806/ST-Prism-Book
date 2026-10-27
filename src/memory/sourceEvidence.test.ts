@@ -4,7 +4,7 @@ import { parseSummaryResponse, SummaryResponseError } from './summaryResponse';
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import type { SummaryDelta } from './types';
 
-// 固定的虚构消息；不读取聊天。每个合法引句都明确包含同一主体小A。
+// 固定的虚构消息；不读取聊天。原句证据以改名为例(角色位置自 1.4.4 起不再要求原句)，每个合法引句都含新名字小A。
 const quote = '小A在厨房休养，右手腕仍有伤，至少还需休养四五天。';
 const rawMessage = '小A在**厨房休养**，\n右手腕仍有伤，**至少还需休养四五天**。';
 const unrelatedMessage = '小B在庭院浇花。';
@@ -24,38 +24,37 @@ function renderMaterial(messages: readonly string[]) {
 }
 
 const material = renderMaterial([rawMessage]);
-const located = (evidence: string) => ({ location: '厨房', locationEvidence: evidence });
+const renamed = (evidence: string) => ({ rename: [{ from: '酒保A', to: '小A', evidence }] });
 
-function request(update: object, sourceContent: string, sourceTexts?: readonly string[]) {
+function request(npcs: object, sourceContent: string, sourceTexts?: readonly string[]) {
   const finalize = vi.fn((delta: SummaryDelta) => finalizeDelta(delta, []));
-  const run = () => parseSummaryResponse(JSON.stringify({
-    summary: '小A在厨房休养，手腕仍有伤。', stateChanges: ['npcs'], npcs: { update: [{ name: '小A', ...update }] },
-  }), {
-    requireStateChanges: true,
+  const run = () => parseSummaryResponse(JSON.stringify({ summary: '酒保报出名字小A，在厨房休养。', npcs }), {
+    builtin: true,
     sourceContent,
     // 只从正式入口传数组，不能在别处重复传入以掩盖透传失败。
     ...(sourceTexts === undefined ? {} : { sourceTexts }),
+    npcRoster: ['酒保A'],
     finalize,
   });
   return { run, finalize };
 }
 
 function expectAccepted(evidence: string, sourceContent: string, sourceTexts?: readonly string[]) {
-  const { run, finalize } = request(located(evidence), sourceContent, sourceTexts);
+  const { run, finalize } = request(renamed(evidence), sourceContent, sourceTexts);
   const result = run();
-  expect(result.npcs?.update?.[0]).toMatchObject({ name: '小A', location: '厨房' });
+  expect(result.npcs?.rename?.[0]).toMatchObject({ from: '酒保A', to: '小A' });
   expect(finalize).toHaveBeenCalledTimes(1);
-  expect(JSON.stringify(result)).not.toMatch(/locationEvidence|"evidence"/);
+  expect(JSON.stringify(result)).not.toMatch(/"evidence"/);
   return result;
 }
 
 function expectRejected(evidence: string, sourceContent: string, sourceTexts?: readonly string[]) {
-  const { run, finalize } = request(located(evidence), sourceContent, sourceTexts);
+  const { run, finalize } = request(renamed(evidence), sourceContent, sourceTexts);
   expect(run).toThrow(SummaryResponseError);
   expect(finalize).not.toHaveBeenCalled();
 }
 
-describe('正式解析入口的定位原消息证据边界', () => {
+describe('正式解析入口的原句证据边界(以改名原句为例)', () => {
   it('跨原消息内换行及加粗的完整引句通过，编号材料本身不能匹配', () => {
     expect(material).toContain('[M1-P1] 小A在**厨房休养**，\n[M1-P2] 右手腕仍有伤');
     expect(material).not.toContain(quote);
@@ -113,19 +112,22 @@ describe('正式解析入口的定位原消息证据边界', () => {
   });
 });
 
-describe('定位证据与整段改写的伤情同在一份响应', () => {
-  const locationQuote = '小A在厨房休养。';
+describe('改名原句与整段改写的伤情、无原句的位置同在一份响应', () => {
+  const nameQuote = '小A在厨房休养。';
   const messages = ['小A在**厨房\n休养**。', '小A的右手腕仍有伤，\n**至少还需休养四五天**。'] as const;
   const condition = '右手腕仍有伤，至少还需休养四五天';
 
-  it('伤情整段改写不需要引文，与有效定位一起保存', () => {
-    const { run, finalize } = request({ ...located(locationQuote), condition }, renderMaterial(messages), messages);
-    expect(run().npcs?.update?.[0]).toMatchObject({ name: '小A', location: '厨房', condition });
+  it('伤情整段改写和位置都不需要引文，与有效改名一起保存', () => {
+    const { run, finalize } = request({ ...renamed(nameQuote), update: [{ name: '小A', location: '厨房', condition }] }, renderMaterial(messages), messages);
+    const result = run();
+    expect(result.npcs?.update?.[0]).toMatchObject({ name: '小A', location: '厨房', condition });
+    expect(result.npcs?.rename?.[0]).toMatchObject({ from: '酒保A', to: '小A' });
     expect(finalize).toHaveBeenCalledTimes(1);
   });
 
-  it('定位借用加工材料时整份响应拒绝，同时写了伤情也不能绕过', () => {
-    const { run, finalize } = request({ ...located('[M1-P1]'), condition }, renderMaterial(messages), messages);
+  it('改名原句借用加工材料时整份响应拒绝，同时写了伤情也不能绕过', () => {
+    expect(renderMaterial(messages)).toContain('[M1-P1] 小A在**厨房');
+    const { run, finalize } = request({ ...renamed('[M1-P1] 小A在**厨房'), update: [{ name: '小A', condition }] }, renderMaterial(messages), messages);
     expect(run).toThrow(SummaryResponseError);
     expect(finalize).not.toHaveBeenCalled();
   });
