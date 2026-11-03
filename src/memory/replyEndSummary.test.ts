@@ -7,6 +7,7 @@ import type { ApiChannel } from '@/api/settings';
 import type { STContext, STMessage } from '@/st/context';
 import { bindEngine, currentSummaryPromise, engineState } from './engine';
 import { memory, recomputeDerived } from './store';
+import { latestStoryTime } from './timeTag';
 import { createEmptyMemory } from './types';
 
 // 「回复结束后立即摘要」:按酒馆的事件顺序模拟生成开始、回复渲染、生成结束,核对摘要时机和续写、编辑、重抽后的处理。
@@ -181,5 +182,76 @@ describe('回复结束后立即摘要', () => {
     expect(settings.normalizeApiSettings({ keepRecent: 3 }).summarizeOnReplyEnd).toBe(false);
     expect(settings.normalizeApiSettings({ summarizeOnReplyEnd: 'true' }).summarizeOnReplyEnd).toBe(false);
     expect(settings.normalizeApiSettings({ summarizeOnReplyEnd: true }).summarizeOnReplyEnd).toBe(true);
+  });
+});
+
+describe('只有新发出的用户消息才触发摘要上一条回复', () => {
+  it('关闭立即摘要时，重绘楼层和 /comment 发出的用户消息事件不让刚写完的回复开始摘要；真正发送消息才摘要', async () => {
+    settings.apiSettings.summarizeOnReplyEnd = false;
+    send.mockResolvedValue(ok('林舟推门出发。'));
+    await generate('normal', () => chat.push(ai('林舟推开门，雨已经停了。')));
+    // 酒馆助手重绘全部楼层时，对每一楼都发一次用户消息事件，楼层号是字符串
+    chat.forEach((_, i) => emit('USER_MESSAGE_RENDERED', String(i)));
+    chat.push({ name: '注释', is_user: false, is_system: true, mes: '（作者注）', extra: { type: 'comment' } });
+    emit('USER_MESSAGE_RENDERED', chat.length - 1);
+    await settle();
+    expect(send).not.toHaveBeenCalled(); expect(leafOf(1)).toBeUndefined();
+
+    chat.push(user('继续。')); emit('USER_MESSAGE_RENDERED', chat.length - 1); await settle();
+    expect(send).toHaveBeenCalledTimes(1); expect(sent(0)).toContain('林舟推开门'); expect(leafOf(1)?.text).toBe('林舟推门出发。');
+    // 同一条用户消息被重绘再发一次事件，不重复处理
+    emit('USER_MESSAGE_RENDERED', String(chat.length - 1)); await settle();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('/sys 旁白和插在中间的用户消息不触发', async () => {
+    settings.apiSettings.summarizeOnReplyEnd = false;
+    send.mockResolvedValue(ok('林舟推门出发。'));
+    await generate('normal', () => chat.push(ai('林舟推开门，雨已经停了。')));
+    chat.push({ name: '旁白', is_user: false, is_system: false, mes: '【状态栏】雨停', extra: { type: 'narrator' } });
+    emit('USER_MESSAGE_RENDERED', chat.length - 1);
+    chat.splice(1, 0, user('（补在中间的一句）'));
+    emit('USER_MESSAGE_RENDERED', 1);
+    await settle();
+    expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe('翻页重新生成时的当前故事时间', () => {
+  const tagged = (start: string, body: string, end: string) => `<bbs_start>${start}</bbs_start>${body}<bbs_end>${end}</bbs_end>`;
+  beforeEach(() => {
+    send.mockResolvedValue(ok('摘要。'));
+    chat.push(ai(tagged('2026/4/12 15:30', '林舟推开门。', '2026/4/12 15:40')), user('继续。'),
+      ai(tagged('2026/4/12 15:40', '两人走到码头。', '2026/4/12 15:57')));
+  });
+
+  it('新回复写入前不从被换掉的那一页取时间；新回复写入后照常取', async () => {
+    expect(latestStoryTime(chat)).toBe('2026/4/12 15:57');
+    // 翻页:酒馆先把页码加一，新回复写入前这条消息里还是旧一页的正文
+    chat[3].swipe_id = 1;
+    emit('GENERATION_STARTED', 'swipe', {}, false);
+    expect(latestStoryTime(chat)).toBe('2026/4/12 15:40');
+    chat[3].mes = tagged('2026/4/12 15:40', '两人改走小路。', '2026/4/12 15:50');
+    expect(latestStoryTime(chat)).toBe('2026/4/12 15:50');
+    emit('CHARACTER_MESSAGE_RENDERED', 3, 'swipe');
+    emit('GENERATION_ENDED', chat.length);
+    expect(latestStoryTime(chat)).toBe('2026/4/12 15:50');
+    await settle();
+  });
+
+  it('翻页生成失败、页码退回原页时，原页的时间照常使用', async () => {
+    chat[3].swipe_id = 1;
+    emit('GENERATION_STARTED', 'swipe', {}, false);
+    chat[3].swipe_id = 0;
+    expect(latestStoryTime(chat)).toBe('2026/4/12 15:57');
+    emit('GENERATION_STOPPED');
+    await settle();
+  });
+
+  it('续写不跳过末尾回复', async () => {
+    emit('GENERATION_STARTED', 'continue', {}, false);
+    expect(latestStoryTime(chat)).toBe('2026/4/12 15:57');
+    emit('GENERATION_ENDED', chat.length);
+    await settle();
   });
 });

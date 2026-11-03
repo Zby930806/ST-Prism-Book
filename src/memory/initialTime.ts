@@ -3,7 +3,7 @@ import { getLeaf, leafValid } from './apply';
 import { engineState, isAiFloor, pendingAiFloors } from './engine';
 import { memory, memoryWriteIssue, recomputeDerived } from './store';
 import { refreshInjection } from './inject';
-import { clampToTimeTags, FICTIONAL_OPENING_TIME, INITIAL_TIME_KEY, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, latestStoryTime, parseTimeRange, storyTimeValue } from './timeTag';
+import { clampToTimeTags, FICTIONAL_OPENING_TIME, INITIAL_TIME_KEY, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, isBeingRegenerated, latestStoryTime, parseTimeRange, storyTimeValue } from './timeTag';
 import { MEMORY_KEY, MEMORY_VERSION } from './types';
 import { scheduleVectorIndex } from './vector';
 import { invalidateRecallCache } from './vector/cache';
@@ -82,7 +82,7 @@ export async function saveInitialStoryTime(value: string): Promise<void> {
 function latestTimedFloor(chat: STMessage[]): number {
   for (let i = chat.length - 1; i >= 0; i--) {
     const m = chat[i];
-    if (m?.extra?.bbs_omit || typeof m?.mes !== 'string' || !m.mes) continue;
+    if (m?.extra?.bbs_omit || typeof m?.mes !== 'string' || !m.mes || isBeingRegenerated(m)) continue;
     const tag = parseTimeRange(clampToTimeTags(m.mes));
     if (tag.end || tag.start) return i;
     const leaf = getLeaf(m);

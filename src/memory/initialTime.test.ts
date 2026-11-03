@@ -8,7 +8,7 @@ import { currentSummaryPromise, engineState, handleGenerationIntercept, maybeSum
 import { currentStoryTimeTarget, ensureOpeningStoryTime, initialTimeEditIssue, saveCurrentStoryTime, saveInitialStoryTime } from './initialTime';
 import { memory, loadMemory, recomputeDerived, derivedMeta } from './store';
 import { createEmptyMemory, MEMORY_KEY, MEMORY_VERSION } from './types';
-import { cleanBody, FICTIONAL_OPENING_TIME, INITIAL_TIME_KEY, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, latestStoryTime, parseTimeRange, TIME_PENDING, timeTagPrompt } from './timeTag';
+import { cleanBody, FICTIONAL_OPENING_TIME, INITIAL_TIME_KEY, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, latestStoryTime, markRegenerating, parseTimeRange, TIME_PENDING, timeTagPrompt } from './timeTag';
 import { calculateRelativeDays, parseStoryDate, relativeTimeLabel, weekdayLabel } from './timeRel';
 import { refreshInjection } from './inject';
 import { fitTimeTagPrompt } from './budget';
@@ -492,5 +492,43 @@ describe('旧聊天补设当前故事时间', () => {
     expect(ctx.chat[4]).toEqual(before);
     expect(derivedMeta.latestStoryTime).toBe('');
     expect(currentStoryTimeTarget()).toEqual({ floor: 4, issue: '' });
+  });
+});
+
+describe('重新生成和翻页时，组装提示词前刷新时间基准', () => {
+  const tagged = (start: string, end: string) => `<bbs_start>${start}</bbs_start>正文。<bbs_end>${end}</bbs_end>`;
+  beforeEach(() => {
+    ctx.chat = [
+      { ...message(tagged('2026/4/12 15:30', '2026/4/12 15:40')),
+        extra: { bbs_leaf: { id: 'leaf-1', text: '摘要。', delta: { time: '2026/4/12 15:40' }, timeStart: '2026/4/12 15:30', timeEnd: '2026/4/12 15:40', createdAt: 1, swipe: 0, v: 1 } } },
+      { name: '玩家', is_user: true, is_system: false, mes: '继续。' },
+      message(tagged('2026/4/12 15:40', '2026/4/12 15:57')),
+    ];
+    recomputeDerived(); refreshInjection();
+    expect(slots.get('baibai_book_time_tag')).toContain('当前主线时间基准:2026/4/12 15:57');
+  });
+  afterEach(() => markRegenerating(null));
+
+  it('翻页：被换掉那一页的时间不再作为基准，拦截器里立刻刷新', async () => {
+    ctx.chat[2].swipe_id = 1;
+    markRegenerating(ctx.chat[2]);
+    expect(await handleGenerationIntercept('swipe', vi.fn())).toBe(false);
+    expect(slots.get('baibai_book_time_tag')).toContain('当前主线时间基准:2026/4/12 15:40');
+    expect(derivedMeta.latestStoryTime).toBe('2026/4/12 15:40');
+    expect(currentStoryTimeTarget().issue).toContain('来自 #0 楼');
+  });
+
+  it('重新生成：酒馆删掉末尾回复后，拦截器里按剩下的楼层刷新', async () => {
+    ctx.chat.pop();
+    expect(slots.get('baibai_book_time_tag')).toContain('2026/4/12 15:57');
+    expect(await handleGenerationIntercept('regenerate', vi.fn())).toBe(false);
+    expect(slots.get('baibai_book_time_tag')).toContain('当前主线时间基准:2026/4/12 15:40');
+  });
+
+  it('普通发送仍以最新一层的时间为基准', async () => {
+    ctx.chat.push({ name: '玩家', is_user: true, is_system: false, mes: '再走走。' });
+    expect(await handleGenerationIntercept('normal', vi.fn())).toBe(false);
+    refreshInjection();
+    expect(slots.get('baibai_book_time_tag')).toContain('当前主线时间基准:2026/4/12 15:57');
   });
 });

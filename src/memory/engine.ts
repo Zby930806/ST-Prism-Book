@@ -15,7 +15,7 @@ import { parseSummaryResponse, SummaryResponseError, describeDropped, type Dropp
 import { selectKnowledgeForSummary } from './knowledge';
 import { clearInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
 import { BATCH_SUMMARY_THINKING_CHECKLIST, buildBatchSummaryPrompt, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, sendsContentBoundary, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
-import { clampToTimeTags, cleanBody, explicitOpeningTime, hasStoryBody, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, latestStoryTime, parseTimeRange, storyTimeValue, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
+import { clampToTimeTags, cleanBody, explicitOpeningTime, hasStoryBody, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, latestStoryTime, markRegenerating, parseTimeRange, storyTimeValue, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import { memory, memoryWriteIssue, checkCompatibility, recomputeDerived, scheduleLeafFlush } from './store';
 import { legacyLeafIssue } from './compatibility';
@@ -601,9 +601,16 @@ export async function handleGenerationIntercept(
   abort: (immediately: boolean) => void,
 ): Promise<boolean> {
   if (!engineActiveHere()) return false; // 排除角色/总开关关:不拦
+  // 重新生成和翻页:酒馆刚删掉或换掉末尾回复,事件里的刷新带防抖、可能还没执行。组装提示词前按当前聊天重算,
+  // 被换掉的那条回复的摘要状态和时间不能带进新回复。
+  const rewriting = type === 'regenerate' || type === 'swipe';
+  if (rewriting) {
+    recomputeDerived();
+    refreshInjection();
+  }
   if (!apiSettings.autoSummaryEnabled) {
     // 自动摘要关 → 拦截一并关。状态注入仍按当前记录刷新一次(伤势进展提醒按经过的时间和楼层数计算)。
-    refreshInjection();
+    if (!rewriting) refreshInjection();
     return false;
   }
   // 要产出新正文的生成才拦:normal(发消息)/regenerate(重新生成)/swipe(翻页)。
@@ -3005,7 +3012,7 @@ function moveManualOps(evictFloor?: number): void {
 /**
  * 绑定事件。摘要触发规则:**只确保「上一条已定稿 AI 消息」有摘要**(单楼增量,非全量)。
  * 进入聊天 / 翻到没摘要的页,都不再自动立刻补摘。
- *  - USER_MESSAGE_RENDERED:发新消息 → 摘「上一条 AI」(skipLastAi=false)。
+ *  - USER_MESSAGE_RENDERED:发新消息(聊天末尾新出现的用户消息)→ 摘「上一条 AI」(skipLastAi=false)。
  *  - GENERATION_STARTED(regenerate/swipe):末尾 AI 正在被改写,跳过它 → 摘「之前那条 AI」(skipLastAi=true)。
  *  - GENERATION_ENDED(可选「回复结束后立即摘要」,默认关):回复一结束就摘这条回复;之后续写或编辑,按新内容重写。
  *  - MESSAGE_SWIPED / MESSAGE_EDITED:数据随消息跟随 → reactToChatMutation(清坏链+重算+刷新),不在此处生成。
@@ -3023,7 +3030,15 @@ export function bindEngine(): void {
 
   // 发新消息:此刻末尾 AI 是「上一条已定稿」的回复,从最早缺口开始顺序追赶到它。
   // 立即摘要过的上一条回复之后被编辑过时,先按新内容重写它。
-  es.on(et.USER_MESSAGE_RENDERED, () => {
+  // 只认聊天末尾新出现的用户消息:/sys、/comment 也发这个事件,酒馆助手重绘楼层时还会对每一楼都发一遍,
+  // 那些时候摘要会在回复刚写完时就开始,与「回复结束后立即摘要」是否开启无关。
+  const handledUserMessages = new WeakSet<STMessage>();
+  es.on(et.USER_MESSAGE_RENDERED, (messageId?: unknown) => {
+    const chat = getContext()?.chat ?? [];
+    const index = messageId === undefined || messageId === null || messageId === '' ? chat.length - 1 : Number(messageId);
+    const message = chat[index];
+    if (index !== chat.length - 1 || !message?.is_user || handledUserMessages.has(message)) return;
+    handledUserMessages.add(message);
     console.log('[棱镜宝书] USER_MESSAGE_RENDERED → 摘上一条 AI');
     if (replyLeafNeedsRefresh()) void refreshEditedReplyLeaf().then(() => maybeSummarizePrevAi(false, false, true));
     else void maybeSummarizePrevAi(false, false, true);
@@ -3059,6 +3074,10 @@ export function bindEngine(): void {
       clearReplyTimer();
       replyRendered = false;
       replyAllowed = type == null || ['normal', 'regenerate', 'swipe', 'continue'].includes(String(type));
+      // 翻页重新生成:新回复写入前,这条消息里还是被换掉那一页的正文,当前时间不能从它取
+      const chat = getContext()?.chat ?? [];
+      const last = chat[chat.length - 1];
+      markRegenerating(type === 'swipe' && last && !last.is_user ? last : null);
     });
   }
   if (et.CHARACTER_MESSAGE_RENDERED) {
@@ -3066,9 +3085,10 @@ export function bindEngine(): void {
       if (replyAllowed && type !== 'quiet' && type !== 'impersonate' && type !== 'first_message') replyRendered = true;
     });
   }
-  if (et.GENERATION_STOPPED) es.on(et.GENERATION_STOPPED, () => { clearReplyTimer(); replyAllowed = false; replyRendered = false; });
+  if (et.GENERATION_STOPPED) es.on(et.GENERATION_STOPPED, () => { clearReplyTimer(); replyAllowed = false; replyRendered = false; markRegenerating(null); });
   if (et.GENERATION_ENDED) {
     es.on(et.GENERATION_ENDED, () => {
+      markRegenerating(null);
       const eligible = replyAllowed && replyRendered;
       replyAllowed = false;
       replyRendered = false;
@@ -3108,6 +3128,7 @@ export function bindEngine(): void {
   if (et.CHAT_CHANGED) {
     es.on(et.CHAT_CHANGED, () => {
       // 记忆重载由 store 的 CHAT_CHANGED 监听负责;此处仅在其后刷新注入
+      markRegenerating(null);
       clearRecallInjection(); // 切聊天先抹掉上个聊天的召回残留(新聊天下次生成再重算)
       clearRecallDebug(); // 「上次召回」的面板和快捷回复按钮也只说当前聊天
       clearResummaryHold(); // 总结的暂停记录只对当前聊天有效,切换聊天后清除(切回来时照常再试一次)

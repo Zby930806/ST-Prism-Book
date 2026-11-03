@@ -101,6 +101,23 @@ export function parseTimeRange(mes: string): { start?: string; end?: string } {
 }
 
 /**
+ * 正在翻页重新生成的末尾回复。翻页生成期间,酒馆把被换掉那一页的正文留在这条消息里,直到新回复开始写入;
+ * 那一页的时间不能当作新回复的时间基准,否则每次重抽都从被换掉那一页的结束时间算起。
+ * 新回复写入(正文变了)或页码变回去后,这条消息恢复参与,不依赖结束事件一定到达。
+ */
+let regenerating: { message: STMessage; text: string; swipe: unknown } | null = null;
+
+export function markRegenerating(message: STMessage | null): void {
+  regenerating = message ? { message, text: message.mes, swipe: message.swipe_id } : null;
+}
+
+/** 这条消息是否正在翻页重新生成、还没写入新回复。 */
+export function isBeingRegenerated(m: STMessage | undefined): boolean {
+  const r = regenerating;
+  return !!r && m === r.message && m.mes === r.text && m.swipe_id === r.swipe;
+}
+
+/**
  * 当前「故事内最新时间」:从 chat 末尾往前扫,取第一条解析得到的时间(end 优先,缺则 start)。
  *
  * 为什么不直接用派生的 memory.state.time:那个只重放「已生成叶子」的楼层,最新几层没摘时就停在旧值。
@@ -110,6 +127,7 @@ export function parseTimeRange(mes: string): { start?: string; end?: string } {
  *   ② 标签缺失时回退到该楼叶子的 timeEnd/timeStart —— 覆盖「旧聊天补摘」场景:那些楼正文里
  *   没有时间标签(用插件前生成的),但补摘已把时间写进叶子。少了这个兜底,整页相对时间会因
  *   参照点(now)为空而全部不显示。
+ * 正在翻页重新生成的那条回复跳过(见 markRegenerating)。
  * 用途:① 摘要页「当前时间」展示;② 历史摘要注入时相对时间的参照点(「现在」)。
  * 全部解析不到(纯架空/无标签且无叶子)→ 返回空串,调用方各自回退。
  */
@@ -119,6 +137,7 @@ export function latestStoryTime(chat: STMessage[] | null): string {
     const m = chat[i];
     if (m?.extra?.bbs_omit) continue;
     if (typeof m?.mes !== 'string' || !m.mes) continue;
+    if (isBeingRegenerated(m)) continue;
     // ① 正文标签优先
     const { start, end } = parseTimeRange(clampToTimeTags(m.mes));
     const tagTime = end || start;
