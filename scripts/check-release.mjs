@@ -40,7 +40,7 @@ for (const p of ['src/memory/update.ts', 'dist/index.js']) {
 assert((await read('dist/index.css')).length > 0);
 for (const p of ['README.md', 'NOTICE.md', 'THIRD-PARTY-NOTICES.txt', 'docs/INTERNAL-RELEASE.md']) assert((await read(p)).length > 0, p);
 const dirs = new Set(['src', 'scripts', 'dist', 'docs', 'assets']);
-const files = new Set(['.gitignore', 'CHANGELOG.md', 'FAQ.md', 'NOTICE.md', 'PUBLIC_API.md', 'README.md', 'THIRD-PARTY-NOTICES.txt', 'manifest.json', 'package.json', 'pnpm-lock.yaml', 'tsconfig.json', 'vite.config.ts']);
+const files = new Set(['.gitattributes', '.gitignore', 'CHANGELOG.md', 'FAQ.md', 'NOTICE.md', 'PUBLIC_API.md', 'README.md', 'THIRD-PARTY-NOTICES.txt', 'manifest.json', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'tsconfig.json', 'vite.config.ts']);
 const skip = new Set(['.git', 'node_modules']);
 const paths = [];
 async function walk(rel = '') {

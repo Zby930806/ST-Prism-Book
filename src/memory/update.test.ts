@@ -38,6 +38,7 @@ const README = `# 棱镜宝书
 
 interface Routes {
   discover?: unknown;
+  discoverStatus?: number;
   version?: unknown;
   versionStatus?: number;
   update?: unknown;
@@ -62,7 +63,7 @@ function serve(files: Record<string, string> | null | undefined, url: string): R
 function stubFetch(routes: Routes) {
   const fetch = vi.fn(async (url: string, _init?: RequestInit) => {
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
-    if (url === '/api/extensions/discover') return json(routes.discover ?? [{ type: 'local', name: 'third-party/ST-Prism-Book' }]);
+    if (url === '/api/extensions/discover') return json(routes.discover ?? [{ type: 'local', name: 'third-party/ST-Prism-Book' }], routes.discoverStatus ?? 200);
     if (url === '/api/extensions/version') return json(routes.version ?? {}, routes.versionStatus ?? 200);
     if (url === '/api/extensions/update') return json(routes.update ?? {}, routes.updateStatus ?? 200);
     if (url.startsWith('https://raw.githubusercontent.com/')) return serve(routes.raw === undefined ? {} : routes.raw, url);
@@ -203,15 +204,16 @@ describe('检查更新', () => {
   });
 
   it.each([
-    ['已是最新', { version: { ...behind, isUpToDate: true } }, 'up-to-date'],
-    ['手动复制安装（不是 git 仓库）', { version: { currentBranchName: '', currentCommitHash: '', isUpToDate: true, remoteUrl: '' } }, 'unsupported'],
-    ['安装来源是原版柏宝书', { version: { ...behind, remoteUrl: 'https://github.com/baibai-git/ST-BaiBai-Book' } }, 'unsupported'],
-    ['酒馆的扩展列表里找不到', { discover: [{ type: 'local', name: 'third-party/Other' }] }, 'unsupported'],
-  ] as const)('%s：不提示更新', async (_name, routes, expected) => {
+    ['已是最新', { version: { ...behind, isUpToDate: true } }, 'up-to-date', ''],
+    ['手动复制安装（不是 git 仓库）', { version: { currentBranchName: '', currentCommitHash: '', isUpToDate: true, remoteUrl: '' } }, 'unsupported', 'manual'],
+    ['安装来源是原版柏宝书', { version: { ...behind, remoteUrl: 'https://github.com/baibai-git/ST-BaiBai-Book' } }, 'unsupported', 'upstream'],
+    ['酒馆的扩展列表里找不到', { discover: [{ type: 'local', name: 'third-party/Other' }] }, 'unsupported', 'missing'],
+  ] as const)('%s：不提示更新，并记下原因', async (_name, routes, expected, reason) => {
     const fetch = stubFetch({ ...routes, raw: {} });
     const { checkForUpdate, updateState } = await load();
     expect(await checkForUpdate()).toBe(expected);
     expect(updateState.available).toBe(false);
+    expect(updateState.unsupportedReason).toBe(reason);
     expect(fetch.mock.calls.some(([url]) => url.startsWith('https://'))).toBe(false);
   });
 
@@ -234,6 +236,51 @@ describe('检查更新', () => {
     expect(count()).toBe(1);
     await checkForUpdate(true);
     expect(count()).toBe(2);
+  });
+
+  it('查过「已是最新」后 3 小时内刷新页面不再让酒馆去查；过了 3 小时、换了版本或手动检查时照常查', async () => {
+    vi.useFakeTimers();
+    const fetch = stubFetch({ version: { ...behind, isUpToDate: true } });
+    const count = () => fetch.mock.calls.filter(([url]) => url === '/api/extensions/version').length;
+    expect(await (await load()).checkForUpdate()).toBe('up-to-date');
+    expect(count()).toBe(1);
+    // 刷新页面(重新载入插件):沿用上次的结论
+    const second = await load();
+    expect(await second.checkForUpdate()).toBe('up-to-date');
+    expect(count()).toBe(1);
+    expect(second.updateState.available).toBe(false);
+    // 手动检查不受限
+    expect(await second.checkForUpdate(true)).toBe('up-to-date');
+    expect(count()).toBe(2);
+    const { UPDATE_CHECK_INTERVAL_MS } = second;
+    vi.advanceTimersByTime(UPDATE_CHECK_INTERVAL_MS);
+    await (await load()).checkForUpdate();
+    expect(count()).toBe(3);
+    // 换了版本(例如在「管理扩展」里更新过):记录作废
+    storage.set('bbs.update.lastCheck', JSON.stringify({ at: Date.now(), result: 'up-to-date', reason: '', version: '0.0.1' }));
+    await (await load()).checkForUpdate();
+    expect(count()).toBe(4);
+  });
+
+  it('查到有新版本或没查成时不记，下次刷新还要查', async () => {
+    let fetch = stubFetch({ version: behind, raw: {} });
+    expect(await (await load()).checkForUpdate()).toBe('available');
+    expect(storage.has('bbs.update.lastCheck')).toBe(false);
+    expect(await (await load()).checkForUpdate()).toBe('available');
+    expect(fetch.mock.calls.filter(([url]) => url === '/api/extensions/version')).toHaveLength(2);
+    fetch = stubFetch({ versionStatus: 500 });
+    expect(await (await load()).checkForUpdate()).toBe('failed');
+    expect(storage.has('bbs.update.lastCheck')).toBe(false);
+  });
+
+  it('不能更新时连同原因一起沿用', async () => {
+    stubFetch({ version: { currentBranchName: '', currentCommitHash: '', isUpToDate: true, remoteUrl: '' } });
+    await (await load()).checkForUpdate();
+    const fetch = stubFetch({});
+    const again = await load();
+    expect(await again.checkForUpdate()).toBe('unsupported');
+    expect(again.updateState.unsupportedReason).toBe('manual');
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
 
@@ -275,6 +322,14 @@ describe('安装更新', () => {
     expect(updateState.error).toContain(reason);
     expect(updateState.updating).toBe(false);
     expect(location.reload).not.toHaveBeenCalled();
+  });
+
+  it('取不到酒馆的扩展列表（服务器连不上或登录过期）时如实说明，不说成找不到安装目录', async () => {
+    const fetch = stubFetch({ discoverStatus: 403 });
+    const { performUpdate, updateState } = await load();
+    await expect(performUpdate()).rejects.toThrow('没能向酒馆确认安装位置');
+    expect(updateState.error).not.toContain('没有找到本扩展的安装目录');
+    expect(fetch.mock.calls.some(([url]) => url === '/api/extensions/update')).toBe(false);
   });
 
   it('刷新后从本机 README 列出这次更新的内容（比旧版本新的各节），不依赖外网', async () => {

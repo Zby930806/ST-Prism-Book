@@ -1,0 +1,5 @@
+# 统一用 LF 换行:各系统检出的源码相同,构建出的 dist 才逐字节一致(组件样式的作用域哈希按源码内容计算)。
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary

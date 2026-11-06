@@ -6,6 +6,8 @@ import { bindWorldbookLifecycle } from '@/worldbook/service';
 import { hydrateNotesSettings } from '@/notes/settings';
 import { bindNotesLifecycle, refreshNotesInjection } from '@/notes/service';
 import { apiSettings, hydrateSettings } from '@/api/settings';
+import { holdGenerationForMainApi, mainApiBusy, whenMainApiIdle } from '@/api/client';
+import { toast } from '@/st/toast';
 import { bindEngine, handleGenerationIntercept } from '@/memory/engine';
 import { bindBacklogNoticeCleanup, stripBacklogNoticesFromPrompt } from '@/backlogNotice';
 import { recallStopSignal, runVectorRecall, shouldRecallForType } from '@/memory/vector/recall';
@@ -47,6 +49,10 @@ const HOST_ID = 'bbs-app-host';
   abort: (immediately: boolean) => void,
   type: string | undefined,
 ): Promise<void> => {
+  // 借用主 API 的请求在拦截器运行期间照常发(正文还没组装提示词);放行正文前等它们全部发完,
+  // 免得正文按摘要临时改的「最大回复」组装提示词、发出请求(见 api/client.ts 的 enqueueMainApi)
+  const releaseMainApi = holdGenerationForMainApi();
+  let intercepted = false;
   try {
     // 「本次生成已拦截」提示只给用户看:从这次请求的消息副本里去掉,不发给正文模型(聊天本身不改)
     stripBacklogNoticesFromPrompt(chat);
@@ -57,7 +63,7 @@ const HOST_ID = 'bbs-app-host';
     // 先走积压拦截:返回 true = 已 abort 本次生成,无需召回(生成不会发生)。
     refreshNotesInjection();
     refreshOutlineInjection();
-    const intercepted = await handleGenerationIntercept(type, abort);
+    intercepted = await handleGenerationIntercept(type, abort);
     // 放行且该类型需要召回 → 阻塞式向量召回(写注入槽后再放行生成)。
     // 召回内部自带向量开关/可用性判断,失败静默降级,绝不影响生成。
     // 召回期间监听「停止生成」:用户点停止即取消召回,不必等各请求超时。
@@ -74,6 +80,15 @@ const HOST_ID = 'bbs-app-host';
     }
   } catch (e) {
     console.error('[棱镜宝书] 生成拦截器异常(放行本次生成)', e);
+  } finally {
+    try {
+      if (!intercepted && mainApiBusy()) {
+        toast('棱镜宝书正在借用主 API 整理记忆，完成后开始生成…', 'info');
+        await whenMainApiIdle();
+      }
+    } finally {
+      releaseMainApi();
+    }
   }
 };
 
@@ -162,6 +177,14 @@ $(() => {
 
 function bindMemoryWhenReady(attempt = 0) {
   if (window.SillyTavern?.getContext) {
+    // 更新放在记忆系统的启动链之外:哪个版本启动时出错,也照样能弹出更新窗口装上修复版。
+    // 插件内更新并刷新后,从本机 README 弹出这次的更新内容;再在后台检查更新(由酒馆对安装目录 git fetch,失败静默)
+    try {
+      void announceUpdated();
+      void checkForUpdate();
+    } catch (e) {
+      console.error('[棱镜宝书] 检查更新失败', e);
+    }
     try {
       console.log('[棱镜宝书] 启动链开始绑定(getContext 就绪)');
       // 设置先 hydrate:从 extension_settings 载入(或从旧 localStorage 迁移),之后才跨设备同步
@@ -193,9 +216,6 @@ function bindMemoryWhenReady(attempt = 0) {
       bindFloorRecall();
       // 记录冲突的连续性提醒:回复到达后标为已提醒
       bindContinuityNote();
-      // 插件内更新并刷新后,从本机 README 弹出这次的更新内容;再在后台检查更新(由酒馆对安装目录 git fetch,失败静默,不阻断启动)
-      void announceUpdated();
-      void checkForUpdate();
       console.log('[棱镜宝书] 启动链绑定完成');
     } catch (e) {
       console.error('[棱镜宝书] 记忆系统绑定失败', e);

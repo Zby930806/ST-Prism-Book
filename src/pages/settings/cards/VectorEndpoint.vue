@@ -8,7 +8,7 @@ import Icon from '@/components/Icon.vue';
 import IconButton from '@/components/IconButton.vue';
 import { fetchModels } from '@/api/client';
 import { describeFailure } from '@/api/errors';
-import { apiSettings, resolveVectorModel } from '@/api/settings';
+import { API_KEY_STORAGE_NOTE, apiSettings, resolveVectorModel } from '@/api/settings';
 import { normalizeEndpointRetries, normalizeEndpointTimeout, normalizeQueryRewriteContextChars, normalizeQueryRewriteMaxTokens } from '@/memory/vector/params';
 import { ref, useId } from 'vue';
 import ModelCombo from '../ModelCombo.vue';
@@ -136,6 +136,7 @@ async function pullModels() {
               />
             </div>
           </label>
+          <p v-if="role === 'embedding'" class="bbs-field-hint">{{ API_KEY_STORAGE_NOTE }}</p>
 
           <!-- 模型:三个角色各自独立(embedding/rerank/query 模型本就不同),都要单独选,从不复用。
                拉取走「该角色的地址/密钥」,留空则自动用 Embedding 的地址/密钥去拉。 -->

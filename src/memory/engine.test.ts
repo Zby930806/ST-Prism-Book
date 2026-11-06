@@ -147,7 +147,12 @@ describe('opening generation interception', () => {
     },
   );
 
-  it('summarizes the first generated reply normally after the next user message', async () => {
+  it('summarizes the first generated reply normally after the next user message (assigned channel)', async () => {
+    vi.mocked(settings.getChannelForTask).mockReturnValue({
+      id: 'channel', name: '摘要渠道', url: 'https://relay.example/v1', key: 'k', model: 'm', temperature: 1,
+      maxTokens: 4096, timeoutSec: 60, stream: false, prefill: false, excludeParams: [], reasoningEffort: '',
+    });
+    const send = vi.spyOn(client, 'requestCompletion').mockResolvedValue(JSON.stringify(summary));
     const chat = [message(true), message(), message(true)];
     useChat(chat);
 
@@ -155,8 +160,21 @@ describe('opening generation interception', () => {
     await currentSummaryPromise();
 
     expect(notices.toast).not.toHaveBeenCalled();
-    expect(client.requestViaMainApi).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledOnce();
+    expect(client.requestViaMainApi).not.toHaveBeenCalled();
     expect(chat[1].extra?.bbs_leaf?.text).toBe(summary.summary);
+  });
+
+  it('borrowing the main API, leaves that summary until the reply generation ends instead of running alongside it', async () => {
+    const chat = [message(true), message(), message(true)];
+    useChat(chat);
+
+    await handleGenerationIntercept('normal', vi.fn());
+    await currentSummaryPromise();
+
+    expect(notices.toast).not.toHaveBeenCalled();
+    expect(client.requestViaMainApi).not.toHaveBeenCalled();
+    expect(chat[1].extra?.bbs_leaf).toBeUndefined();
   });
 });
 

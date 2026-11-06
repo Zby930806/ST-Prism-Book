@@ -44,9 +44,11 @@ export const updateState = reactive({
   updatedFrom: '',
   updatedNotes: [] as UpdateNote[],
   updatedDialogOpen: false,
+  /** 不能在插件内更新的原因:manual 手动复制安装(不是 git 仓库)、upstream 安装来源是原版柏宝书、missing 酒馆的扩展列表里找不到 */
+  unsupportedReason: '' as '' | 'manual' | 'upstream' | 'missing',
 });
 
-/** available 有新版本;up-to-date 已是最新;unsupported 不能在插件内更新;failed 这次没查成(网络等),保留上次结论。 */
+/** available 有新版本;up-to-date 已是最新;unsupported 不能在插件内更新(原因见 unsupportedReason);failed 这次没查成(网络等),保留上次结论。 */
 export type UpdateCheckResult = 'available' | 'up-to-date' | 'unsupported' | 'failed';
 
 /** 原版柏宝书的仓库:安装来源是它时不提示、不更新。 */
@@ -57,6 +59,9 @@ export const RELOAD_DELAY_MS = 1500;
 const UPDATED_FROM_KEY = 'bbs.update.from';
 /** 自动弹出的更新说明最多列几个版本。 */
 const NOTES_LIMIT = 5;
+/** 上次自动检查的时间和结果:已是最新或不能更新时,这段时间内刷新页面不再让酒馆去查(手动「检查更新」不受限)。 */
+const LAST_CHECK_KEY = 'bbs.update.lastCheck';
+export const UPDATE_CHECK_INTERVAL_MS = 3 * 60 * 60_000;
 
 /** a 是否比 b 新:按点分段比较数字(1.4.10 比 1.4.9 新),段内数字后的后缀不计,缺段按 0。 */
 export function isNewerVersion(a: string, b: string): boolean {
@@ -206,10 +211,11 @@ async function loadReleaseInfo(remoteUrl: string, branch: string): Promise<void>
   }
 }
 
-function noUpdate(result: UpdateCheckResult): UpdateCheckResult {
+function noUpdate(result: UpdateCheckResult, reason: typeof updateState.unsupportedReason = ''): UpdateCheckResult {
   updateState.available = false;
   updateState.latest = '';
   updateState.notes = [];
+  updateState.unsupportedReason = reason;
   return result;
 }
 
@@ -217,7 +223,7 @@ async function runCheck(): Promise<UpdateCheckResult> {
   updateState.checking = true;
   try {
     const install = await findInstall();
-    if (!install) return noUpdate('unsupported');
+    if (!install) return noUpdate('unsupported', 'missing');
     const resp = await fetchWithTimeout('/api/extensions/version', {
       method: 'POST',
       headers: requestHeaders(),
@@ -227,9 +233,11 @@ async function runCheck(): Promise<UpdateCheckResult> {
     const info = (await resp.json()) as { currentBranchName?: string; currentCommitHash?: string; isUpToDate?: boolean; remoteUrl?: string };
     const remote = String(info.remoteUrl ?? '');
     // 不是 git 仓库(手动复制安装)时酒馆返回空的提交号和地址;来源是原版柏宝书时不更新
-    if (!info.currentCommitHash || !remote || UPSTREAM_REPO.test(remote)) return noUpdate('unsupported');
+    if (!info.currentCommitHash || !remote) return noUpdate('unsupported', 'manual');
+    if (UPSTREAM_REPO.test(remote)) return noUpdate('unsupported', 'upstream');
     if (info.isUpToDate !== false) return noUpdate('up-to-date');
     updateState.available = true;
+    updateState.unsupportedReason = '';
     await loadReleaseInfo(remote, String(info.currentBranchName || 'main'));
     return 'available';
   } catch {
@@ -242,15 +250,52 @@ async function runCheck(): Promise<UpdateCheckResult> {
 let pendingCheck: Promise<UpdateCheckResult> | null = null;
 let lastCheck: UpdateCheckResult | null = null;
 
+/** 上次自动检查的记录;同一版本、在间隔内、结论是「已是最新」或「不能更新」时可以沿用。 */
+function recentCheck(): UpdateCheckResult | null {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LAST_CHECK_KEY) ?? 'null') as { at?: unknown; result?: unknown; version?: unknown; reason?: unknown } | null;
+    if (!saved || saved.version !== PLUGIN_VERSION || typeof saved.at !== 'number') return null;
+    if (Date.now() - saved.at < 0 || Date.now() - saved.at >= UPDATE_CHECK_INTERVAL_MS) return null;
+    if (saved.result === 'up-to-date') return noUpdate('up-to-date');
+    if (saved.result === 'unsupported' && (saved.reason === 'manual' || saved.reason === 'upstream' || saved.reason === 'missing')) return noUpdate('unsupported', saved.reason);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberCheck(result: UpdateCheckResult): void {
+  try {
+    // 有新版本或没查成时不记:下次刷新还要查,才能弹出更新窗口、或在网络恢复后查到
+    if (result === 'up-to-date' || result === 'unsupported') {
+      localStorage.setItem(LAST_CHECK_KEY, JSON.stringify({ at: Date.now(), result, reason: updateState.unsupportedReason, version: PLUGIN_VERSION }));
+    } else {
+      localStorage.removeItem(LAST_CHECK_KEY);
+    }
+  } catch {
+    /* 只影响下次是否重查 */
+  }
+}
+
 /**
  * 检查更新,结果写进 updateState。一次会话只查一次(刷新页面后重查),force=true 时重新查(设置页的「检查更新」)。
+ * 自动检查时,上次查过「已是最新」或「不能更新」且不到 3 小时就沿用,不再让酒馆去查:
+ * 每查一次都要酒馆对安装目录 git fetch,网络不好时频繁刷新页面会让好几次查询挂在后台,还会让之后的更新失败。
  * 查询失败不清除上次的结论,也不打扰用户。
  */
 export function checkForUpdate(force = false): Promise<UpdateCheckResult> {
   if (pendingCheck) return pendingCheck;
   if (lastCheck && !force) return Promise.resolve(lastCheck);
+  const cached = force ? null : recentCheck();
+  if (cached) {
+    lastCheck = cached;
+    return Promise.resolve(cached);
+  }
   pendingCheck = runCheck()
-    .then(result => (lastCheck = result))
+    .then(result => {
+      rememberCheck(result);
+      return (lastCheck = result);
+    })
     .finally(() => { pendingCheck = null; });
   return pendingCheck;
 }
@@ -272,7 +317,13 @@ export async function performUpdate(): Promise<'updated' | 'up-to-date'> {
   updateState.error = '';
   let reloading = false;
   try {
-    const install = await findInstall().catch(() => null);
+    let install: Install | null;
+    try {
+      install = await findInstall();
+    } catch {
+      // 酒馆的扩展列表都没取到:多半是服务器连不上或登录已过期,不是安装目录不在
+      throw new Error('没能向酒馆确认安装位置：可能是酒馆服务器连不上，或登录已过期。请刷新页面后再试。');
+    }
     if (!install) throw new Error(updateFailure(404));
     let resp: Response;
     try {

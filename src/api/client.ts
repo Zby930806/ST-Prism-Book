@@ -527,11 +527,16 @@ function mainApiFailure(e: MainApiRejected, tokens: number, retriedFrom?: number
  * 走 ST 的 generateRaw:只发我们给的这几条消息,不带聊天历史/角色卡;无需连接档。
  * quiet 类型内部强制非流式,返回清洗后的整段文本;失败抛 ApiError。
  * 最大回复用「跟随主 API 时的最大回复」(默认 32000);关闭「跟随主 API 时发送预填充」时去掉末尾的 assistant 消息。
+ * 借用主 API 的请求排队一个一个发,酒馆在生成正文时先等它结束(见 enqueueMainApi)。
  *
  * ⚠️ 这条路径的请求体由 ST 构造,带不上 `tool_choice: 'none'`,第三方 fetch 拦截器
  * (如防截断脚本)仍可能改写它。摘要/重摘要尽量指派副 API 渠道,走 buildRequestBody 那条路。
  */
-export async function requestViaMainApi(messages: ChatMsg[], _opts: RequestOptions = {}): Promise<string> {
+export function requestViaMainApi(messages: ChatMsg[], _opts: RequestOptions = {}): Promise<string> {
+  return enqueueMainApi(() => sendViaMainApi(messages));
+}
+
+async function sendViaMainApi(messages: ChatMsg[]): Promise<string> {
   const ctx = getContext();
   if (typeof ctx?.generateRaw !== 'function') {
     throw apiFailure('config', '当前酒馆版本不支持「跟随主 API」', '请在设置 → 副 API 里给这个任务指派一个渠道。');
@@ -560,6 +565,72 @@ export async function requestViaMainApi(messages: ChatMsg[], _opts: RequestOptio
     if (normalizeMainApiMaxTokens(apiSettings.mainApiMaxTokens) === configured) mainApiTokenState.fallback = MAIN_API_FALLBACK_TOKENS;
     return content;
   }
+}
+
+/* ============ 借用主 API 的请求:排队,并避开正文生成 ============ */
+
+/*
+ * 酒馆的 generateRaw 在请求期间把全局「最大回复」临时改成我们给的值,请求结束才还原:
+ *  - 正文这时组装提示词,会按这个临时值少带聊天记录(可用 = 上下文 − 最大回复),还把它当 max_tokens 发给服务商,
+ *    输出上限低的模型会直接拒绝这次正文;
+ *  - 两个借用请求交叠时,后开始的那个记下的「原值」是前一个的临时值,还原后用户的设置就停在临时值上。
+ * 所以借用主 API 的请求一个一个发,酒馆在生成(发送、重抽、安静生成等)时先等它结束;
+ * 本插件的生成拦截器运行期间正文还没组装提示词,拦截器自己等的借用请求照常发,放行正文前等它们发完(见 index.ts)。
+ */
+let mainApiTail: Promise<unknown> = Promise.resolve();
+let mainApiPending = 0;
+let interceptorHolds = 0;
+/** 酒馆还在生成时,每隔这么久再看一次。 */
+export const MAIN_API_GATE_POLL_MS = 500;
+/** 最多等这么久:酒馆卡在生成状态时不让摘要一直等下去。 */
+export const MAIN_API_GATE_MAX_WAIT_MS = 5 * 60_000;
+
+/** 酒馆是否正在生成:开始生成时给 body 加上 data-generating,结束(含出错、停止)时去掉。 */
+export function hostGenerating(): boolean {
+  return typeof document !== 'undefined' && document.body?.dataset?.generating === 'true';
+}
+
+/** 生成拦截器开始时调用,返回结束时调用的函数:拦截器运行期间放行借用主 API 的请求。 */
+export function holdGenerationForMainApi(): () => void {
+  interceptorHolds++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    interceptorHolds--;
+  };
+}
+
+/** 还有借用主 API 的请求在发或在排队。 */
+export function mainApiBusy(): boolean {
+  return mainApiPending > 0;
+}
+
+/** 等借用主 API 的请求全部发完(排队中的也算)。 */
+export async function whenMainApiIdle(): Promise<void> {
+  while (mainApiPending > 0) await mainApiTail;
+}
+
+async function waitForMainApiTurn(): Promise<void> {
+  const deadline = Date.now() + MAIN_API_GATE_MAX_WAIT_MS;
+  while (hostGenerating() && interceptorHolds === 0) {
+    if (Date.now() >= deadline) {
+      console.warn('[棱镜宝书] 酒馆长时间处于生成状态,不再等待,直接发出借用主 API 的请求');
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, MAIN_API_GATE_POLL_MS));
+  }
+}
+
+/** 借用主 API 的请求排队:前一个结束后才开始,开始前等酒馆生成结束。 */
+function enqueueMainApi<T>(task: () => Promise<T>): Promise<T> {
+  mainApiPending++;
+  const run = mainApiTail.then(async () => {
+    await waitForMainApiTurn();
+    return task();
+  });
+  mainApiTail = run.then(() => undefined, () => undefined);
+  return run.finally(() => { mainApiPending--; });
 }
 
 const TEST_PROMPT: ChatMsg[] = [{ role: 'user', content: '回复"ok"两个字符即可。' }];

@@ -1,0 +1,5 @@
+# 允许 esbuild 的安装脚本(装好对应平台的可执行文件)。allowBuilds 给 pnpm 11 及以后,onlyBuiltDependencies 给 pnpm 10。
+allowBuilds:
+  esbuild: true
+onlyBuiltDependencies:
+  - esbuild

@@ -57,6 +57,12 @@ export interface ApiChannel {
 
 export type TaskType = 'summary' | 'resummary';
 
+/**
+ * 密钥存放方式的提醒,显示在填写密钥的地方。渠道与柏宝绘、柏宝砚共用(baibai_api_channels),
+ * 和其他设置一样存在酒馆的扩展设置里;同一页面运行的脚本(如角色卡自带的脚本)都读得到。
+ */
+export const API_KEY_STORAGE_NOTE = '密钥和其他设置一样保存在酒馆的扩展设置里（渠道与柏宝绘、柏宝砚共用），同一页面运行的脚本（例如角色卡自带的脚本）也能读到，请不要运行来路不明的角色卡脚本。导出设置备份时会自动去掉密钥。';
+
 /** 自定义提示词:空串表示沿用 prompts.ts 内置模板,非空则整体覆盖该任务的模板。 */
 export interface CustomPrompts {
   summary: string;

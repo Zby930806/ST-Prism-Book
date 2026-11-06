@@ -32,11 +32,16 @@ import RestoreHiddenFloors from './RestoreHiddenFloors.vue';
 const masterDescId = useId();
 
 /* —— 版本与更新：有新版本时「更新」打开更新窗口（App 上的 UpdateDialog）；没有时可以手动检查一次 —— */
+const UNSUPPORTED_NOTICE = {
+  manual: '这份棱镜宝书是手动复制的文件，不是用仓库地址安装的，不能在宝书里更新。请在酒馆的「管理扩展」里删除后，用仓库地址重新安装。',
+  upstream: '这份棱镜宝书的安装来源是原版柏宝书的仓库，为免装上原版，不在宝书里更新。请在酒馆的「管理扩展」里删除后，用本仓库地址重新安装。',
+  missing: '酒馆的扩展列表里没有找到棱镜宝书的安装目录，不能在宝书里更新。请到酒馆的「管理扩展」里查看安装情况。',
+} as const;
 async function checkUpdateNow() {
   const result = await checkForUpdate(true);
   if (result === 'available') openUpdateDialog();
   else if (result === 'up-to-date') toast(`已经是最新版本 v${updateState.current}。`, 'success');
-  else if (result === 'unsupported') toast('这份棱镜宝书不是用仓库地址安装的（例如手动复制的文件），不能在宝书里更新。请在酒馆的「管理扩展」里删除后，用仓库地址重新安装。', 'warning');
+  else if (result === 'unsupported') toast(UNSUPPORTED_NOTICE[updateState.unsupportedReason || 'manual'], 'warning');
   else toast('检查更新失败：酒馆服务器可能连不上 GitHub，可以稍后再试。', 'error');
 }
 

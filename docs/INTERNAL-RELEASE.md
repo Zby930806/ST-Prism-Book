@@ -9,7 +9,8 @@
 1. 仓库根目录直接包含 manifest.json、README.md、src、dist 等；dist 中包含 index.js、index.css 和 index.js.map。
 2. 源码、dist 和 manifest 版本必须一致，不能只上传源码。
 3. 不上传聊天、settings.json、.env、密钥、node_modules、备份和本机验证记录，也不能只上传一个 ZIP。
-4. 提交前检查文件列表。`pnpm release:check` 检查版本是否一致、dist 是否由当前源码构建（逐个比较 dist/index.js.map 中的源码与当前 src 文件，统一换行后比较）、更新说明是否已构建、docs/prompts 是否与源码重新导出的结果一致，以及根目录是否有多余文件、是否有疑似密钥。改了源码要先 `pnpm build`，改了提示词要先 `pnpm export:prompts`；构建和导出方面的问题一次列出。
+4. 仓库统一用 LF 换行（.gitattributes），各系统检出后构建出的 dist 一致；pnpm-workspace.yaml 允许 esbuild 的安装脚本。
+5. 提交前检查文件列表。`pnpm release:check` 检查版本是否一致、dist 是否由当前源码构建（逐个比较 dist/index.js.map 中的源码与当前 src 文件，统一换行后比较）、更新说明是否已构建、docs/prompts 是否与源码重新导出的结果一致，以及根目录是否有多余文件、是否有疑似密钥。改了源码要先 `pnpm build`，改了提示词要先 `pnpm export:prompts`；构建和导出方面的问题一次列出。
 
 ## 安装和更新
 

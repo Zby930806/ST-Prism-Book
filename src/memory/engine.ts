@@ -1,6 +1,6 @@
 import { taskContextPrompt } from '@/memory/taskContext';
 import type { ChatMsg } from '@/api/client';
-import { MAIN_API_TOKENS_SETTING, mainApiAvailable, requestCompletion, requestViaMainApi } from '@/api/client';
+import { hostGenerating, MAIN_API_TOKENS_SETTING, mainApiAvailable, requestCompletion, requestViaMainApi } from '@/api/client';
 import { ApiError, apiFailure, containsCompleteJson, describeFailure, isRetryable, looksLikeUnfinishedJson, partialReply, withContext } from '@/api/errors';
 import { apiSettings, engineActiveHere, getChannelForTask, normalizeBatchFullRecent, normalizeBatchMaxFloors } from '@/api/settings';
 import type { TaskType } from '@/api/settings';
@@ -662,7 +662,8 @@ export async function handleGenerationIntercept(
   if (holes.length < 1) {
     // 确保最新稳定 AI 楼已进入后台摘要;只有聊天末尾实际是 AI 时才跳过正在改写的末楼。
     // 通常事件监听器已经启动了它,busy 守卫会自动去重;这里是时序兜底。
-    void maybeSummarizePrevAi(skipLastAi);
+    // 摘要借用主 API 时不在这里启动:它会和正文同时借用主 API,改在这次生成结束后摘(见 deferSummaryUntilGenerationEnds)。
+    if (!summaryUsesMainApi()) void maybeSummarizePrevAi(skipLastAi);
     return false;
   }
 
@@ -680,7 +681,8 @@ export async function handleGenerationIntercept(
     if (holes.length < 1) {
       // 摘要在真正发 API 前还要异步读取世界书等上下文。若直接放行,正文生成可能抢先开始,
       // 导致最新稳定楼的摘要请求未能启动。这里只等请求实际发起,不等摘要完成。
-      await maybeSummarizePrevAi(skipLastAi, true);
+      // 借用主 API 时同上,改在这次生成结束后摘。
+      if (!summaryUsesMainApi()) await maybeSummarizePrevAi(skipLastAi, true);
       return false;
     }
   }
@@ -912,6 +914,30 @@ export async function setFloorOmit(floor: number, on: boolean): Promise<void> {
   recomputeDerived();
   await syncHiddenNow(); // 内部据 engineActiveHere/autoSummary 决定是否同步隐藏,并刷新注入
   scheduleLeafFlush();
+}
+
+/**
+ * 摘要借用主 API(没给摘要指派副 API 渠道)时,发消息、重抽、翻页不在后台摘上一条回复:那会和正文同时借用主 API
+ * (见 api/client.ts 的 enqueueMainApi),正文要么等摘要发完,要么按摘要临时改的「最大回复」组装提示词。
+ * 改为记下来,等这次生成结束再摘。生成结束时最新一条是刚写好的回复,所以摘它之前那条(skipLastAi),范围与发消息时相同。
+ */
+let summaryAfterGeneration = false;
+
+/** 单楼摘要是否借用主 API。 */
+export function summaryUsesMainApi(): boolean {
+  return !getChannelForTask('summary');
+}
+
+function deferSummaryUntilGenerationEnds(): void {
+  summaryAfterGeneration = true;
+}
+
+/** 生成结束后补上推迟的摘要。酒馆还在生成(别的生成先结束了)时继续等下一次结束。 */
+function runDeferredSummary(): void {
+  if (!summaryAfterGeneration || hostGenerating()) return;
+  summaryAfterGeneration = false;
+  if (replyLeafNeedsRefresh()) void refreshEditedReplyLeaf().then(() => maybeSummarizePrevAi(true, false, true));
+  else void maybeSummarizePrevAi(true, false, true);
 }
 
 /**
@@ -2948,6 +2974,9 @@ function reactToChatMutation(syncHidden = false): void {
 /** 回复结束到开始摘要之间稍等片刻:让酒馆存完这条回复、其他插件处理完结束事件。 */
 const REPLY_END_SUMMARY_DELAY_MS = 500;
 
+/** 回复渲染后稍等片刻再重算派生缓存:连发的渲染事件(脚本重绘多楼)合并成一次。 */
+export const RENDERED_RECOMPUTE_DELAY_MS = 100;
+
 /**
  * 立即摘要时这层的正文(清洗后)。之后续写或编辑改了正文,就按新内容重写这层摘要,
  * 结果与默认时机(发送下一条时才摘要)一致。只存在内存里:切聊天或刷新页面后失效。
@@ -3040,6 +3069,7 @@ export function bindEngine(): void {
     if (index !== chat.length - 1 || !message?.is_user || handledUserMessages.has(message)) return;
     handledUserMessages.add(message);
     console.log('[棱镜宝书] USER_MESSAGE_RENDERED → 摘上一条 AI');
+    if (summaryUsesMainApi()) { deferSummaryUntilGenerationEnds(); return; }
     if (replyLeafNeedsRefresh()) void refreshEditedReplyLeaf().then(() => maybeSummarizePrevAi(false, false, true));
     else void maybeSummarizePrevAi(false, false, true);
   });
@@ -3057,6 +3087,7 @@ export function bindEngine(): void {
       // 重新生成会删掉末尾这条回复:它的摘要上若有手动修改，先移到之前最近一条有效摘要(翻页保留原页，由 MESSAGE_SWIPED 处理)。
       if (type === 'regenerate' && skipLastAi) moveManualOps(chat.length - 1);
       console.log('[棱镜宝书] GENERATION_STARTED → 自动摘要, type =', type, '| skipLastAi =', skipLastAi);
+      if (summaryUsesMainApi()) { deferSummaryUntilGenerationEnds(); return; }
       if (!skipLastAi && replyLeafNeedsRefresh()) void refreshEditedReplyLeaf().then(() => maybeSummarizePrevAi(false, false, true));
       else void maybeSummarizePrevAi(skipLastAi, false, !skipLastAi);
     });
@@ -3088,6 +3119,8 @@ export function bindEngine(): void {
   if (et.GENERATION_STOPPED) es.on(et.GENERATION_STOPPED, () => { clearReplyTimer(); replyAllowed = false; replyRendered = false; markRegenerating(null); });
   if (et.GENERATION_ENDED) {
     es.on(et.GENERATION_ENDED, () => {
+      // 借用主 API 时推迟的摘要:酒馆在发出这个事件之后才退出生成状态,稍等一拍再看
+      if (summaryAfterGeneration) setTimeout(runDeferredSummary, 0);
       markRegenerating(null);
       const eligible = replyAllowed && replyRendered;
       replyAllowed = false;
@@ -3123,12 +3156,23 @@ export function bindEngine(): void {
 
   // AI 新回复落定:不一定会触发摘要(自动摘要关闭 / 它不是「上一条 AI」),
   // 但「未摘要楼层」列表必须跟上新增的 AI 楼,故无条件重算一次派生缓存(不发请求)。
-  if (et.CHARACTER_MESSAGE_RENDERED) es.on(et.CHARACTER_MESSAGE_RENDERED, () => recomputeDerived());
+  // 酒馆助手等脚本重绘楼层时会对很多楼连发这个事件,长聊天每次重算要几十毫秒,合并成一次。
+  let renderedTimer: ReturnType<typeof setTimeout> | null = null;
+  if (et.CHARACTER_MESSAGE_RENDERED) {
+    es.on(et.CHARACTER_MESSAGE_RENDERED, () => {
+      if (renderedTimer) clearTimeout(renderedTimer);
+      renderedTimer = setTimeout(() => {
+        renderedTimer = null;
+        recomputeDerived();
+      }, RENDERED_RECOMPUTE_DELAY_MS);
+    });
+  }
 
   if (et.CHAT_CHANGED) {
     es.on(et.CHAT_CHANGED, () => {
       // 记忆重载由 store 的 CHAT_CHANGED 监听负责;此处仅在其后刷新注入
       markRegenerating(null);
+      summaryAfterGeneration = false; // 推迟的摘要属于上个聊天
       clearRecallInjection(); // 切聊天先抹掉上个聊天的召回残留(新聊天下次生成再重算)
       clearRecallDebug(); // 「上次召回」的面板和快捷回复按钮也只说当前聊天
       clearResummaryHold(); // 总结的暂停记录只对当前聊天有效,切换聊天后清除(切回来时照常再试一次)

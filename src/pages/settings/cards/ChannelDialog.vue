@@ -11,7 +11,7 @@ import ModalShell from '@/components/ModalShell.vue';
 import { fetchModels, testChannel } from '@/api/client';
 import { describeFailure } from '@/api/errors';
 import {
-  apiSettings, newChannel, normalizeChannelMaxTokens, normalizeChannelTemperature, normalizeChannelTimeoutSec, type ApiChannel,
+  API_KEY_STORAGE_NOTE, apiSettings, newChannel, normalizeChannelMaxTokens, normalizeChannelTemperature, normalizeChannelTimeoutSec, type ApiChannel,
 } from '@/api/settings';
 import { computed, ref } from 'vue';
 import ModelCombo from '../ModelCombo.vue';
@@ -183,6 +183,7 @@ defineExpose({ openNew, openExisting });
           <IconButton :icon="showKey ? 'eye-off' : 'eye'" label="显示密钥" :pressed="showKey" @click="showKey = !showKey" />
         </div>
       </label>
+      <p class="bbs-field-hint">{{ API_KEY_STORAGE_NOTE }}</p>
       <label class="bbs-modal-field">
         <span class="bbs-modal-label">模型</span>
         <div class="bbs-model-row">

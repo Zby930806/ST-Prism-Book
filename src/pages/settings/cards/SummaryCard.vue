@@ -142,7 +142,7 @@ const resummary2Cap = computed(() => resummary2MaxChars());
       kind="num"
       label="跟随主 API 时的最大回复"
       :hint="`摘要或总结没有指派副 API 渠道时，请求期间把酒馆主 API 的最大回复临时设为这个值（tokens）。默认 32000，可填 ${MAIN_API_MAX_TOKENS_MIN}–${MAIN_API_MAX_TOKENS_MAX}，不能超过模型的单次输出上限。`"
-      :details="`酒馆会把这个值原样作为 max_tokens 发给服务商，超过模型上限时请求会被拒绝；部分模型的单次输出上限只有 8192、16384 或 32000。设置值大于 ${MAIN_API_FALLBACK_TOKENS} 时，首次请求失败后改用 ${MAIN_API_FALLBACK_TOKENS} 重试一次，成功后本次会话内沿用 ${MAIN_API_FALLBACK_TOKENS}，修改此项后恢复按设置值请求。思考型模型的思考过程也计入输出，设得过小时摘要会被截断。不影响酒馆主 API 自己的回复长度设置。`"
+      :details="`酒馆会把这个值原样作为 max_tokens 发给服务商，超过模型上限时请求会被拒绝；部分模型的单次输出上限只有 8192、16384 或 32000。设置值大于 ${MAIN_API_FALLBACK_TOKENS} 时，首次请求失败后改用 ${MAIN_API_FALLBACK_TOKENS} 重试一次，成功后本次会话内沿用 ${MAIN_API_FALLBACK_TOKENS}，修改此项后恢复按设置值请求。思考型模型的思考过程也计入输出，设得过小时摘要会被截断。不影响酒馆主 API 自己的回复长度设置。临时值在请求期间对整个酒馆生效，所以借用主 API 的请求不和正文同时进行：发消息时上一条回复的摘要等正文生成结束后再开始，生成前插件的请求还没结束时先等它完成。`"
     >
       <input v-model.number="apiSettings.mainApiMaxTokens" class="bbs-input bbs-num" type="number" :min="MAIN_API_MAX_TOKENS_MIN" :max="MAIN_API_MAX_TOKENS_MAX" step="1024" @change="commit.mainApiMaxTokens" />
     </SettingRow>

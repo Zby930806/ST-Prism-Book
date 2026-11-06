@@ -795,11 +795,14 @@ export function classifyNpcPresence(
   if (npc.follow === true) return 'present';
   if (npc.locationStale || !npc.location?.trim()) return 'unknown';
   // 主角当前节点:走权威 findCurrentSceneId(优先 locationPath 精确定位,再模糊兜底)
-  const cur = scenes.find(s => s.id === findCurrentSceneId(scenes, here, locationPath)) ?? null;
+  // 先算出 id 再查节点:写在 find 的回调里会对每个场景各重算一遍,场景多时整份状态注入要慢上百倍
+  const curId = findCurrentSceneId(scenes, here, locationPath);
+  const cur = scenes.find(s => s.id === curId) ?? null;
   if (!cur && locationPath?.length === 0) return sameFreeLocation(npc.location, here) ? 'present' : 'unknown';
   if (!cur) return sceneNameReachable(npc.location, here) ? 'present' : 'absent';
   // NPC 所在地同样解析成节点后比路径
-  const n = scenes.find(s => s.id === findCurrentSceneId(scenes, npc.location ?? '')) ?? null;
+  const npcSceneId = findCurrentSceneId(scenes, npc.location ?? '');
+  const n = scenes.find(s => s.id === npcSceneId) ?? null;
   if (!n) return sceneNameReachable(npc.location, here) ? 'present' : 'absent';
   const rel = sceneRelation(cur.path, n.path);
   return rel === 'same' ? 'present' : rel === 'near' ? 'nearby' : 'absent';
