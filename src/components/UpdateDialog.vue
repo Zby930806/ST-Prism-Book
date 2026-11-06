@@ -1,10 +1,12 @@
 <script setup lang="ts">
 /**
- * 更新窗口：有新版本时显示版本号和更新说明，「立即更新」后由酒馆拉取新版本并自动刷新页面。
+ * 更新窗口：有新版本时显示版本号和更新说明，「立即更新」后由酒馆拉取新版本并自动刷新页面；
+ * 刷新后再用「更新完成」窗口列出这次更新的内容（读本机 README，见 update.ts 的 announceUpdated）。
  * 挂在 App 上，打开宝书时自动弹出一次（见 update.ts 的 showUpdateDialogOnce），设置页的「更新」也打开它。
  */
 import ModalShell from '@/components/ModalShell.vue';
-import { closeUpdateDialog, performUpdate, updateState } from '@/memory/update';
+import UpdateNotes from '@/components/UpdateNotes.vue';
+import { closeUpdateDialog, closeUpdatedDialog, performUpdate, updateState } from '@/memory/update';
 import { toast } from '@/st/toast';
 
 async function update() {
@@ -27,14 +29,10 @@ async function update() {
       <p class="bbs-update-versions">
         {{ updateState.latest ? `当前 v${updateState.current} → 最新 v${updateState.latest}` : `当前 v${updateState.current}，安装来源有新版本。` }}
       </p>
-      <section v-for="note in updateState.notes" :key="note.version" class="bbs-update-note">
-        <h4 class="bbs-update-version">v{{ note.version }}</h4>
-        <template v-for="(line, i) in note.lines" :key="i">
-          <p :class="line.bullet ? 'bbs-update-bullet' : 'bbs-update-para'">{{ line.text }}</p>
-        </template>
-      </section>
-      <p v-if="!updateState.notes.length" class="bbs-field-hint">
-        没能读取更新说明（可能是浏览器连不上 GitHub），不影响更新。<a v-if="updateState.changelogUrl" :href="updateState.changelogUrl" target="_blank" rel="noopener noreferrer">在 GitHub 上查看更新记录</a>
+      <UpdateNotes :notes="updateState.notes" />
+      <p v-if="updateState.notesLoading && !updateState.notes.length" class="bbs-field-hint">正在读取更新说明…</p>
+      <p v-else-if="!updateState.notes.length" class="bbs-field-hint">
+        没能读取更新说明（可能是网络连不上），不影响更新；更新完成后会显示这次更新的内容。<a v-if="updateState.changelogUrl" :href="updateState.changelogUrl" target="_blank" rel="noopener noreferrer">在 GitHub 上查看更新记录</a>
       </p>
       <p class="bbs-field-hint">由酒馆从本扩展的安装来源拉取新版本，完成后自动刷新酒馆页面。聊天记录、记忆和设置都不受影响。</p>
       <div v-if="updateState.error" class="bbs-callout is-danger" role="alert">{{ updateState.error }}</div>
@@ -46,28 +44,19 @@ async function update() {
       </button>
     </template>
   </ModalShell>
+
+  <ModalShell :open="updateState.updatedDialogOpen" :title="`棱镜宝书已更新到 v${updateState.current}`" close-label="知道了" @close="closeUpdatedDialog">
+    <div class="bbs-update">
+      <p class="bbs-update-versions">从 v{{ updateState.updatedFrom }} 更新到 v{{ updateState.current }}，这次更新的内容：</p>
+      <UpdateNotes :notes="updateState.updatedNotes" />
+    </div>
+    <template #footer>
+      <button class="bbs-btn bbs-btn-primary" type="button" @click="closeUpdatedDialog">知道了</button>
+    </template>
+  </ModalShell>
 </template>
 
 <style scoped>
 .bbs-update { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .bbs-update-versions { margin: 0; font-size: 14px; font-weight: 600; color: var(--bbs-ink); }
-.bbs-update-note {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 10px 12px;
-  border: 1px solid var(--bbs-line);
-  border-radius: 10px;
-}
-.bbs-update-version { margin: 0 0 2px; font-size: 13px; color: var(--bbs-ink); }
-.bbs-update-para,
-.bbs-update-bullet {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.7;
-  color: var(--bbs-ink-soft);
-  overflow-wrap: anywhere;
-}
-.bbs-update-bullet { position: relative; padding-left: 14px; }
-.bbs-update-bullet::before { content: '•'; position: absolute; left: 2px; color: var(--bbs-ink-muted); }
 </style>

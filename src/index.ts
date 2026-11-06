@@ -193,8 +193,8 @@ function bindMemoryWhenReady(attempt = 0) {
       bindFloorRecall();
       // 记录冲突的连续性提醒:回复到达后标为已提醒
       bindContinuityNote();
-      // 插件内更新并刷新后提示一次结果;再在后台检查更新(由酒馆对安装目录 git fetch,失败静默,不阻断启动)
-      announceUpdated();
+      // 插件内更新并刷新后,从本机 README 弹出这次的更新内容;再在后台检查更新(由酒馆对安装目录 git fetch,失败静默,不阻断启动)
+      void announceUpdated();
       void checkForUpdate();
       console.log('[棱镜宝书] 启动链绑定完成');
     } catch (e) {

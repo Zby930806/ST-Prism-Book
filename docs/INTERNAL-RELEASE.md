@@ -13,7 +13,7 @@
 
 ## 安装和更新
 
-在酒馆扩展面板中点击「安装扩展」，填入仓库地址。插件启动时请酒馆对安装目录执行 git fetch（/api/extensions/version），落后于安装来源时，打开宝书弹出更新窗口；确认后调用酒馆的扩展更新接口（/api/extensions/update，即 git pull），成功后自动刷新页面。更新窗口里的版本号和说明从安装来源的 GitHub 仓库读取 manifest.json 和 README 中「X.Y.Z 的改动」一节，所以每次发布都要在 README 写这一节。也可以在「管理扩展」中更新。manifest 中 auto_update 为 true：打开酒馆的「在扩展更新时通知」后，有新版本时酒馆会提示；酒馆自身升级时按酒馆设置顺带更新本扩展。更新只从本扩展的安装来源拉取；安装来源是原版仓库时插件不提示、不更新，插件自身不访问原版的更新源。手动安装见 README。原版和本版共用同一份数据、宏和事件，不能同时启用。
+在酒馆扩展面板中点击「安装扩展」，填入仓库地址。插件启动时请酒馆对安装目录执行 git fetch（/api/extensions/version），落后于安装来源时，打开宝书弹出更新窗口；确认后调用酒馆的扩展更新接口（/api/extensions/update，即 git pull），成功后自动刷新页面。更新窗口里的版本号和说明从安装来源的 GitHub 仓库读取 manifest.json 和 README 中「X.Y.Z 的改动」一节，所以每次发布都要在 README 写这一节；GitHub 连不上时改从 jsDelivr 读同样两个文件。推送后清一次 jsDelivr 的缓存（依次打开 https://purge.jsdelivr.net/gh/Zby930806/ST-Prism-Book@main/README.md 与同一路径下的 manifest.json，返回的 JSON 中 status 为 finished 即可），否则 12 小时内读到的可能还是旧说明。在宝书里更新并刷新后，插件从本机新装好的 README 列出这次更新的内容。也可以在「管理扩展」中更新。manifest 中 auto_update 为 true：打开酒馆的「在扩展更新时通知」后，有新版本时酒馆会提示；酒馆自身升级时按酒馆设置顺带更新本扩展。更新只从本扩展的安装来源拉取；安装来源是原版仓库时插件不提示、不更新，插件自身不访问原版的更新源。手动安装见 README。原版和本版共用同一份数据、宏和事件，不能同时启用。
 
 接续旧聊天前参阅 [旧记忆接续说明](LEGACY-COMPATIBILITY.md)：已知的 V3 格式直接读取，可确定对应关系的 V2 格式在本地转换，无法识别的格式只读保护。升级无需全部重新摘要。
 

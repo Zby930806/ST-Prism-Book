@@ -1,15 +1,17 @@
 /**
  * 检查与安装更新(做法同酒馆助手):
  * - 检查:请酒馆服务器对本扩展的安装目录执行 git fetch(/api/extensions/version),落后于安装来源时为「有新版本」。
- *   与酒馆「管理扩展」走同一条路,浏览器连不上 GitHub 也能查;新版本号和更新说明另从 GitHub 读取,读不到只提示有新版本。
+ *   与酒馆「管理扩展」走同一条路,浏览器连不上 GitHub 也能查;新版本号和更新说明另从 GitHub 读取,
+ *   连不上时改走 jsDelivr,都读不到只提示有新版本。
  * - 提示:设置导航亮角标、设置页显示「更新」;打开宝书时弹出更新窗口,每次打开酒馆最多自动弹一次。
- * - 安装:确认后调用酒馆的扩展更新接口(/api/extensions/update,即 git pull),成功后自动刷新酒馆,刷新后提示一次结果。
+ * - 安装:确认后调用酒馆的扩展更新接口(/api/extensions/update,即 git pull),成功后自动刷新酒馆;
+ *   刷新后从本机新装好的 README 读出这次的更新内容弹出来,不依赖外网。
  * 安装来源是原版柏宝书仓库时不提示、不更新,以免把本扩展换成原版;不是用仓库地址安装的(手动复制)无法在插件内更新。
  */
 import { reactive } from 'vue';
 import { getContext } from '@/st/context';
 import { toast } from '@/st/toast';
-import { PLUGIN_VERSION } from '@/version';
+import { PLUGIN_VERSION, versionedAssetUrl } from '@/version';
 
 export const INTERNAL_UPDATE_NOTICE = '有新版本时，设置页显示「更新」，打开宝书会弹出更新窗口，更新完成后自动刷新酒馆；也可以在酒馆的「管理扩展」里更新。只从本扩展的安装来源更新，不会装上原版柏宝书的更新。';
 
@@ -21,7 +23,7 @@ export interface UpdateNote {
 
 export const updateState = reactive({
   current: PLUGIN_VERSION,
-  /** 新版本号;读不到 GitHub 时为空 */
+  /** 新版本号;读不到时为空 */
   latest: '',
   /** 安装来源有新的提交,可以更新 */
   available: false,
@@ -30,12 +32,18 @@ export const updateState = reactive({
   updating: false,
   /** 比当前版本新的更新说明,新的在前 */
   notes: [] as UpdateNote[],
+  /** 正在读取更新说明 */
+  notesLoading: false,
   /** 在网页上查看完整更新记录的地址;安装来源不是 GitHub 时为空 */
   changelogUrl: '',
   /** 更新窗口是否打开 */
   dialogOpen: false,
   /** 上次更新失败的原因,显示在更新窗口里 */
   error: '',
+  /** 刚在宝书里更新完:更新前的版本号和这次的更新内容(读本机 README),显示「更新完成」窗口 */
+  updatedFrom: '',
+  updatedNotes: [] as UpdateNote[],
+  updatedDialogOpen: false,
 });
 
 /** available 有新版本;up-to-date 已是最新;unsupported 不能在插件内更新;failed 这次没查成(网络等),保留上次结论。 */
@@ -145,31 +153,57 @@ async function findInstall(): Promise<Install | null> {
   return { name, global: hit.type === 'global' };
 }
 
-/** 读一个文本文件;失败、超时时返回空串(只用于展示,不影响能否更新)。 */
-async function fetchText(url: string): Promise<string> {
+/** 读一个文本文件;失败、超时时返回空串(只用于展示,不影响能否更新)。bust 为 true 时加时间戳,不用浏览器缓存。 */
+async function fetchText(url: string, bust = true): Promise<string> {
   try {
-    const resp = await fetchWithTimeout(`${url}?t=${Date.now()}`, { method: 'GET', cache: 'no-store' }, 8_000);
+    const target = bust ? `${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}` : url;
+    const resp = await fetchWithTimeout(target, { method: 'GET', cache: 'no-store' }, 6_000);
     return resp.ok ? await resp.text() : '';
   } catch {
     return '';
   }
 }
 
-/** 从安装来源的 GitHub 仓库读新版本号和更新说明;不是 GitHub 或读不到时留空。 */
+/**
+ * 读新版本号和更新说明的线路,依次尝试:GitHub 原始文件,连不上再走 jsDelivr 的两个入口(国内多数能访问)。
+ * jsDelivr 对分支最多缓存 12 小时,发布后要清缓存(见 docs/INTERNAL-RELEASE.md);读到的旧内容只会少列几条说明。
+ */
+export function releaseFileBases(repo: string, ref: string): string[] {
+  return [
+    `https://raw.githubusercontent.com/${repo}/${ref}/`,
+    `https://cdn.jsdelivr.net/gh/${repo}@${ref}/`,
+    `https://fastly.jsdelivr.net/gh/${repo}@${ref}/`,
+  ];
+}
+
+function manifestVersion(text: string): string {
+  try {
+    return String((JSON.parse(text) as { version?: unknown }).version ?? '').trim();
+  } catch {
+    return '';
+  }
+}
+
+/** 从安装来源的 GitHub 仓库读新版本号和更新说明;不是 GitHub 或各条线路都读不到时留空。 */
 async function loadReleaseInfo(remoteUrl: string, branch: string): Promise<void> {
   const repo = githubRepoOf(remoteUrl);
   const ref = branch.split('/').map(encodeURIComponent).join('/');
   updateState.changelogUrl = repo ? `https://github.com/${repo}/blob/${ref}/CHANGELOG.md` : '';
   if (!repo) return;
-  const base = `https://raw.githubusercontent.com/${repo}/${ref}/`;
-  const [manifest, readme] = await Promise.all([fetchText(base + 'manifest.json'), fetchText(base + 'README.md')]);
+  updateState.notesLoading = true;
   try {
-    const version = String((JSON.parse(manifest) as { version?: unknown }).version ?? '').trim();
-    if (version) updateState.latest = version;
-  } catch {
-    /* 读不到版本号时只提示有新版本 */
+    for (const base of releaseFileBases(repo, ref)) {
+      const [readme, manifest] = await Promise.all([fetchText(base + 'README.md'), fetchText(base + 'manifest.json')]);
+      if (!readme) continue;
+      updateState.notes = parseUpdateNotes(readme, PLUGIN_VERSION);
+      // 缓存里的旧 manifest 版本号不比当前新时不显示
+      const latest = manifestVersion(manifest);
+      if (latest && isNewerVersion(latest, PLUGIN_VERSION)) updateState.latest = latest;
+      return;
+    }
+  } finally {
+    updateState.notesLoading = false;
   }
-  if (readme) updateState.notes = parseUpdateNotes(readme, PLUGIN_VERSION);
 }
 
 function noUpdate(result: UpdateCheckResult): UpdateCheckResult {
@@ -267,8 +301,16 @@ export async function performUpdate(): Promise<'updated' | 'up-to-date'> {
   }
 }
 
-/** 插件内更新并自动刷新后,提示一次更新结果。启动时调用。 */
-export function announceUpdated(): void {
+/** 本机 README 的地址:扩展目录下的文件由酒馆直接提供,加上版本号免得浏览器拿到旧缓存。 */
+function localReadmeUrl(): string {
+  return versionedAssetUrl('../README.md', import.meta.url);
+}
+
+/**
+ * 插件内更新并自动刷新后调用(启动时):从本机新装好的 README 读出比旧版本新的「X.Y.Z 的改动」,
+ * 弹出「更新完成」窗口;没有新内容或读不到时只提示一句。读的是本机文件,不依赖外网。
+ */
+export async function announceUpdated(): Promise<void> {
   let from: string | null;
   try {
     from = localStorage.getItem(UPDATED_FROM_KEY);
@@ -277,7 +319,18 @@ export function announceUpdated(): void {
     return;
   }
   if (from === null) return;
+  const notes = from !== PLUGIN_VERSION ? parseUpdateNotes(await fetchText(localReadmeUrl(), false), from) : [];
+  if (notes.length) {
+    updateState.updatedFrom = from;
+    updateState.updatedNotes = notes;
+    updateState.updatedDialogOpen = true;
+    return;
+  }
   toast(from !== PLUGIN_VERSION ? `棱镜宝书已更新到 v${PLUGIN_VERSION}。` : '棱镜宝书已更新。', 'success');
+}
+
+export function closeUpdatedDialog(): void {
+  updateState.updatedDialogOpen = false;
 }
 
 let autoShown = false;

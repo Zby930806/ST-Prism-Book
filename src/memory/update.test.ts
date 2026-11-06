@@ -44,21 +44,30 @@ interface Routes {
   updateStatus?: number;
   /** GitHub 上的文件；为 null 时模拟连不上 GitHub */
   raw?: Record<string, string> | null;
+  /** jsDelivr 上的文件；不填或为 null 时模拟连不上 */
+  jsdelivr?: Record<string, string> | null;
+  /** 本机扩展目录里的 README；不填时读不到 */
+  localReadme?: string;
 }
 
-/** 按地址模拟酒馆的扩展接口与 GitHub 上的文件,返回 fetch 的 mock 以便检查请求。 */
+const fileName = (url: string) => url.replace(/\?.*$/, '').split('/').pop() ?? '';
+/** 模拟一个文件来源:files 为 null 时连不上,没有这个文件时 404。 */
+function serve(files: Record<string, string> | null | undefined, url: string): Response {
+  if (!files) throw new TypeError('Failed to fetch');
+  const body = files[fileName(url)];
+  return body === undefined ? new Response('', { status: 404 }) : new Response(body);
+}
+
+/** 按地址模拟酒馆的扩展接口、GitHub 与 jsDelivr 上的文件和本机 README,返回 fetch 的 mock 以便检查请求。 */
 function stubFetch(routes: Routes) {
   const fetch = vi.fn(async (url: string, _init?: RequestInit) => {
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
     if (url === '/api/extensions/discover') return json(routes.discover ?? [{ type: 'local', name: 'third-party/ST-Prism-Book' }]);
     if (url === '/api/extensions/version') return json(routes.version ?? {}, routes.versionStatus ?? 200);
     if (url === '/api/extensions/update') return json(routes.update ?? {}, routes.updateStatus ?? 200);
-    if (url.startsWith('https://raw.githubusercontent.com/')) {
-      if (routes.raw === null) throw new TypeError('Failed to fetch');
-      const file = url.replace(/\?.*$/, '').split('/').pop() ?? '';
-      const body = routes.raw?.[file];
-      return body === undefined ? new Response('', { status: 404 }) : new Response(body);
-    }
+    if (url.startsWith('https://raw.githubusercontent.com/')) return serve(routes.raw === undefined ? {} : routes.raw, url);
+    if (/^https:\/\/(cdn|fastly)\.jsdelivr\.net\/gh\//.test(url)) return serve(routes.jsdelivr, url);
+    if (!url.startsWith('https://') && fileName(url) === 'README.md') return serve(routes.localReadme === undefined ? {} : { 'README.md': routes.localReadme }, url);
     throw new Error('unexpected request ' + url);
   });
   vi.stubGlobal('fetch', fetch);
@@ -148,6 +157,30 @@ describe('检查更新', () => {
       'https://raw.githubusercontent.com/Zby930806/ST-Prism-Book/main/manifest.json',
       'https://raw.githubusercontent.com/Zby930806/ST-Prism-Book/main/README.md',
     ]));
+    // GitHub 读到了就不再走备用线路
+    expect(fetch.mock.calls.some(([url]) => url.includes('jsdelivr'))).toBe(false);
+    expect(updateState.notesLoading).toBe(false);
+  });
+
+  it('GitHub 连不上时改走 jsDelivr 读版本号和更新说明', async () => {
+    const fetch = stubFetch({ version: behind, raw: null, jsdelivr: { 'manifest.json': JSON.stringify({ version: '99.0.0' }), 'README.md': README } });
+    const { checkForUpdate, updateState } = await load();
+    expect(await checkForUpdate()).toBe('available');
+    expect(updateState).toMatchObject({ available: true, latest: '99.0.0' });
+    expect(updateState.notes.map(n => n.version)).toEqual(['99.0.0', '98.1.0']);
+    const sources = fetch.mock.calls.map(([url]) => url).filter(url => url.endsWith('README.md') || url.includes('README.md?'));
+    expect(sources.map(url => url.replace(/\?.*$/, ''))).toEqual([
+      'https://raw.githubusercontent.com/Zby930806/ST-Prism-Book/main/README.md',
+      'https://cdn.jsdelivr.net/gh/Zby930806/ST-Prism-Book@main/README.md',
+    ]);
+  });
+
+  it('jsDelivr 缓存里还是旧版本时，不显示旧的版本号，也不列当前及更早版本的说明', async () => {
+    const stale = README.replace(/## 99\.0\.0[\s\S]*?(?=## \d)/, '').replace(/## 98\.1\.0[\s\S]*?(?=## \d)/, '');
+    stubFetch({ version: behind, raw: null, jsdelivr: { 'manifest.json': JSON.stringify({ version: PLUGIN_VERSION }), 'README.md': stale } });
+    const { checkForUpdate, updateState } = await load();
+    expect(await checkForUpdate()).toBe('available');
+    expect(updateState).toMatchObject({ available: true, latest: '', notes: [] });
   });
 
   it('装在所有用户共用的目录时按 global 检查', async () => {
@@ -158,12 +191,15 @@ describe('检查更新', () => {
     expect(JSON.parse(String(versionCall[1]!.body))).toEqual({ extensionName: 'ST-Prism-Book', global: true });
   });
 
-  it('浏览器连不上 GitHub 时仍提示有新版本，只是没有版本号和更新说明', async () => {
-    stubFetch({ version: behind, raw: null });
+  it('GitHub 和 jsDelivr 都连不上时仍提示有新版本，只是没有版本号和更新说明', async () => {
+    const fetch = stubFetch({ version: behind, raw: null, jsdelivr: null });
     const { checkForUpdate, updateState } = await load();
     expect(await checkForUpdate()).toBe('available');
-    expect(updateState).toMatchObject({ available: true, latest: '', notes: [] });
+    expect(updateState).toMatchObject({ available: true, latest: '', notes: [], notesLoading: false });
     expect(updateState.changelogUrl).toContain('github.com/Zby930806/ST-Prism-Book');
+    expect(fetch.mock.calls.filter(([url]) => url.includes('README.md')).map(([url]) => new URL(url).host)).toEqual([
+      'raw.githubusercontent.com', 'cdn.jsdelivr.net', 'fastly.jsdelivr.net',
+    ]);
   });
 
   it.each([
@@ -241,15 +277,41 @@ describe('安装更新', () => {
     expect(location.reload).not.toHaveBeenCalled();
   });
 
-  it('刷新后提示一次更新结果', async () => {
-    storage.set('bbs.update.from', '0.0.1');
-    const first = await load();
-    first.announceUpdated();
-    expect(first.toast).toHaveBeenCalledWith(`棱镜宝书已更新到 v${PLUGIN_VERSION}。`, 'success');
+  it('刷新后从本机 README 列出这次更新的内容（比旧版本新的各节），不依赖外网', async () => {
+    storage.set('bbs.update.from', '98.0.0');
+    const fetch = stubFetch({ raw: null, jsdelivr: null, localReadme: README });
+    const { announceUpdated, toast, updateState } = await load();
+    await announceUpdated();
+    expect(updateState).toMatchObject({ updatedDialogOpen: true, updatedFrom: '98.0.0' });
+    expect(updateState.updatedNotes.map(n => n.version)).toEqual(['99.0.0', '98.1.0']);
+    expect(toast).not.toHaveBeenCalled();
     expect(storage.has('bbs.update.from')).toBe(false);
-    const second = await load();
-    second.announceUpdated();
-    expect(second.toast).not.toHaveBeenCalled();
+    // 读的是扩展目录里的 README，按版本号取，不加时间戳
+    const [url] = fetch.mock.calls.map(([u]) => u);
+    expect(url).toMatch(new RegExp(`/README\\.md\\?ver=${PLUGIN_VERSION.replaceAll('.', '\\.')}$`));
+    expect(url.startsWith('https://')).toBe(false);
+  });
+
+  it.each([
+    ['README 里没有比旧版本新的内容', '99.0.0', README, `棱镜宝书已更新到 v${PLUGIN_VERSION}。`],
+    ['读不到本机 README', '0.0.1', undefined, `棱镜宝书已更新到 v${PLUGIN_VERSION}。`],
+    ['版本号没变（只更新了文档等）', PLUGIN_VERSION, README, '棱镜宝书已更新。'],
+  ] as const)('刷新后：%s时只提示一句', async (_name, from, localReadme, message) => {
+    storage.set('bbs.update.from', from);
+    stubFetch({ localReadme });
+    const { announceUpdated, toast, updateState } = await load();
+    await announceUpdated();
+    expect(toast).toHaveBeenCalledWith(message, 'success');
+    expect(updateState.updatedDialogOpen).toBe(false);
+  });
+
+  it('没有在宝书里更新过时，刷新后什么也不提示', async () => {
+    const fetch = stubFetch({ localReadme: README });
+    const { announceUpdated, toast, updateState } = await load();
+    await announceUpdated();
+    expect(toast).not.toHaveBeenCalled();
+    expect(updateState.updatedDialogOpen).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
 
@@ -274,5 +336,12 @@ describe('更新窗口', () => {
     updateState.updating = true;
     closeUpdateDialog();
     expect(updateState.dialogOpen).toBe(true);
+  });
+
+  it('「更新完成」窗口可以关闭', async () => {
+    const { closeUpdatedDialog, updateState } = await load();
+    updateState.updatedDialogOpen = true;
+    closeUpdatedDialog();
+    expect(updateState.updatedDialogOpen).toBe(false);
   });
 });
