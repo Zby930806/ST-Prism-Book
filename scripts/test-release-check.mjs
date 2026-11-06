@@ -46,7 +46,7 @@ await test('取出更新说明的字面量', () => {
 
 await test('当前源码里的更新说明能取出', async () => {
   const notice = extractUpdateNotice(await readFile(path.join(root, 'src/memory/update.ts'), 'utf8'));
-  assert.ok(notice.includes('插件自己不检查更新'), notice);
+  assert.ok(notice.includes('不会装上原版柏宝书的更新'), notice);
 });
 
 await test('提示词导出一致（含只差换行）时不报告', () => {

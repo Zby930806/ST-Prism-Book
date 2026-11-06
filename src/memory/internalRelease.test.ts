@@ -1,22 +1,13 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { checkForUpdate, performUpdate, updateState, INTERNAL_UPDATE_NOTICE } from './update';
+import { INTERNAL_UPDATE_NOTICE } from './update';
 const read = (file: string) => readFileSync(new URL('../../' + file, import.meta.url), 'utf8');
-afterEach(() => { vi.unstubAllGlobals(); updateState.latest = ''; updateState.available = false; updateState.checking = false; });
 describe('棱镜宝书内部发行约束', () => {
-  it.each([false, true])('更新检查 force=%s 不发起请求', async force => {
-    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
-    await checkForUpdate(force); expect(fetch).not.toHaveBeenCalled();
-  });
-  it('更新检查清除过期的可升级状态', async () => {
-    updateState.latest = '9.9.9'; updateState.available = true; updateState.checking = true;
-    await checkForUpdate();
-    expect(updateState.latest).toBe(''); expect(updateState.available).toBe(false); expect(updateState.checking).toBe(false);
-  });
-  it('不能调用旧一键更新入口', async () => {
-    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
-    await expect(performUpdate()).rejects.toThrow(INTERNAL_UPDATE_NOTICE);
-    expect(fetch).not.toHaveBeenCalled();
+  it('插件内更新只从安装来源拉取，不访问原版柏宝书的更新源（检查与更新的行为见 update.test.ts）', () => {
+    const source = read('src/memory/update.ts');
+    expect(source).not.toContain('raw.githubusercontent.com/baibai-git');
+    expect(source).toContain('/api/extensions/update');
+    expect(INTERNAL_UPDATE_NOTICE).toContain('不会装上原版柏宝书的更新');
   });
   it('发布标识一致；酒馆从本仓库提示和更新（auto_update），插件自身不访问上游', () => {
     const pkg = JSON.parse(read('package.json')); const manifest = JSON.parse(read('manifest.json'));
@@ -39,8 +30,9 @@ describe('棱镜宝书内部发行约束', () => {
   it('设置页显示版本和更新方式并保留原作出处', () => {
     const settings = read('src/pages/settings/index.vue');
     expect(settings).not.toContain('内部版'); expect(settings).toContain('INTERNAL_UPDATE_NOTICE');
-    expect(INTERNAL_UPDATE_NOTICE).toContain('管理扩展'); expect(INTERNAL_UPDATE_NOTICE).toContain('在扩展更新时通知');
-    expect(settings).not.toContain('checkForUpdate');
+    expect(INTERNAL_UPDATE_NOTICE).toContain('管理扩展'); expect(INTERNAL_UPDATE_NOTICE).toContain('自动刷新酒馆');
+    expect(settings).toContain('checkForUpdate(true)'); expect(settings).toContain('openUpdateDialog');
+    expect(read('src/App.vue')).toContain('<UpdateDialog />');
     expect(read('NOTICE.md')).toContain('https://github.com/baibai-git/ST-BaiBai-Book');
     expect(read('NOTICE.md')).toContain('不重新许可第三方代码');
   });

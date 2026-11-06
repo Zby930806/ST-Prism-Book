@@ -5,11 +5,10 @@
  * 卡片默认收起；「注入设置」在时间标签提示词超出预算时自动展开（见 InjectionCard）。
  */
 import './settings.css';
-import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import Icon from '@/components/Icon.vue';
 import PageHeader from '@/components/PageHeader.vue';
 import { apiSettings } from '@/api/settings';
-import { INTERNAL_UPDATE_NOTICE, performUpdate, updateState } from '@/memory/update';
+import { checkForUpdate, INTERNAL_UPDATE_NOTICE, openUpdateDialog, updateState } from '@/memory/update';
 import { toast } from '@/st/toast';
 import { ref, useId } from 'vue';
 import ApiChannelsCard from './cards/ApiChannelsCard.vue';
@@ -32,21 +31,13 @@ import RestoreHiddenFloors from './RestoreHiddenFloors.vue';
 /* 总开关：读屏名称固定为功能名，开关状态由 aria-checked 表达，说明文字作为描述。 */
 const masterDescId = useId();
 
-/* —— 检测更新:版本区块 + 确认弹窗 —— */
-const updateConfirmOpen = ref(false);
-// 插件不触发远程更新检查，更新由酒馆的「管理扩展」完成。
-function openUpdateConfirm() {
-  if (updateState.available) updateConfirmOpen.value = true;
-}
-async function confirmUpdate() {
-  updateConfirmOpen.value = false;
-  try {
-    await performUpdate();
-    // performUpdate 成功后会自动刷新页面;走到这里通常是已触发刷新倒计时
-    toast('更新成功，正在刷新页面…', 'success');
-  } catch (e) {
-    toast(`更新失败：${e instanceof Error ? e.message : String(e)}`, 'error');
-  }
+/* —— 版本与更新：有新版本时「更新」打开更新窗口（App 上的 UpdateDialog）；没有时可以手动检查一次 —— */
+async function checkUpdateNow() {
+  const result = await checkForUpdate(true);
+  if (result === 'available') openUpdateDialog();
+  else if (result === 'up-to-date') toast(`已经是最新版本 v${updateState.current}。`, 'success');
+  else if (result === 'unsupported') toast('这份棱镜宝书不是用仓库地址安装的（例如手动复制的文件），不能在宝书里更新。请在酒馆的「管理扩展」里删除后，用仓库地址重新安装。', 'warning');
+  else toast('检查更新失败：酒馆服务器可能连不上 GitHub，可以稍后再试。', 'error');
 }
 
 /* 设置目录：只在页内跳转，不改配置。 */
@@ -82,9 +73,17 @@ function goToSettingsGroup(id: string) {
             class="bbs-btn bbs-btn-primary bbs-btn-sm"
             type="button"
             :disabled="updateState.updating"
-            :title="'更新到 v' + updateState.latest"
-            @click="openUpdateConfirm"
+            :title="updateState.latest ? '更新到 v' + updateState.latest : '更新到最新版本'"
+            @click="openUpdateDialog"
           >{{ updateState.updating ? '更新中…' : '更新' }}</button>
+          <button
+            v-else
+            class="bbs-btn bbs-btn-sm"
+            type="button"
+            :disabled="updateState.checking"
+            title="让酒馆检查本扩展的安装来源有没有新版本"
+            @click="checkUpdateNow"
+          >{{ updateState.checking ? '检查中…' : '检查更新' }}</button>
         </div>
       </template>
     </PageHeader>
@@ -182,19 +181,6 @@ function goToSettingsGroup(id: string) {
       </div>
     </div>
     <p class="prism-settings-footnote">{{ INTERNAL_UPDATE_NOTICE }} 原作：柏柏（ST-BaiBai-Book）。</p>
-
-    <!-- ===== 更新确认弹窗 ===== -->
-    <ConfirmDialog
-      v-model:open="updateConfirmOpen"
-      title="发现新版本"
-      confirm-text="更新并刷新"
-      busy-text="更新中…"
-      :busy="updateState.updating"
-      @confirm="confirmUpdate"
-    >
-      当前版本 v{{ updateState.current || '—' }}，最新版本 v{{ updateState.latest }}。<br />
-      是否立即更新？更新完成后将自动刷新页面。
-    </ConfirmDialog>
   </section>
 </template>
 

@@ -7,6 +7,8 @@ import { PLUGIN_VERSION } from '@/version';
 import NavBar from '@/components/NavBar.vue';
 import FloatingOrb from '@/components/FloatingOrb.vue';
 import RecallPeek from '@/components/RecallPeek.vue';
+import UpdateDialog from '@/components/UpdateDialog.vue';
+import { showUpdateDialogOnce, updateState } from '@/memory/update';
 import { getPage } from '@/pages/registry';
 import { closeBook, cycleTheme, lastOpenedAt, modalHost, THEMES, ui } from '@/state/ui';
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
@@ -38,6 +40,8 @@ const { onDialogKeydown } = useDialogFocus(windowEl, () => ui.open, closeBook);
 // 返回键（安卓返回键、浏览器后退）先关最上层的弹窗、菜单，最后关宝书窗口；全部关掉后恢复浏览器默认行为
 useBackLayer(() => ui.open, closeBook);
 watch(() => ui.activePage, async () => { await nextTick(); bodyEl.value?.scrollTo({ top: 0 }); });
+// 有新版本时，打开宝书弹出更新窗口（每次打开酒馆最多自动弹一次）；打开宝书时还没查完的，查到后再弹
+watch(() => ui.open && updateState.available, show => { if (show) showUpdateDialogOnce(); }, { immediate: true });
 
 // —— 遮罩点击关闭:仅当按下与松开都在遮罩本身。
 // 避免:1) 移动端打开手势的合成 click 穿透秒关;2) 窗内按下拖到窗外误关。
@@ -103,6 +107,8 @@ const windowStyle = computed(() => {
     <FloatingOrb v-if="ui.showOrb" />
     <!-- 召回速览:从快捷回复栏的「召回」按钮弹出,不打开宝书也能看上次召回了什么 -->
     <RecallPeek />
+    <!-- 更新窗口:有新版本时打开宝书自动弹出,设置页的「更新」也打开它 -->
+    <UpdateDialog />
     <Transition name="bbs-fade">
       <div
         v-if="ui.open"

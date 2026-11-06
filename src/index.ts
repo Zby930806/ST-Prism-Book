@@ -15,7 +15,7 @@ import { bindContinuityNote, prepareContinuityNote } from '@/memory/continuity';
 import { refreshInjection } from '@/memory/inject';
 import { syncTimeTagRegex } from '@/memory/timeTag';
 import { bindChatLifecycle } from '@/memory/store';
-import { checkForUpdate } from '@/memory/update';
+import { announceUpdated, checkForUpdate } from '@/memory/update';
 import App from '@/App.vue';
 import { vAutosize } from '@/directives/autosize';
 import { injectMenuButton } from '@/menu';
@@ -193,7 +193,8 @@ function bindMemoryWhenReady(attempt = 0) {
       bindFloorRecall();
       // 记录冲突的连续性提醒:回复到达后标为已提醒
       bindContinuityNote();
-      // 后台检测更新(实时比对本地/远端 manifest 版本;失败静默,不阻断启动)
+      // 插件内更新并刷新后提示一次结果;再在后台检查更新(由酒馆对安装目录 git fetch,失败静默,不阻断启动)
+      announceUpdated();
       void checkForUpdate();
       console.log('[棱镜宝书] 启动链绑定完成');
     } catch (e) {
