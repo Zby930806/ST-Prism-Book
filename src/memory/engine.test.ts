@@ -541,9 +541,12 @@ describe.each(['automatic', 'manual'] as const)('compression audit output (%s)',
     expect(messages.slice(-4)).toEqual([
       { role: 'system', content: expect.stringContaining('{ "summary":') },
       expect.objectContaining({ role: 'user' }),
-      { role: 'system', content: RESUMMARY_THINKING_CHECKLIST },
+      { role: 'system', content: expect.stringContaining(RESUMMARY_THINKING_CHECKLIST) },
       { role: 'assistant', content: RESUMMARY_THINKING_PREFILL },
     ]);
+    // 内置模板在核查清单末尾重申本次字数上限,紧挨着模型开始输出
+    expect(messages.at(-2)!.content.startsWith(RESUMMARY_THINKING_CHECKLIST)).toBe(true);
+    expect(messages.at(-2)!.content.slice(RESUMMARY_THINKING_CHECKLIST.length)).toMatch(/^\n本次 summary 不超过 \d+ 字（含标点）。/);
     const sourceText = level === 0 ? 'An existing summary.' : 'Earlier summary 0.';
     expect(messages.at(-3)?.content).toContain(sourceText);
     expect(messages.at(-3)?.content).toContain(`[1] ${sourceText}`);
@@ -642,7 +645,13 @@ describe.each(['automatic', 'manual'] as const)('compression audit output (%s)',
     expect(messages.at(-3)?.content).not.toMatch(/\[M\d+-P\d+\]/);
     expect(inputs.map(input => input.text)).toEqual(texts);
     expect(memory.summaries.at(-1)?.text).toBe(summary.summary);
-    expect(messages.at(-2)?.content).toBe(RESUMMARY_THINKING_CHECKLIST);
+    expect(messages.at(-2)?.content).toBe(expected.checklist);
+    // 自定义模板的篇幅以模板为准,核查清单不加字数提醒;内置模板重申的上限与规则里的一致
+    if (custom) expect(expected.checklist).toBe(RESUMMARY_THINKING_CHECKLIST);
+    else {
+      const max = level === 0 ? expected.system.match(/(\d+)-(\d+) 字为参考范围/)![2] : expected.system.match(/summary 不得超过 (\d+) 字/)![1];
+      expect(expected.checklist).toBe(`${RESUMMARY_THINKING_CHECKLIST}\n本次 summary 不超过 ${max} 字（含标点）。信息少可以更短；写超时先删低价值细节和重复过程，不删关键事实及其限定。`);
+    }
     const [main, hints] = messages.at(-3)!.content.split(SOURCE_HINTS_HEADER);
     for (const { source, text } of sources) {
       expect(main).toContain(`${source} ${text}`);

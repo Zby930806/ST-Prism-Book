@@ -14,7 +14,7 @@ import { planAutoEnrichment, readEnrichRecord, runAutoEnrichment, writeEnrichRec
 import { parseSummaryResponse, SummaryResponseError, describeDropped, type DroppedEvidence } from './summaryResponse';
 import { selectKnowledgeForSummary } from './knowledge';
 import { clearInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
-import { BATCH_SUMMARY_THINKING_CHECKLIST, buildBatchSummaryPrompt, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, sendsContentBoundary, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_CHECKLIST, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
+import { BATCH_SUMMARY_THINKING_CHECKLIST, buildBatchSummaryPrompt, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, sendsContentBoundary, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
 import { clampToTimeTags, cleanBody, explicitOpeningTime, hasStoryBody, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, latestStoryTime, markRegenerating, parseTimeRange, storyTimeValue, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import { memory, memoryWriteIssue, checkCompatibility, recomputeDerived, scheduleLeafFlush } from './store';
@@ -2671,7 +2671,7 @@ async function resummaryPass(options: ResummaryOptions = {}): Promise<{ made: nu
       messages.push(
         { role: 'system', content: prompt.system },
         { role: 'user', content: prompt.user + hints },
-        { role: 'system', content: RESUMMARY_THINKING_CHECKLIST },
+        { role: 'system', content: prompt.checklist },
         { role: 'assistant', content: RESUMMARY_THINKING_PREFILL },
       );
       // 发请求 + 解析,失败按设置重试(请求报错或 JSON 无效/缺 summary 都算失败)
@@ -2854,7 +2854,7 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
     messages.push(
       { role: 'system', content: prompt.system },
       { role: 'user', content: prompt.user + hints },
-      { role: 'system', content: RESUMMARY_THINKING_CHECKLIST },
+      { role: 'system', content: prompt.checklist },
       { role: 'assistant', content: RESUMMARY_THINKING_PREFILL },
     );
     const delta = await sendAndParse(request => { assertSourcesUnchanged(); return sender.send(request); }, messages, raw => {

@@ -31,14 +31,14 @@ export const PROMPT_METAS: PromptMeta[] = [
   {
     key: 'resummary',
     label: '总结提示词',
-    hint: '将多条楼层摘要合并为一条 L1 总结，字数由「字数档位」决定；「摘要字数」高于档位默认值时按比例放大，最多 3 倍。',
+    hint: '将多条楼层摘要合并为一条 L1 总结，字数取「摘要设置」中的「总结字数」；为 0 时由「字数档位」决定，「摘要字数」高于档位默认值时按比例放大，最多 3 倍。',
     builtin: RESUMMARY_PROMPT,
     macros: RESUMMARY_MACROS,
   },
   {
     key: 'resummary2',
     label: '二次总结提示词',
-    hint: '将多条总结向上合并一层（L1 及以上 → 更高一层）。字数按输入长度计算：详细约 40%–50%，精简约 30%–40%。',
+    hint: '将多条总结向上合并一层（L1 及以上 → 更高一层）。字数按输入长度计算：详细约 40%–50%，精简约 30%–40%，不超过「摘要设置」中的「二次总结字数」。',
     builtin: RESUMMARY2_PROMPT,
     macros: RESUMMARY2_MACROS,
   },

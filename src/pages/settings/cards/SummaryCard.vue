@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/* 摘要设置：摘要时机、摘要篇幅、全文保留范围、总结合并频率、失败重试次数、跟随主 API 时的请求参数和回看原文补全角色档案。 */
+/* 摘要设置：摘要时机、摘要与总结的篇幅、全文保留范围、总结合并频率、失败重试次数、跟随主 API 时的请求参数和回看原文补全角色档案。 */
 import BbsSelect from '@/components/BbsSelect.vue';
 import Collapsible from '@/components/Collapsible.vue';
 import { mainApiTokenState } from '@/api/client';
@@ -11,13 +11,19 @@ import {
   normalizeKeepRecent,
   normalizeMainApiMaxTokens,
   normalizeNonNegativeInt,
+  normalizeResummary2MaxChars,
+  normalizeResummaryMaxChars,
   normalizeSummaryMaxChars,
   normalizeSummaryThreshold,
+  RESUMMARY2_MAX_CHARS_MAX,
+  RESUMMARY2_MAX_CHARS_MIN,
+  RESUMMARY_MAX_CHARS_MAX,
+  RESUMMARY_MAX_CHARS_MIN,
   SUMMARY_MAX_CHARS_MAX,
   SUMMARY_MAX_CHARS_MIN,
   type Verbosity,
 } from '@/api/settings';
-import { resummaryWordsRange } from '@/memory/prompts';
+import { RESUMMARY2_AUTO_FACTOR, resummary2MaxChars, resummaryWordsRange } from '@/memory/prompts';
 import { computed } from 'vue';
 import SettingRow from '../SettingRow.vue';
 
@@ -27,11 +33,13 @@ const VERBOSITY_OPTIONS: { value: Verbosity; label: string }[] = [
 ];
 
 /* 数字输入框输完（失焦或回车）再规整：清空或填了范围外的数时回到有效值，输入过程中不打断。
-   与载入设置时的规整相同（settings.ts）；总结阈值填 1 与 0 一样不会总结，统一改成 0。 */
+   与载入设置时的规整相同（settings.ts）；总结阈值填 1 与 0 一样不会总结，统一改成 0；总结字数清空时为 0（自动）。 */
 function onSummaryMaxCharsChange() {
   apiSettings.summaryMaxChars = normalizeSummaryMaxChars(apiSettings.summaryMaxChars, apiSettings.verbosity);
 }
 const commit = {
+  resummaryMaxChars: () => { apiSettings.resummaryMaxChars = normalizeResummaryMaxChars(apiSettings.resummaryMaxChars); },
+  resummary2MaxChars: () => { apiSettings.resummary2MaxChars = normalizeResummary2MaxChars(apiSettings.resummary2MaxChars); },
   keepRecent: () => { apiSettings.keepRecent = normalizeKeepRecent(apiSettings.keepRecent); },
   leafBatchThreshold: () => { apiSettings.leafBatchThreshold = normalizeSummaryThreshold(apiSettings.leafBatchThreshold, 12); },
   leafKeepRecent: () => { apiSettings.leafKeepRecent = normalizeNonNegativeInt(apiSettings.leafKeepRecent, 3); },
@@ -43,18 +51,19 @@ const commit = {
 };
 
 /**
- * 当前总结（L1）的目标字数，直接取内置总结提示词用的值（prompts.ts 的 resummaryWordsRange）：
- * 摘要字数高于 300 时按同一比例放大，最多 3 倍；不超过 300 时不变（两档同一基准，精简档始终是详细档的一半）。
+ * 当前总结（L1）的目标字数和二次总结的字数上限，直接取内置提示词用的值（prompts.ts 的 resummaryWordsRange、resummary2MaxChars）：
+ * 总结字数为 0（自动）时按字数档位，摘要字数高于 300 时按同一比例放大，最多 3 倍；二次总结字数为 0 时取总结字数上限的 3 倍。
  */
 const resummaryRange = computed(() => {
   const { min, max } = resummaryWordsRange();
   return `${min}–${max}`;
 });
+const resummary2Cap = computed(() => resummary2MaxChars());
 </script>
 
 <template>
   <Collapsible class="prism-settings-card" title="摘要设置" :open="false">
-    <p class="prism-card-intro">摘要时机、摘要篇幅、全文保留范围、总结合并频率、失败重试次数、跟随主 API 时的请求参数和角色档案补全。</p>
+    <p class="prism-card-intro">摘要时机、摘要与总结的篇幅、全文保留范围、总结合并频率、失败重试次数、跟随主 API 时的请求参数和角色档案补全。</p>
     <SettingRow label="启用自动摘要" hint="启用后自动摘要并隐藏旧楼层，同时启用正文时间标签（剧情时间的锚点）和积压拦截（有楼层漏摘时拦截发送并提示补摘）。">
       <input v-model="apiSettings.autoSummaryEnabled" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" />
     </SettingRow>
@@ -69,7 +78,7 @@ const resummaryRange = computed(() => {
       kind="num"
       label="摘要字数"
       :hint="`写入摘要提示词，要求每楼摘要不超过该字数（含标点）。默认 300，可填 ${SUMMARY_MAX_CHARS_MIN}–${SUMMARY_MAX_CHARS_MAX}。`"
-      details="信息较少时会更短。只约束模型生成，不限制保存：模型超出或手动改长均照常保存。仅对内置摘要提示词生效。高于 300 时，总结（L1）的字数随之按比例放大，最多 3 倍，见「字数档位」。"
+      details="信息较少时会更短。只约束模型生成，不限制保存：模型超出或手动改长均照常保存。仅对内置摘要提示词生效。「总结字数」为 0（自动）时，摘要字数高于 300 会让总结（L1）的字数按比例放大，最多 3 倍，见「字数档位」。"
     >
       <input v-model.number="apiSettings.summaryMaxChars" class="bbs-input bbs-num" type="number" :min="SUMMARY_MAX_CHARS_MIN" :max="SUMMARY_MAX_CHARS_MAX" @change="onSummaryMaxCharsChange" />
     </SettingRow>
@@ -77,10 +86,26 @@ const resummaryRange = computed(() => {
       kind="num"
       as="div"
       label="字数档位"
-      :hint="`调整总结和二次总结的篇幅，仅影响内置提示词。当前总结（L1）为 ${resummaryRange} 字。`"
-      details="详细：总结 300–500 字，二次总结约为输入的 40%–50%；精简：总结 150–300 字，二次总结约为 30%–40%。「摘要字数」高于 300 时，两档的总结字数都按同一比例放大，最多 3 倍，例如摘要字数 600 时，详细档总结为 600–1000 字、精简档为 300–600 字；信息较少时可更短。已生成的总结不会重写。每楼摘要的字数由上方「摘要字数」决定。"
+      hint="调整总结和二次总结的篇幅，仅影响内置提示词。"
+      details="详细：总结 300–500 字，二次总结约为输入的 40%–50%；精简：总结 150–300 字，二次总结约为 30%–40%。总结只在「总结字数」为 0 时按档位计算：「摘要字数」高于 300 时，两档的总结字数都按同一比例放大，最多 3 倍，例如摘要字数 600 时，详细档总结为 600–1000 字、精简档为 300–600 字。二次总结不超过「二次总结字数」。信息较少时可更短。已生成的总结不会重写。每楼摘要的字数由上方「摘要字数」决定。"
     >
       <BbsSelect v-model="apiSettings.verbosity" :options="VERBOSITY_OPTIONS" class="bbs-select-narrow" aria-label="字数档位" />
+    </SettingRow>
+    <SettingRow
+      kind="num"
+      label="总结字数"
+      :hint="`要求每条总结（L1）不超过该字数（含标点）。填 0 按字数档位和摘要字数自动计算，当前为 ${resummaryRange} 字。`"
+      :details="`可填 ${RESUMMARY_MAX_CHARS_MIN}–${RESUMMARY_MAX_CHARS_MAX}。填了数值后不再随字数档位和摘要字数变化，参考下限为该值的 60%（精简档 50%），信息较少时会更短。只约束模型生成，不限制保存：模型超出或手动改长均照常保存。仅对内置总结提示词生效，自定义模板中的 {{resummary_words}} 也按此填入。已生成的总结不会重写。`"
+    >
+      <input v-model.number="apiSettings.resummaryMaxChars" class="bbs-input bbs-num" type="number" min="0" :max="RESUMMARY_MAX_CHARS_MAX" @change="commit.resummaryMaxChars" />
+    </SettingRow>
+    <SettingRow
+      kind="num"
+      label="二次总结字数"
+      :hint="`要求每条二次总结（L2 及以上）不超过该字数（含标点）。填 0 自动取总结字数上限的 ${RESUMMARY2_AUTO_FACTOR} 倍，当前为 ${resummary2Cap} 字。`"
+      :details="`可填 ${RESUMMARY2_MAX_CHARS_MIN}–${RESUMMARY2_MAX_CHARS_MAX}。二次总结的篇幅按输入长度计算（详细档约为输入的 40%–50%，精简档约为 30%–40%），超过该字数时按该字数；没有上限时，合并的总结越长，二次总结就越长。只约束模型生成，不限制保存：模型超出或手动改长均照常保存。仅对内置二次总结提示词生效，自定义模板中的 {{target_min}}、{{target_max}} 也按此填入。已生成的二次总结不会重写。`"
+    >
+      <input v-model.number="apiSettings.resummary2MaxChars" class="bbs-input bbs-num" type="number" min="0" :max="RESUMMARY2_MAX_CHARS_MAX" @change="commit.resummary2MaxChars" />
     </SettingRow>
     <SettingRow kind="num" label="保留最近 AI 消息数" hint="最近若干条 AI 回复保留全文发送；更早的楼层自动隐藏，改为发送摘要。默认 3。">
       <input v-model.number="apiSettings.keepRecent" class="bbs-input bbs-num" type="number" min="0" @change="commit.keepRecent" />
@@ -99,7 +124,7 @@ const resummaryRange = computed(() => {
     <SettingRow kind="num" label="二次总结" hint="L1 总结达到该数量时合并为一条 L2。填 0 关闭，默认 6。">
       <input v-model.number="apiSettings.resummaryThreshold" class="bbs-input bbs-num" type="number" min="0" @change="commit.resummaryThreshold" />
     </SettingRow>
-    <SettingRow kind="num" label="高层总结" hint="L2 及更高层的总结达到该数量时再向上合并一层。层级越高内容越长，建议填较小的值。填 0 关闭，默认 3。">
+    <SettingRow kind="num" label="高层总结" hint="L2 及更高层的总结达到该数量时再向上合并一层，篇幅同样不超过「二次总结字数」。填 0 关闭，默认 3。">
       <input v-model.number="apiSettings.higherResummaryThreshold" class="bbs-input bbs-num" type="number" min="0" @change="commit.higherResummaryThreshold" />
     </SettingRow>
     <SettingRow

@@ -191,6 +191,28 @@ export function normalizeSummaryMaxChars(value: unknown, verbosity: Verbosity = 
   return Math.min(SUMMARY_MAX_CHARS_MAX, Math.max(SUMMARY_MAX_CHARS_MIN, Math.round(value)));
 }
 
+/** 总结(L1)字数、二次总结(L2 及以上)字数上限的可设范围;0 表示自动(默认)。 */
+export const RESUMMARY_MAX_CHARS_MIN = 100;
+export const RESUMMARY_MAX_CHARS_MAX = 5000;
+export const RESUMMARY2_MAX_CHARS_MIN = 200;
+export const RESUMMARY2_MAX_CHARS_MAX = 10000;
+
+/** 填 0 表示自动的字数设置:缺失、非法、负数或输入框暂时为空时按 0;其余钳到可设范围内的整数。 */
+function normalizeCharsOrAuto(value: unknown, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+/** 规整总结(L1)字数:0 = 自动,其余为 100–5000 的整数。 */
+export function normalizeResummaryMaxChars(value: unknown): number {
+  return normalizeCharsOrAuto(value, RESUMMARY_MAX_CHARS_MIN, RESUMMARY_MAX_CHARS_MAX);
+}
+
+/** 规整二次总结(L2 及以上)字数上限:0 = 自动,其余为 200–10000 的整数。 */
+export function normalizeResummary2MaxChars(value: unknown): number {
+  return normalizeCharsOrAuto(value, RESUMMARY2_MAX_CHARS_MIN, RESUMMARY2_MAX_CHARS_MAX);
+}
+
 /** 召回保留轮数:0–5 的整数;缺失、非法或输入框暂时为空时按 0(关)。 */
 export function normalizeStickyTurns(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
@@ -414,6 +436,16 @@ export interface ApiSettings {
   npcEnrichAuto: boolean;
   /** 每楼摘要字数要求(含标点),写进内置摘要提示词。只是给模型的要求:写超了照常保存,不因此判失败。 */
   summaryMaxChars: number;
+  /**
+   * 每条总结(L1)的字数上限(含标点)。0 = 自动(默认):以字数档位为基准,随「摘要字数」等比放大(1–3 倍)。
+   * 填了数值就以它为上限,不再随档位和摘要字数变化。写进内置总结提示词;写超了照常保存。
+   */
+  resummaryMaxChars: number;
+  /**
+   * 每条二次总结(L2 及以上)的字数上限(含标点)。篇幅仍按输入长度的比例计算,超过这个数时取这个数。
+   * 0 = 自动(默认):总结字数上限的 3 倍。写进内置二次总结提示词;写超了照常保存。
+   */
+  resummary2MaxChars: number;
   /** 批量补摘「较早楼层合并摘要」时，一次请求的原文字数上限(清洗后);超出就分到下一次。 */
   batchMaxChars: number;
   /** 批量补摘「较早楼层合并摘要」时，一次请求最多合并的楼层数(1–30)。 */
@@ -555,6 +587,8 @@ function defaults(): ApiSettings {
     mainApiPrefill: true,
     npcEnrichAuto: true,
     summaryMaxChars: SUMMARY_MAX_CHARS_DEFAULT,
+    resummaryMaxChars: 0,
+    resummary2MaxChars: 0,
     batchMaxChars: 30000,
     batchMaxFloors: 10,
     batchFullRecent: 20,
@@ -696,6 +730,9 @@ function normalize(raw: unknown): ApiSettings {
   merged.verbosity = merged.verbosity === 'concise' ? 'concise' : 'detailed';
   // 每楼摘要字数要求:旧数据没有这个字段时按原档位推导(精简 150,其余 300),升级后篇幅不变
   merged.summaryMaxChars = normalizeSummaryMaxChars((raw as Partial<ApiSettings>).summaryMaxChars, merged.verbosity);
+  // 总结与二次总结字数:旧数据没有这两项时为 0(自动),总结篇幅与以前相同,二次总结多了自动上限
+  merged.resummaryMaxChars = normalizeResummaryMaxChars(rb.resummaryMaxChars);
+  merged.resummary2MaxChars = normalizeResummary2MaxChars(rb.resummary2MaxChars);
   // 叶子层保留条数:非负整数,缺失/非法回退默认 3(0=旧行为攒够即全压)
   merged.leafKeepRecent =
     Number.isFinite(merged.leafKeepRecent) && merged.leafKeepRecent >= 0
@@ -863,6 +900,8 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.mainApiPrefill = src.mainApiPrefill;
   target.npcEnrichAuto = src.npcEnrichAuto;
   target.summaryMaxChars = src.summaryMaxChars;
+  target.resummaryMaxChars = src.resummaryMaxChars;
+  target.resummary2MaxChars = src.resummary2MaxChars;
   target.batchMaxChars = src.batchMaxChars;
   target.batchMaxFloors = src.batchMaxFloors;
   target.batchFullRecent = src.batchFullRecent;

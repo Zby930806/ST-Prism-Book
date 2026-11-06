@@ -14,7 +14,7 @@
  *         {{protagonist_block}} {{items_block}} {{plans_block}} {{content}}
  */
 
-import { apiSettings, normalizeSummaryMaxChars, type Verbosity } from '@/api/settings';
+import { apiSettings, normalizeResummary2MaxChars, normalizeResummaryMaxChars, normalizeSummaryMaxChars, type Verbosity } from '@/api/settings';
 import { fmtLifeDetail } from './lifeDetails';
 import { fmtKnowledgeForSummary } from './knowledge';
 import { fmtNpcSummaryList, NPC_AFFINITY_FIELDS, type NpcSummaryView } from './npcRelations';
@@ -53,7 +53,7 @@ export const RESUMMARY_MACROS: PromptMacro[] = [
   { token: '{{user}}', desc: '主角名' },
   { token: '{{char}}', desc: '角色名' },
   { token: '{{content}}', desc: '待融合的多条摘要正文' },
-  { token: '{{resummary_words}}', desc: '总结目标字数范围(详细档 300-500、精简档 150-300,随「摘要字数」等比放大,最多 3 倍)' },
+  { token: '{{resummary_words}}', desc: '总结目标字数范围(设置里「总结字数」为 0 时按档位:详细 300-500、精简 150-300,随「摘要字数」等比放大,最多 3 倍)' },
 ];
 
 /** 二次总结提示词可用的宏(动态字数区间随详细/精简档位变化) */
@@ -61,8 +61,8 @@ export const RESUMMARY2_MACROS: PromptMacro[] = [
   { token: '{{user}}', desc: '主角名' },
   { token: '{{char}}', desc: '角色名' },
   { token: '{{content}}', desc: '待融合的多条上层总结正文' },
-  { token: '{{target_min}}', desc: '最低字数(详细为输入的 40%,精简为 30%)' },
-  { token: '{{target_max}}', desc: '最高字数(详细为输入的 50%,精简为 40%)' },
+  { token: '{{target_min}}', desc: '最低字数(详细为输入的 40%,精简为 30%;超过「二次总结字数」时按比例缩小)' },
+  { token: '{{target_max}}', desc: '最高字数(详细为输入的 50%,精简为 40%,不超过「二次总结字数」)' },
   { token: '{{target}}', desc: '兼容旧自定义模板:等同于最高字数 {{target_max}}' },
 ];
 
@@ -1220,7 +1220,8 @@ function fill(tpl: string, map: Record<string, string>): string {
 /**
  * 字数档位配置:详细(默认)/ 精简。总结字数基准 + 二次总结的比例区间随档位一并切换;
  * 每楼摘要的字数由设置里的「摘要字数」单独决定(见 summaryMaxChars),不跟档位走。
- * 普通总结(L1)以档位基准为准,随「摘要字数」等比放大(见 resummaryWordsRange)。
+ * 普通总结(L1)在「总结字数」为 0(自动)时以档位基准为准,随「摘要字数」等比放大;填了数值就用它(见 resummaryWordsRange)。
+ * 二次总结按输入长度的比例计算,不超过「二次总结字数」(见 resummary2Targets)。
  * 仅作用于内置模板的 {{resummary_words}} / {{target_min}} / {{target_max}} 宏;
  * {{target}} 作为旧自定义模板的兼容宏,等同于 {{target_max}}。用户自填模板里若使用这些宏也会按档位填充。
  */
@@ -1249,6 +1250,8 @@ const VERBOSITY_PROFILES: Record<Verbosity, VerbosityProfile> = {
 export const RESUMMARY_SCALE_MAX = 3;
 /** 放大倍数的基准:「摘要字数」默认值 300。两档共用,精简档始终是详细档的一半。 */
 export const RESUMMARY_SCALE_BASE = 300;
+/** 「二次总结字数」为 0(自动)时,上限取总结字数上限的这个倍数:默认设置下为 500 × 3 = 1500。 */
+export const RESUMMARY2_AUTO_FACTOR = 3;
 
 /** 取当前生效的字数档位配置(读 apiSettings.verbosity,非法值兜底详细)。 */
 function currentVerbosity(): VerbosityProfile {
@@ -1257,13 +1260,25 @@ function currentVerbosity(): VerbosityProfile {
 
 /**
  * 普通总结(L1)的参考字数范围,填进 {{resummary_words}}。
- * 倍数 k = 「摘要字数」÷ 300,限制在 1–3 之间;详细档为 round(300k)–round(500k) 字,精简档为 round(150k)–round(300k) 字。
+ * 设置里填了「总结字数」:以它为上限,下限按档位的比例(详细 60%、精简 50%),不随摘要字数变化。
+ * 为 0(自动)时,倍数 k = 「摘要字数」÷ 300,限制在 1–3 之间;详细档为 round(300k)–round(500k) 字,精简档为 round(150k)–round(300k) 字。
  * 摘要字数为默认的 300(或更少)时 k=1,两档都与旧版相同;调大每楼摘要字数后,L1 不再固定压到同样的篇幅。已有的 L1 不重写。
  */
 export function resummaryWordsRange(): { min: number; max: number } {
   const v = currentVerbosity();
+  const custom = normalizeResummaryMaxChars(apiSettings.resummaryMaxChars);
+  if (custom) return { min: Math.round(custom * v.resummaryMin / v.resummaryMax), max: custom };
   const k = Math.min(RESUMMARY_SCALE_MAX, Math.max(1, summaryMaxChars() / RESUMMARY_SCALE_BASE));
   return { min: Math.round(v.resummaryMin * k), max: Math.round(v.resummaryMax * k) };
+}
+
+/**
+ * 二次总结(L2 及以上)的字数上限:设置里填了「二次总结字数」就用它,为 0(自动)时取总结字数上限的 3 倍。
+ * 二次总结按输入长度的比例计算篇幅;没有上限时,输入的总结越长二次总结就越长,
+ * 模型写超的总结还会被下一层按比例接着放大(用 DeepSeek 时常见几千字的 L2)。
+ */
+export function resummary2MaxChars(): number {
+  return normalizeResummary2MaxChars(apiSettings.resummary2MaxChars) || resummaryWordsRange().max * RESUMMARY2_AUTO_FACTOR;
 }
 
 /**
@@ -1498,25 +1513,37 @@ ${RULE_KNOWLEDGE}`;
 
 /**
  * 二次总结字数区间:详细为内容总字数的 40%–50%,精简为 30%–40%。
+ * 最高字数不超过 resummary2MaxChars();超过时取上限,最低字数按同一比例缩小(详细 80%、精简 75%)。
  */
 export function resummary2Targets(contentLen: number): { min: number; max: number } {
   const v = currentVerbosity();
-  return {
-    min: Math.round(contentLen * v.resummary2MinRatio),
-    max: Math.round(contentLen * v.resummary2MaxRatio),
-  };
+  const min = Math.round(contentLen * v.resummary2MinRatio);
+  const max = Math.round(contentLen * v.resummary2MaxRatio);
+  const cap = resummary2MaxChars();
+  if (max <= cap) return { min, max };
+  return { min: Math.round(cap * v.resummary2MinRatio / v.resummary2MaxRatio), max: cap };
+}
+
+/**
+ * 总结、二次总结请求末尾的核查清单,紧挨着模型开始输出。用内置模板时在最后重申这次 summary 的字数上限:
+ * 篇幅只写在规则开头,中间隔着几千字的规则和材料,模型(DeepSeek 尤其明显)常常写超。自定义模板不加,篇幅以模板为准。
+ */
+function resummaryChecklist(maxChars: number): string {
+  if (maxChars <= 0) return RESUMMARY_THINKING_CHECKLIST;
+  return `${RESUMMARY_THINKING_CHECKLIST}\n本次 summary 不超过 ${maxChars} 字（含标点）。信息少可以更短；写超时先删低价值细节和重复过程，不删关键事实及其限定。`;
 }
 
 /**
  * 构造总结提示词。按层级分两套:
- *  - level<=1(L0 叶子 → L1):普通总结,字数以档位为基准、随「摘要字数」等比放大 → RESUMMARY_PROMPT。
- *  - level>=2(L1+ → 更上层):二次总结,目标字数随输入规模动态给 → RESUMMARY2_PROMPT。
+ *  - level<=1(L0 叶子 → L1):普通总结,字数取「总结字数」,为 0 时以档位为基准、随「摘要字数」等比放大 → RESUMMARY_PROMPT。
+ *  - level>=2(L1+ → 更上层):二次总结,目标字数随输入规模动态给,不超过「二次总结字数」 → RESUMMARY2_PROMPT。
  * 各自优先用对应的自定义模板,空则回退内置。字数随档位(详细/精简)切换。
+ * checklist 是请求末尾的核查清单(见 resummaryChecklist)。
  */
 export function buildResummaryPrompt(
   a: Pick<BuildArgs, 'user' | 'char' | 'content'> & { level: number },
   opts: { contentBoundary?: boolean } = {},
-): { system: string; user: string } {
+): { system: string; user: string; checklist: string } {
   const boundary = opts.contentBoundary !== false;
   const isSecond = a.level >= 2;
   const custom = isSecond
@@ -1540,11 +1567,12 @@ export function buildResummaryPrompt(
     const supplements = !boundary || custom.includes('【内容边界') ? [] : [RULE_CONTENT_BOUNDARY];
     supplements.push(RULE_ABSOLUTE_TIME_LANGUAGE);
     if (!custom.includes('【关系线保留】')) supplements.push(RULE_RELATION_MOMENTUM);
-    return { system: supplements.join('\n\n'), user: fill(custom, macros) };
+    return { system: supplements.join('\n\n'), user: fill(custom, macros), checklist: RESUMMARY_THINKING_CHECKLIST };
   }
   return {
     system: fill(isSecond ? (boundary ? RESUMMARY2_RULES : RESUMMARY2_RULES_BODY) : (boundary ? RESUMMARY_RULES : RESUMMARY_RULES_BODY), macros),
     user: fill(isSecond ? RESUMMARY2_INPUT : RESUMMARY_INPUT, macros),
+    checklist: resummaryChecklist(isSecond ? targets.max : words.max),
   };
 }
 
