@@ -995,21 +995,25 @@ export function crossedStoryDay(oldTime: string, newTime: string): boolean {
  * 副作用:每条物品变动往 mem.itemLog 追加一条带「故事内时间」的记录(leaf.time)。
  * 按楼层序重放,故 itemLog 天然时序有序;deriveMemory 末尾再截最近若干条。
  */
+/** 写成地点、其实是带在身上的说法:当作随身,不当成存放地。 */
+const ON_PERSON_PLACE = /^(?:随身|随身携带|身上|带在身上|手上|手里|怀里)$/;
+
 /**
  * 把 delta 里的随身/地点信息施加到物品上(仅在 delta 明确给了才覆盖,last-write-wins)。
- * carried=true 时清掉 location(随身物品无存放地);carried=false 时保留/采用 location。
+ * - carried=true:随身,清掉 location(同时给的 location 只是当前所在,不是存放处)。
+ * - carried=false:存放,采用给出的 location,没给则保留旧的。
+ * - 只给 location:视为放在那里,不论之前是否明确记为随身(否则明确随身过的物品放下后仍显示随身)。
+ * location 写成「随身」「身上」之类的,当作随身。
  */
 function applyPlacement(it: { carried?: boolean; location?: string }, src: ItemDelta): void {
-  if (typeof src.carried === 'boolean') {
-    it.carried = src.carried;
-    if (src.carried) it.location = undefined; // 拿在身上 → 无存放地
-  }
-  if (typeof src.location === 'string') {
-    const loc = src.location.trim();
-    if (loc) {
-      it.location = loc;
-      if (it.carried === undefined) it.carried = false; // 给了地点即视为非随身
-    }
+  const place = typeof src.location === 'string' ? src.location.trim() : '';
+  const onPerson = ON_PERSON_PLACE.test(place);
+  if (src.carried === true || (src.carried === undefined && onPerson)) {
+    it.carried = true;
+    it.location = undefined; // 拿在身上 → 无存放地
+  } else if (src.carried === false || place) {
+    it.carried = false;
+    if (place && !onPerson) it.location = place;
   }
 }
 

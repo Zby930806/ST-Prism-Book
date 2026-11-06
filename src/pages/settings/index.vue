@@ -8,9 +8,9 @@ import './settings.css';
 import Icon from '@/components/Icon.vue';
 import PageHeader from '@/components/PageHeader.vue';
 import { apiSettings } from '@/api/settings';
-import { checkForUpdate, INTERNAL_UPDATE_NOTICE, openUpdateDialog, updateState } from '@/memory/update';
+import { checkForUpdate, defaultSwitchTarget, INTERNAL_UPDATE_NOTICE, LINE_LABEL, openSwitchDialog, openUpdateDialog, spaced, updateState } from '@/memory/update';
 import { toast } from '@/st/toast';
-import { ref, useId } from 'vue';
+import { computed, ref, useId } from 'vue';
 import ApiChannelsCard from './cards/ApiChannelsCard.vue';
 import OtherApiCard from './cards/OtherApiCard.vue';
 import BasicCard from './cards/BasicCard.vue';
@@ -40,10 +40,27 @@ const UNSUPPORTED_NOTICE = {
 async function checkUpdateNow() {
   const result = await checkForUpdate(true);
   if (result === 'available') openUpdateDialog();
-  else if (result === 'up-to-date') toast(`已经是最新版本 v${updateState.current}。`, 'success');
+  else if (result === 'up-to-date') toast(upToDateNotice(), 'success');
   else if (result === 'unsupported') toast(UNSUPPORTED_NOTICE[updateState.unsupportedReason || 'manual'], 'warning');
-  else toast('检查更新失败：酒馆服务器可能连不上 GitHub，可以稍后再试。', 'error');
+  else toast('检查更新失败：酒馆服务器可能连不上安装来源，浏览器也没读到另一条线路上的版本信息，可以稍后再试。', 'error');
 }
+function upToDateNotice(): string {
+  const notice = `已经是最新版本 v${updateState.current}。`;
+  if (!updateState.sourceUnreachable) return notice;
+  const target = LINE_LABEL[defaultSwitchTarget()];
+  return notice + spaced(`酒馆服务器连不上${updateState.line ? LINE_LABEL[updateState.line] : '安装来源'}，这次是浏览器从${target}查的；有新版本时，可以改从${target}安装。`);
+}
+
+/* 更新线路：安装来源是本扩展的 GitHub 仓库或码云镜像（或酒馆连不上安装来源）时显示，可以改用另一条 */
+const lineText = computed(() => {
+  const { line, sourceUnreachable } = updateState;
+  if (!line) return '酒馆服务器连不上本扩展的安装来源。国内网络可以改用码云镜像，和 GitHub 内容相同。';
+  const state = sourceUnreachable ? '（酒馆服务器连不上）' : '';
+  return line === 'github'
+    ? `更新线路：GitHub${state}。国内网络连不上 GitHub 时，可以改用码云镜像，两边内容相同。`
+    : `更新线路：码云（国内镜像）${state}，和 GitHub 内容相同。`;
+});
+const switchButton = computed(() => spaced(`改用${LINE_LABEL[defaultSwitchTarget()]}`));
 
 /* 设置目录：只在页内跳转，不改配置。 */
 const settingsRoot = ref<HTMLElement | null>(null);
@@ -185,7 +202,13 @@ function goToSettingsGroup(id: string) {
         </section>
       </div>
     </div>
-    <p class="prism-settings-footnote">{{ INTERNAL_UPDATE_NOTICE }} 原作：柏柏（ST-BaiBai-Book）。</p>
+    <footer class="prism-settings-footnote">
+      <p v-if="updateState.line || updateState.sourceUnreachable" class="prism-update-line">
+        <span>{{ lineText }}</span>
+        <button class="bbs-btn bbs-btn-sm" type="button" :disabled="updateState.updating" @click="openSwitchDialog()">{{ switchButton }}</button>
+      </p>
+      <p>{{ INTERNAL_UPDATE_NOTICE }} 原作：柏柏（ST-BaiBai-Book）。</p>
+    </footer>
   </section>
 </template>
 
@@ -367,6 +390,9 @@ function goToSettingsGroup(id: string) {
 .prism-settings :deep(.bbs-field-hint) { font-size: 12.5px; line-height: 1.8; overflow-wrap: anywhere; }
 .prism-settings :deep(.bbs-input) { min-width: 0; max-width: 100%; }
 .prism-settings-footnote { color: var(--bbs-ink-muted); font-size: 11px; line-height: 1.8; border-top: 1px solid var(--bbs-line); padding-top: 18px; margin: 28px 0 0; }
+.prism-settings-footnote p { margin: 0; }
+/* 更新线路：说明和「改用…」按钮一行，放不下时按钮换到下一行 */
+.prism-settings-footnote .prism-update-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-bottom: 10px; font-size: 12px; color: var(--bbs-ink-soft); }
 .prism-settings :is(button, input, select, textarea):focus-visible,
 .prism-group-head h2:focus-visible {
   outline: 2px solid var(--bbs-accent);
