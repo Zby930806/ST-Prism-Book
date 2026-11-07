@@ -2742,10 +2742,22 @@ export async function checkResummary(options: ResummaryOptions = {}): Promise<nu
   return (await resummaryPass(options)).made;
 }
 
+/** 句末标点:分段处已经有它就直接相接,没有就补一个句号。 */
+const SENTENCE_END = /[。！？；…」』”）)!?;.]$/;
+
+/**
+ * 总结和二次总结要求单段文字,注入正文和再往上合并时,各条之间用空行分隔。总结篇幅加长后(1.4.12 起默认 600–1000 字),
+ * DeepSeek 常分成几段写,分出的段落会被当成另外几条没有时间的记录。这里合成一段。
+ */
+function singleParagraph(text: string): string {
+  const parts = text.split(/\s*\n+\s*/).filter(Boolean);
+  return parts.map((p, i) => (i < parts.length - 1 && !SENTENCE_END.test(p) ? `${p}。` : p)).join('');
+}
+
 /** 解析总结回复;拿不到 summary 时说清是截断、空回还是没按格式输出。 */
 function parseResummaryReply(raw: string, what: string): { summary: string } {
   const d = extractJsonObject<{ summary?: string }>(raw);
-  const summary = llmString(d?.summary);
+  const summary = singleParagraph(llmString(d?.summary));
   if (summary) return { summary };
   if (d === null) {
     const unfinished = unfinishedReply(raw);

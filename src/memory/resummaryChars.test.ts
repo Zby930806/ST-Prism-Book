@@ -40,13 +40,13 @@ const l2Budget = (content: string, level = 2) => {
   return [Number(system.match(/(\d+) 字仅作为信息充足时的参考目标/)![1]), Number(system.match(/summary 不得超过 (\d+) 字/)![1])];
 };
 const reminder = (max: number) =>
-  `${RESUMMARY_THINKING_CHECKLIST}\n本次 summary 不超过 ${max} 字（含标点）。信息少可以更短；写超时先删低价值细节和重复过程，不删关键事实及其限定。`;
+  `${RESUMMARY_THINKING_CHECKLIST}\n本次 summary 不超过 ${max} 字（含标点，原话也算在内）。信息少可以更短；写超时先删低价值细节、重复过程和次要的原话，不删关键事实及其限定。`;
 
 describe('总结（L1）字数', () => {
   it.each([
-    ['detailed', 300, [300, 500]], ['detailed', 600, [600, 1000]], ['detailed', 2000, [900, 1500]],
-    ['concise', 150, [150, 300]], ['concise', 600, [300, 600]],
-  ] as const)('填 0 时与以前相同：按字数档位，随摘要字数放大（%s，摘要字数 %i）', (verbosity, chars, words) => {
+    ['detailed', 300, [600, 1000]], ['detailed', 600, [1200, 2000]], ['detailed', 2000, [1800, 3000]],
+    ['concise', 150, [300, 600]], ['concise', 600, [600, 1200]],
+  ] as const)('填 0 时按字数档位（1.4.12 起是以前的两倍），随摘要字数放大（%s，摘要字数 %i）', (verbosity, chars, words) => {
     Object.assign(apiSettings, { verbosity, summaryMaxChars: chars });
     expect(l1Words(1)).toEqual(words);
     expect(resummaryWordsRange()).toEqual({ min: words[0], max: words[1] });
@@ -95,8 +95,8 @@ describe('二次总结（L2 及以上）字数上限', () => {
     ['默认设置', {}, 1500],
     ['精简档', { verbosity: 'concise' }, 900],
     ['摘要字数 600，总结跟着放大', { summaryMaxChars: 600 }, 3000],
-    ['总结字数 800', { resummaryMaxChars: 800 }, 2400],
-  ] as const)('填 0 时取总结字数上限的 3 倍：%s', (_name, patch, cap) => {
+    ['总结字数 800', { resummaryMaxChars: 800 }, 1200],
+  ] as const)('填 0 时取总结字数上限的 1.5 倍，默认仍是 1500：%s', (_name, patch, cap) => {
     Object.assign(apiSettings, patch);
     expect(resummary2MaxChars()).toBe(cap);
     expect(l2Budget(sources(6, 3000))[1]).toBe(cap);
@@ -134,15 +134,15 @@ describe('总结字数设置的规整', () => {
 
   it('输入框暂时为空时，请求里仍是有效字数', () => {
     Object.assign(apiSettings, { resummaryMaxChars: '' as unknown as number, resummary2MaxChars: Number.NaN });
-    expect(resummaryWordsRange()).toEqual({ min: 300, max: 500 });
+    expect(resummaryWordsRange()).toEqual({ min: 600, max: 1000 });
     expect(resummary2MaxChars()).toBe(1500);
   });
 
   // 经设置 hydrate 读取旧存档，再看总结提示词实际用到的字数，不只测 helper。
   it.each([
-    ['旧设置没有这两项', {}, [300, 500], 1500],
+    ['旧设置没有这两项', {}, [600, 1000], 1500],
     ['已填数值', { resummaryMaxChars: 700, resummary2MaxChars: 1800 }, [420, 700], 1800],
-    ['存了非法值', { resummaryMaxChars: 'abc', resummary2MaxChars: -3 }, [300, 500], 1500],
+    ['存了非法值', { resummaryMaxChars: 'abc', resummary2MaxChars: -3 }, [600, 1000], 1500],
   ] as const)('升级时读取旧设置：%s', async (_name, patch, words, cap) => {
     vi.resetModules();
     const context = await import('@/st/context');

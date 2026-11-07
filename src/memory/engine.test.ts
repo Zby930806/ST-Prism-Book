@@ -564,7 +564,7 @@ describe.each(['automatic', 'manual'] as const)('compression audit output (%s)',
     ]);
     // 内置模板在核查清单末尾重申本次字数上限,紧挨着模型开始输出
     expect(messages.at(-2)!.content.startsWith(RESUMMARY_THINKING_CHECKLIST)).toBe(true);
-    expect(messages.at(-2)!.content.slice(RESUMMARY_THINKING_CHECKLIST.length)).toMatch(/^\n本次 summary 不超过 \d+ 字（含标点）。/);
+    expect(messages.at(-2)!.content.slice(RESUMMARY_THINKING_CHECKLIST.length)).toMatch(/^\n本次 summary 不超过 \d+ 字（含标点，原话也算在内）。/);
     const sourceText = level === 0 ? 'An existing summary.' : 'Earlier summary 0.';
     expect(messages.at(-3)?.content).toContain(sourceText);
     expect(messages.at(-3)?.content).toContain(`[1] ${sourceText}`);
@@ -578,6 +578,15 @@ describe.each(['automatic', 'manual'] as const)('compression audit output (%s)',
     const saved = memory.summaries.at(-1);
     expect(saved).toMatchObject({ text: finalSummary, level: level + 1, childIds: ids });
     expect(JSON.stringify(saved)).not.toContain('Coverage:');
+  });
+
+  it.each([0, 1])('stores a multi-paragraph merged summary as one paragraph (input level=%s)', async level => {
+    const ids = seedInputs(level);
+    // 篇幅长时模型常分段写;注入时各条之间用空行分隔,分出的段落会像另外几条记录
+    const summary = '10月12日，她借给他笔记。\n\n10月13日，她告诉他交换的事\n\n  10月14日下雨，她把围巾给他。\n';
+    vi.mocked(client.requestViaMainApi).mockResolvedValue(`</thinking>\n${JSON.stringify({ summary })}`);
+    expect(await compress(ids)).toBe(1);
+    expect(memory.summaries.at(-1)?.text).toBe('10月12日，她借给他笔记。10月13日，她告诉他交换的事。10月14日下雨，她把围巾给他。');
   });
 
   it.each([0, 1, 2])('v17 forwards clause updates and result-first examples (input level=%s)', async level => {
@@ -668,7 +677,7 @@ describe.each(['automatic', 'manual'] as const)('compression audit output (%s)',
     if (custom) expect(expected.checklist).toBe(RESUMMARY_THINKING_CHECKLIST);
     else {
       const max = level === 0 ? expected.system.match(/(\d+)-(\d+) 字为参考范围/)![2] : expected.system.match(/summary 不得超过 (\d+) 字/)![1];
-      expect(expected.checklist).toBe(`${RESUMMARY_THINKING_CHECKLIST}\n本次 summary 不超过 ${max} 字（含标点）。信息少可以更短；写超时先删低价值细节和重复过程，不删关键事实及其限定。`);
+      expect(expected.checklist).toBe(`${RESUMMARY_THINKING_CHECKLIST}\n本次 summary 不超过 ${max} 字（含标点，原话也算在内）。信息少可以更短；写超时先删低价值细节、重复过程和次要的原话，不删关键事实及其限定。`);
     }
     const [main, hints] = messages.at(-3)!.content.split(SOURCE_HINTS_HEADER);
     for (const { source, text } of sources) {

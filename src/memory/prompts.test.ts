@@ -375,7 +375,7 @@ describe.each(['detailed', 'concise'] as const)('prompt assembly (%s)', verbosit
       expect(parts.system.split(filled(RULE_SUMMARY_COMPOSITION))).toHaveLength(2);
     }
     if (level === 1) {
-      expect(prompt).toContain(verbosity === 'detailed' ? '300-500' : '150-300');
+      expect(prompt).toContain(verbosity === 'detailed' ? '600-1000' : '300-600');
     } else {
       expect(prompt).toContain(verbosity === 'detailed' ? '400' : '300');
       expect(prompt).toContain(verbosity === 'detailed' ? '500' : '400');
@@ -691,10 +691,10 @@ describe('每楼摘要字数要求', () => {
     }
   });
 
-  it('L1 总结篇幅随摘要字数等比放大(1–3 倍),默认值不变;二次总结仍按输入比例', () => {
+  it('L1 总结篇幅随摘要字数等比放大(1–3 倍);二次总结仍按输入比例', () => {
     for (const [verbosity, chars, words] of [
-      ['detailed', 300, '300-500'], ['detailed', 50, '300-500'], ['detailed', 450, '450-750'], ['detailed', 800, '800-1333'], ['detailed', 2000, '900-1500'],
-      ['concise', 150, '150-300'], ['concise', 300, '150-300'], ['concise', 800, '400-800'], ['concise', 1200, '450-900'],
+      ['detailed', 300, '600-1000'], ['detailed', 50, '600-1000'], ['detailed', 450, '900-1500'], ['detailed', 800, '1600-2667'], ['detailed', 2000, '1800-3000'],
+      ['concise', 150, '300-600'], ['concise', 300, '300-600'], ['concise', 800, '800-1600'], ['concise', 1200, '900-1800'],
     ] as const) {
       apiSettings.verbosity = verbosity;
       apiSettings.summaryMaxChars = chars;
