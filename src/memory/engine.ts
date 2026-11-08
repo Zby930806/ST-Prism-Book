@@ -616,7 +616,10 @@ export async function handleGenerationIntercept(
   // 要产出新正文的生成才拦:normal(发消息)/regenerate(重新生成)/swipe(翻页)。
   // 与摘要触发(GENERATION_STARTED 监听器)同口径,否则重生/翻页时「补摘」与「生成」会并行。
   // continue(续写)/quiet(安静)/impersonate(扮演)放行,不该被洞挡。
-  if (type === 'continue' || type === 'quiet' || type === 'impersonate') return false;
+  if (type === 'continue' || type === 'quiet' || type === 'impersonate') {
+    await syncWindowBeforePrompt(getContext()?.chat ?? [], false);
+    return false;
+  }
 
   const ctx = getContext();
   if (!ctx) return false;
@@ -664,6 +667,7 @@ export async function handleGenerationIntercept(
     // 通常事件监听器已经启动了它,busy 守卫会自动去重;这里是时序兜底。
     // 摘要借用主 API 时不在这里启动:它会和正文同时借用主 API,改在这次生成结束后摘(见 deferSummaryUntilGenerationEnds)。
     if (!summaryUsesMainApi()) void maybeSummarizePrevAi(skipLastAi);
+    await syncWindowBeforePrompt(chat, skipLastAi);
     return false;
   }
 
@@ -683,6 +687,7 @@ export async function handleGenerationIntercept(
       // 导致最新稳定楼的摘要请求未能启动。这里只等请求实际发起,不等摘要完成。
       // 借用主 API 时同上,改在这次生成结束后摘。
       if (!summaryUsesMainApi()) await maybeSummarizePrevAi(skipLastAi, true);
+      await syncWindowBeforePrompt(chat, skipLastAi);
       return false;
     }
   }
@@ -720,6 +725,22 @@ export async function handleGenerationIntercept(
 /** 摘要后的统一收尾:同步滑动隐藏 + 刷新注入(自动隐藏已并入摘要流程,不再有独立开关) */
 async function afterSummaryHideAndInject(chat: STMessage[]): Promise<void> {
   await syncWindowHiddenState(chat);
+  refreshInjection();
+}
+
+/**
+ * 组装正文提示词前按当前聊天重算一次隐藏和注入。
+ * 隐藏原本只在摘要写完时同步:上一楼的摘要常在新回复写完之前完成,那时新回复还不在聊天里,
+ * 窗口按旧楼数算,新回复落定后最早那条本该隐藏的楼仍发全文,而召回等按「保留最近 AI 消息数」
+ * 判断的地方已把它当窗口外处理,同一楼会既发全文又发摘要。失败不挡生成。
+ */
+async function syncWindowBeforePrompt(chat: STMessage[], excludeLastAi: boolean): Promise<void> {
+  if (!engineActiveHere() || !apiSettings.autoSummaryEnabled) return;
+  try {
+    await syncWindowHiddenState(chat, excludeLastAi);
+  } catch (e) {
+    engineState.lastError = e instanceof Error ? e.message : String(e);
+  }
   refreshInjection();
 }
 
@@ -1050,10 +1071,27 @@ export function coalesceRanges(indices: number[]): Array<[number, number]> {
  * 走 ST 原生 /hide(对齐 Horae、自动同步 DOM、走官方入口),
  * /unhide,同时用 extra.bbs_hidden 私有标记区分「我们隐藏的」与「ST 原生系统楼」。
  * 只隐藏已被摘要覆盖的,绝不制造信息黑洞。
+ *
+ * excludeLastAi:翻页重新生成时,末尾那条 AI 正被换掉、不会发给正文模型,保留窗口不算它,
+ * 否则窗口里实际发全文的 AI 楼会少一条。
+ * 多处会同时调用(摘要收尾、发送前、回复落定),串行执行,避免两次 /hide、/unhide 交错。
  */
-async function syncWindowHiddenState(chat: STMessage[]): Promise<void> {
+let windowSyncChain: Promise<void> = Promise.resolve();
+function syncWindowHiddenState(chat: STMessage[], excludeLastAi = false): Promise<void> {
+  const run = windowSyncChain.then(() => applyWindowHiddenState(chat, excludeLastAi));
+  windowSyncChain = run.catch(() => {});
+  return run;
+}
+
+async function applyWindowHiddenState(chat: STMessage[], excludeLastAi: boolean): Promise<void> {
   if (memoryWriteIssue()) return;
-  const keepStart = resolveKeepStart(chat);
+  let windowChat = chat;
+  if (excludeLastAi) {
+    let lastAi = chat.length - 1;
+    while (lastAi >= 0 && !isAiFloor(chat[lastAi])) lastAi--;
+    if (lastAi >= 0) windowChat = chat.slice(0, lastAi);
+  }
+  const keepStart = resolveKeepStart(windowChat);
   const covered = coveredSet(chat);
   const imported = importedHistoryRanges();
   const ctx = getContext();
@@ -3168,6 +3206,7 @@ export function bindEngine(): void {
 
   // AI 新回复落定:不一定会触发摘要(自动摘要关闭 / 它不是「上一条 AI」),
   // 但「未摘要楼层」列表必须跟上新增的 AI 楼,故无条件重算一次派生缓存(不发请求)。
+  // 保留窗口随新回复前移,隐藏也跟着同步,摘要页的楼层光谱和实际发送的全文楼层才一致。
   // 酒馆助手等脚本重绘楼层时会对很多楼连发这个事件,长聊天每次重算要几十毫秒,合并成一次。
   let renderedTimer: ReturnType<typeof setTimeout> | null = null;
   if (et.CHARACTER_MESSAGE_RENDERED) {
@@ -3176,6 +3215,7 @@ export function bindEngine(): void {
       renderedTimer = setTimeout(() => {
         renderedTimer = null;
         recomputeDerived();
+        if (engineActiveHere() && apiSettings.autoSummaryEnabled) void syncWindowBeforePrompt(getContext()?.chat ?? [], false);
       }, RENDERED_RECOMPUTE_DELAY_MS);
     });
   }
