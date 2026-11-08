@@ -242,9 +242,9 @@ export function normalizeNonNegativeInt(value: unknown, fallback: number): numbe
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }
 
-/** 保留最近 AI 消息数:非负整数,缺失或非法时按默认 3(空串按 0 会把最近的回复也隐藏掉)。 */
+/** 保留最近 AI 消息数:非负整数,缺失或非法时按默认 4(空串按 0 会把最近的回复也隐藏掉)。 */
 export function normalizeKeepRecent(value: unknown): number {
-  return normalizeNonNegativeInt(value, 3);
+  return normalizeNonNegativeInt(value, 4);
 }
 
 /**
@@ -392,6 +392,8 @@ export interface ApiSettings {
   injection: InjectionSections;
   /** 保留最近 N 条 AI 消息发全文(滑动窗口);更早的自动摘要并隐藏 */
   keepRecent: number;
+  /** 默认值从 3 改为 4 时的一次性迁移标记:按旧默认值保存的 3 改成 4,之后用户自己填的值不再改动。 */
+  keepRecentMigrated: boolean;
   /** 排除的角色名:这些名字(含重名卡)的聊天里,记忆系统所有功能都不生效 */
   excludedChars: string[];
   /** 摘要/总结时**整本排除**的世界书文件名:这些书的所有激活条目都不进摘要上下文。
@@ -505,6 +507,8 @@ interface SharedExcludesStore {
 const DEFAULT_WI_PATTERNS = ['\\[mvu[\\s\\S]*?\\]'];
 /** 注入预算原来的默认值;首次载入时把按它保存的设置改为不限制(见 hydrateSettings)。 */
 const LEGACY_MEMORY_BUDGET_DEFAULT = 6000;
+/** 保留最近 AI 消息数原来的默认值;首次载入时把按它保存的设置改为新默认 4(见 hydrateSettings)。 */
+const LEGACY_KEEP_RECENT_DEFAULT = 3;
 const LEGACY_STORAGE_KEY = 'bbs.api.v1';
 // 旧版界面偏好(主题/导航位置/分页)曾单独存这里;现把主题+导航迁进 ui,分页仍留本机(见 state/ui.ts)。
 const LEGACY_UI_STORAGE_KEY = 'bbs.ui.v1';
@@ -575,7 +579,8 @@ function defaults(): ApiSettings {
     summarizeOnReplyEnd: false,
     summaryOnlyMode: false,
     injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, npcAffinity: true, items: true, scenes: true, secrets: true, injuryReminder: true, knowledge: false },
-    keepRecent: 3,
+    keepRecent: 4,
+    keepRecentMigrated: false,
     excludedChars: [],
     excludedWorldNames: [],
     // 空起步:内置默认规则(DEFAULT_WI_PATTERNS)由 hydrateSettings「播种」发放,只发一次。
@@ -629,6 +634,7 @@ function normalize(raw: unknown): ApiSettings {
   const budget = (raw as Partial<ApiSettings>).memoryBudgetTokens;
   merged.memoryBudgetTokens = normalizeMemoryBudgetTokens(budget);
   merged.memoryBudgetMigrated = (raw as Partial<ApiSettings>).memoryBudgetMigrated === true;
+  merged.keepRecentMigrated = (raw as Partial<ApiSettings>).keepRecentMigrated === true;
   // 总开关与几项模式开关:布尔,手改坏或类型不符时回退默认,不能把非空字符串当成「开」
   const rb = raw as Partial<ApiSettings>;
   merged.enabled = typeof rb.enabled === 'boolean' ? rb.enabled : d.enabled;
@@ -891,6 +897,7 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.summaryOnlyMode = src.summaryOnlyMode;
   target.injection = src.injection;
   target.keepRecent = src.keepRecent;
+  target.keepRecentMigrated = src.keepRecentMigrated;
   target.excludedChars = src.excludedChars;
   target.excludedWorldNames = src.excludedWorldNames;
   target.excludedWorldInfoPatterns = src.excludedWorldInfoPatterns;
@@ -1204,6 +1211,15 @@ export function hydrateSettings(): void {
   if (!apiSettings.memoryBudgetMigrated) {
     if (apiSettings.memoryBudgetTokens === LEGACY_MEMORY_BUDGET_DEFAULT) apiSettings.memoryBudgetTokens = 0;
     apiSettings.memoryBudgetMigrated = true;
+    ctx.extensionSettings[SETTINGS_KEY] = JSON.parse(JSON.stringify(apiSettings));
+    ctx.saveSettingsDebounced?.();
+  }
+
+  // 保留最近 AI 消息数默认改为 4:按原默认值保存的 3 改成 4。1.4.12 及更早实际常比设置多发一条全文,
+  // 默认 3 的用户发的多是 4 条,改为 4 后与原来的实际效果相同。只做一次,之后用户自己填的值不再改动。
+  if (!apiSettings.keepRecentMigrated) {
+    if (apiSettings.keepRecent === LEGACY_KEEP_RECENT_DEFAULT) apiSettings.keepRecent = 4;
+    apiSettings.keepRecentMigrated = true;
     ctx.extensionSettings[SETTINGS_KEY] = JSON.parse(JSON.stringify(apiSettings));
     ctx.saveSettingsDebounced?.();
   }

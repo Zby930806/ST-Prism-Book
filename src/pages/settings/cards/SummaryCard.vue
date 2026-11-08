@@ -107,7 +107,7 @@ const resummary2Cap = computed(() => resummary2MaxChars());
     >
       <input v-model.number="apiSettings.resummary2MaxChars" class="bbs-input bbs-num" type="number" min="0" :max="RESUMMARY2_MAX_CHARS_MAX" @change="commit.resummary2MaxChars" />
     </SettingRow>
-    <SettingRow kind="num" label="保留最近 AI 消息数" hint="最近若干条 AI 回复保留全文发送；更早的楼层自动隐藏，改为发送摘要。默认 3。">
+    <SettingRow kind="num" label="保留最近 AI 消息数" hint="最近若干条 AI 回复保留全文发送；更早的楼层自动隐藏，改为发送摘要。默认 4。">
       <input v-model.number="apiSettings.keepRecent" class="bbs-input bbs-num" type="number" min="0" @change="commit.keepRecent" />
     </SettingRow>
     <SettingRow kind="num" label="每次总结几条摘要" hint="摘要达到该数量时合并为一条总结（不计用户楼层）。填 0 关闭自动总结，默认 12。">

@@ -11,12 +11,12 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('数值设置的规整', () => {
   it('保留窗口与三个总结阈值：空串回退默认，总结阈值 1 规整为 0（与 0 一样表示关闭）', () => {
     const s = normalizeApiSettings({ keepRecent: '', leafBatchThreshold: 1, resummaryThreshold: '', higherResummaryThreshold: 1 });
-    expect(s.keepRecent).toBe(3);
+    expect(s.keepRecent).toBe(4);
     expect(s.leafBatchThreshold).toBe(0);
     expect(s.resummaryThreshold).toBe(6);
     expect(s.higherResummaryThreshold).toBe(0);
     expect(normalizeApiSettings({ keepRecent: 0, leafBatchThreshold: 8.6, resummaryThreshold: 0 })).toMatchObject({ keepRecent: 0, leafBatchThreshold: 8, resummaryThreshold: 0 });
-    expect(normalizeKeepRecent(-2)).toBe(3);
+    expect(normalizeKeepRecent(-2)).toBe(4);
     expect(normalizeSummaryThreshold('12', 12)).toBe(12);
     expect(normalizeSummaryThreshold(1.4, 12)).toBe(0);
   });
@@ -91,7 +91,7 @@ describe('载入旧存档', () => {
     } as unknown as import('@/st/context').STContext);
     vi.stubGlobal('window', { addEventListener: vi.fn(), dispatchEvent: vi.fn() });
     settings.hydrateSettings();
-    expect(settings.apiSettings).toMatchObject({ keepRecent: 3, leafBatchThreshold: 0, mainApiMaxTokens: 32000, mainApiPrefill: true });
+    expect(settings.apiSettings).toMatchObject({ keepRecent: 4, leafBatchThreshold: 0, mainApiMaxTokens: 32000, mainApiPrefill: true });
     expect(settings.apiSettings.vector.recall.finalRecallCount).toBe(5);
   });
 });

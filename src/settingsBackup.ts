@@ -185,7 +185,7 @@ const API_GROUPS: Array<{ label: string; keys: string[] }> = [
   { label: '变量模板', keys: ['varsGlobalTemplate', 'varsTemplateByChar'] },
 ];
 /** 另行合并或只供内部使用、不单独列出的字段。 */
-const API_SEPARATE = new Set(['channels', 'excludedChars', 'excludedWorldNames', 'excludedWorldInfoPatterns', 'customStripTags', 'wiPatternsSeeded', 'memoryBudgetMigrated']);
+const API_SEPARATE = new Set(['channels', 'excludedChars', 'excludedWorldNames', 'excludedWorldInfoPatterns', 'customStripTags', 'wiPatternsSeeded', 'memoryBudgetMigrated', 'keepRecentMigrated']);
 const EXCLUDE_LISTS = ['excludedChars', 'excludedWorldNames', 'excludedWorldInfoPatterns', 'customStripTags'] as const;
 const VECTOR_ROLES = ['embedding', 'rerank', 'queryRewrite'] as const;
 /** 与设置页「向量记忆」卡片里的端点名称一致。 */
@@ -383,6 +383,8 @@ function planApi(file: Rec, needKeys: string[]): { section: ImportSection | null
   base.wiPatternsSeeded = base.wiPatternsSeeded === true || local.wiPatternsSeeded === true;
   // 导入的预算值按文件原样保留，不再被「旧默认值改为不限制」的迁移改动。
   base.memoryBudgetMigrated = base.memoryBudgetMigrated === true || local.memoryBudgetMigrated === true;
+  // 保留最近 AI 消息数同理:导入的数值按文件原样保留，不再被「旧默认值 3 改为 4」的迁移改动。
+  base.keepRecentMigrated = base.keepRecentMigrated === true || local.keepRecentMigrated === true;
 
   // 逐组对比整理后的结果，列出会改的设置（空密钥已按地址换成本机的或清空，剩下的差异都是真实改动）
   const nextNormalized = clone(normalizeApiSettings(base)) as unknown as Rec;
