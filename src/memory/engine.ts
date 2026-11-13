@@ -15,7 +15,7 @@ import { parseSummaryResponse, SummaryResponseError, describeDropped, type Dropp
 import { selectKnowledgeForSummary } from './knowledge';
 import { clearInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
 import { BATCH_SUMMARY_THINKING_CHECKLIST, buildBatchSummaryPrompt, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, sendsContentBoundary, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
-import { clampToTimeTags, cleanBody, explicitOpeningTime, hasStoryBody, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, latestStoryTime, markRegenerating, parseTimeRange, storyTimeValue, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
+import { clampToTimeTags, cleanBody, explicitOpeningTime, hasStoryBody, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, isBeingRegenerated, latestStoryTime, markRegenerating, parseTimeRange, storyTimeValue, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import { memory, memoryWriteIssue, checkCompatibility, recomputeDerived, scheduleLeafFlush } from './store';
 import { legacyLeafIssue } from './compatibility';
@@ -616,10 +616,7 @@ export async function handleGenerationIntercept(
   // 要产出新正文的生成才拦:normal(发消息)/regenerate(重新生成)/swipe(翻页)。
   // 与摘要触发(GENERATION_STARTED 监听器)同口径,否则重生/翻页时「补摘」与「生成」会并行。
   // continue(续写)/quiet(安静)/impersonate(扮演)放行,不该被洞挡。
-  if (type === 'continue' || type === 'quiet' || type === 'impersonate') {
-    await syncWindowBeforePrompt(getContext()?.chat ?? [], false);
-    return false;
-  }
+  if (type === 'continue' || type === 'quiet' || type === 'impersonate') return false;
 
   const ctx = getContext();
   if (!ctx) return false;
@@ -667,7 +664,6 @@ export async function handleGenerationIntercept(
     // 通常事件监听器已经启动了它,busy 守卫会自动去重;这里是时序兜底。
     // 摘要借用主 API 时不在这里启动:它会和正文同时借用主 API,改在这次生成结束后摘(见 deferSummaryUntilGenerationEnds)。
     if (!summaryUsesMainApi()) void maybeSummarizePrevAi(skipLastAi);
-    await syncWindowBeforePrompt(chat, skipLastAi);
     return false;
   }
 
@@ -687,7 +683,6 @@ export async function handleGenerationIntercept(
       // 导致最新稳定楼的摘要请求未能启动。这里只等请求实际发起,不等摘要完成。
       // 借用主 API 时同上,改在这次生成结束后摘。
       if (!summaryUsesMainApi()) await maybeSummarizePrevAi(skipLastAi, true);
-      await syncWindowBeforePrompt(chat, skipLastAi);
       return false;
     }
   }
@@ -729,19 +724,33 @@ async function afterSummaryHideAndInject(chat: STMessage[]): Promise<void> {
 }
 
 /**
- * 组装正文提示词前按当前聊天重算一次隐藏和注入。
+ * 按当前聊天同步一次隐藏和注入;失败只记错误,不挡生成。
  * 隐藏原本只在摘要写完时同步:上一楼的摘要常在新回复写完之前完成,那时新回复还不在聊天里,
  * 窗口按旧楼数算,新回复落定后最早那条本该隐藏的楼仍发全文,而召回等按「保留最近 AI 消息数」
- * 判断的地方已把它当窗口外处理,同一楼会既发全文又发摘要。失败不挡生成。
+ * 判断的地方已把它当窗口外处理,同一楼会既发全文又发摘要。
  */
-async function syncWindowBeforePrompt(chat: STMessage[], excludeLastAi: boolean): Promise<void> {
+async function syncWindowAndInjection(chat: STMessage[], dropTail: boolean): Promise<void> {
   if (!engineActiveHere() || !apiSettings.autoSummaryEnabled) return;
   try {
-    await syncWindowHiddenState(chat, excludeLastAi);
+    await syncWindowHiddenState(chat, dropTail);
   } catch (e) {
     engineState.lastError = e instanceof Error ? e.message : String(e);
   }
   refreshInjection();
+}
+
+/**
+ * 生成开始、酒馆选出要发送的楼层之前同步隐藏。绑定在 GENERATION_AFTER_COMMANDS 上:酒馆逐个 await 监听器,
+ * 之后才删掉要重新生成的末楼、按 is_system 选楼层,再运行生成拦截器(script.js Generate)。
+ * ⚠️ 不能放进生成拦截器:那时楼层已经选完,再取消隐藏的楼全文进不了这次请求,摘要又因不再隐藏而不注入,
+ * 这一楼就整个缺失;再隐藏的楼则全文和摘要各发一遍。
+ */
+export async function syncWindowBeforeGeneration(type: string | undefined, dryRun?: boolean): Promise<void> {
+  if (dryRun) return;
+  const chat = getContext()?.chat ?? [];
+  const tail = chat[chat.length - 1];
+  const dropTail = (type === 'regenerate' || type === 'swipe') && !!tail && !tail.is_user;
+  await syncWindowAndInjection(chat, dropTail);
 }
 
 /**
@@ -1072,25 +1081,22 @@ export function coalesceRanges(indices: number[]): Array<[number, number]> {
  * /unhide,同时用 extra.bbs_hidden 私有标记区分「我们隐藏的」与「ST 原生系统楼」。
  * 只隐藏已被摘要覆盖的,绝不制造信息黑洞。
  *
- * excludeLastAi:翻页重新生成时,末尾那条 AI 正被换掉、不会发给正文模型,保留窗口不算它,
- * 否则窗口里实际发全文的 AI 楼会少一条。
- * 多处会同时调用(摘要收尾、发送前、回复落定),串行执行,避免两次 /hide、/unhide 交错。
+ * dropTail:末尾那条回复即将被换掉、不会发给正文模型(重新生成前酒馆会删掉它,翻页时酒馆选楼层会去掉它),
+ * 保留窗口不算它,否则实际发全文的 AI 楼会少一条。翻页生成期间别处触发的同步(摘要收尾、楼层重绘)
+ * 按 isBeingRegenerated 同样不算它,不把刚取消隐藏的楼又藏回去。
+ * 多处会同时调用(摘要收尾、生成前、回复落定),串行执行,避免两次 /hide、/unhide 交错。
  */
 let windowSyncChain: Promise<void> = Promise.resolve();
-function syncWindowHiddenState(chat: STMessage[], excludeLastAi = false): Promise<void> {
-  const run = windowSyncChain.then(() => applyWindowHiddenState(chat, excludeLastAi));
+function syncWindowHiddenState(chat: STMessage[], dropTail = false): Promise<void> {
+  const run = windowSyncChain.then(() => applyWindowHiddenState(chat, dropTail));
   windowSyncChain = run.catch(() => {});
   return run;
 }
 
-async function applyWindowHiddenState(chat: STMessage[], excludeLastAi: boolean): Promise<void> {
+async function applyWindowHiddenState(chat: STMessage[], dropTail: boolean): Promise<void> {
   if (memoryWriteIssue()) return;
-  let windowChat = chat;
-  if (excludeLastAi) {
-    let lastAi = chat.length - 1;
-    while (lastAi >= 0 && !isAiFloor(chat[lastAi])) lastAi--;
-    if (lastAi >= 0) windowChat = chat.slice(0, lastAi);
-  }
+  const tail = chat[chat.length - 1];
+  const windowChat = tail && !tail.is_user && (dropTail || isBeingRegenerated(tail)) ? chat.slice(0, -1) : chat;
   const keepStart = resolveKeepStart(windowChat);
   const covered = coveredSet(chat);
   const imported = importedHistoryRanges();
@@ -3093,6 +3099,7 @@ function moveManualOps(evictFloor?: number): void {
  * 进入聊天 / 翻到没摘要的页,都不再自动立刻补摘。
  *  - USER_MESSAGE_RENDERED:发新消息(聊天末尾新出现的用户消息)→ 摘「上一条 AI」(skipLastAi=false)。
  *  - GENERATION_STARTED(regenerate/swipe):末尾 AI 正在被改写,跳过它 → 摘「之前那条 AI」(skipLastAi=true)。
+ *  - GENERATION_AFTER_COMMANDS:酒馆选出要发送的楼层之前,同步一次滑动隐藏(syncWindowBeforeGeneration)。
  *  - GENERATION_ENDED(可选「回复结束后立即摘要」,默认关):回复一结束就摘这条回复;之后续写或编辑,按新内容重写。
  *  - MESSAGE_SWIPED / MESSAGE_EDITED:数据随消息跟随 → reactToChatMutation(清坏链+重算+刷新),不在此处生成。
  *  - MESSAGE_DELETED:同上,并同步一次滑动隐藏/取消隐藏。
@@ -3161,6 +3168,13 @@ export function bindEngine(): void {
       markRegenerating(type === 'swipe' && last && !last.is_user ? last : null);
     });
   }
+  // 酒馆选出要发送的楼层之前同步隐藏(见 syncWindowBeforeGeneration)。返回 Promise,酒馆等它结束才继续。
+  // 旧版酒馆没有 GENERATION_AFTER_COMMANDS 时退到 GENERATION_STARTED(同样在选楼层之前);
+  // 须排在上面标记翻页的监听器之后。
+  const beforeFloorsPicked = et.GENERATION_AFTER_COMMANDS ?? et.GENERATION_STARTED;
+  if (beforeFloorsPicked) {
+    es.on(beforeFloorsPicked, (type?: string, _opts?: unknown, dryRun?: boolean) => syncWindowBeforeGeneration(type, dryRun));
+  }
   if (et.CHARACTER_MESSAGE_RENDERED) {
     es.on(et.CHARACTER_MESSAGE_RENDERED, (_floor?: unknown, type?: unknown) => {
       if (replyAllowed && type !== 'quiet' && type !== 'impersonate' && type !== 'first_message') replyRendered = true;
@@ -3215,7 +3229,7 @@ export function bindEngine(): void {
       renderedTimer = setTimeout(() => {
         renderedTimer = null;
         recomputeDerived();
-        if (engineActiveHere() && apiSettings.autoSummaryEnabled) void syncWindowBeforePrompt(getContext()?.chat ?? [], false);
+        if (engineActiveHere() && apiSettings.autoSummaryEnabled) void syncWindowAndInjection(getContext()?.chat ?? [], false);
       }, RENDERED_RECOMPUTE_DELAY_MS);
     });
   }
