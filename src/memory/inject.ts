@@ -22,7 +22,7 @@ import { fmtLifeDetail } from './lifeDetails';
 import { fmtKnowledgeInjection } from './knowledge';
 import { fmtInjuryReminder, type InjuryReminderSubject } from './injuryReminder';
 import { isNpcLabelName, npcMentioned } from './npcLabel';
-import { fmtNpcAffinity, fmtNpcTiesContext, NPC_AFFINITY_BRIEFING } from './npcRelations';
+import { fmtNpcAffinity, fmtNpcIntimacyContext, fmtNpcTiesContext, NPC_AFFINITY_BRIEFING } from './npcRelations';
 import { memory, memoryWriteIssue } from './store';
 import { compactTimeLabel, formatRange, latestStoryTime, splitTimeLabel, timeTagPrompt } from './timeTag';
 import { relativeTimeLabel, weekdayLabel, ageDisplay, calculateRelativeDays } from './timeRel';
@@ -494,7 +494,7 @@ export interface NpcContextBlocks {
 /**
  * 渲染 NPC 名册注入块(主要角色与 NPC 分开,NPC 再按在场分档省 token):
  *  - **主要角色**(important):不论在场与否都单列一段,带身份、关系、外貌、性格与即时状态(着装/状态/所在)。
- *  - 与其他角色的长期关系(ties)全局输出一次，不受在场分档影响。
+ *  - 与其他角色的长期关系(ties)、与主角的亲密记录(intimacy)各全局输出一次，不受在场分档影响。
  *  - NPC 在场(随行 / 所在地=主角当前节点)→ 全量:名 + 性别 + 年龄 + 身份 + 关系 + 性格 + 外貌 + 即时状态。
  *  - NPC **同区域**(抬头最多一级就与主角共处)→ 轻量:名 + 性别 + 年龄 + 身份 + 关系 + 性格 + 所在地。留个性格,免得 AI
  *    临时拉其出场时凭空 OOC;省略外貌与着装,保留身体状态以免漏掉行动限制。
@@ -554,6 +554,9 @@ export function fmtNpcContextBlocks(npcs: MemNpc[], scenes: MemScene[], here: st
   if ([...main, ...present, ...nearby, ...lastSeen.map(x => x.n), ...absentShown].some(n => aff(n))) preface.push(NPC_AFFINITY_BRIEFING);
   const ties = fmtNpcTiesContext(npcs);
   if (ties) preface.push(ties);
+  // 亲密记录同样全局输出一次:次数与避孕情况是累计事实,不随在场分档省略
+  const intimacy = fmtNpcIntimacyContext(npcs);
+  if (intimacy) preface.push(intimacy);
   const withPreface = (header: string, body: string): string => {
     const head = preface.length ? `${header}\n${preface.splice(0).join('\n')}` : header;
     return `${head}\n${body}`;

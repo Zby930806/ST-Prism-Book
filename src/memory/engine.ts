@@ -1615,7 +1615,7 @@ async function summarizeFloorWork(
       const presence = classifyNpcPresence(n, stateBefore.scenes, stateBefore.state.location, stateBefore.state.locationPath);
       // NPC 本楼前不在场、本楼正文也没提到时只给一行;主要角色、在场/同区域、被提到的保留完整档案(外貌、身份是整段覆盖,模型要看到旧值)
       const brief = !n.important && (presence === 'absent' || presence === 'unknown') && !npcMentioned(floorText, n.name, n.formerNames);
-      return { name: n.name, gender: n.gender, age: n.age, ageTime: n.ageTime, relation: n.relation, affinityInner: n.affinityInner, affinityOuter: n.affinityOuter, affinityNote: n.affinityNote, ties: n.ties, title: n.title, personality: n.personality, important: n.important, desc: n.desc, outfit: n.outfit, condition: n.condition, follow: n.follow, location: n.location, locationStale: n.locationStale, lastKnownLocation: n.lastKnownLocation,
+      return { name: n.name, gender: n.gender, age: n.age, ageTime: n.ageTime, relation: n.relation, affinityInner: n.affinityInner, affinityOuter: n.affinityOuter, affinityNote: n.affinityNote, ties: n.ties, intimacy: n.intimacy, title: n.title, personality: n.personality, important: n.important, desc: n.desc, outfit: n.outfit, condition: n.condition, follow: n.follow, location: n.location, locationStale: n.locationStale, lastKnownLocation: n.lastKnownLocation,
         formerNames: n.formerNames, presence, ...(brief ? { brief: true } : {}) };
     }),
     openPlans: openPlansOrdered.map(p => ({ kind: p.kind, content: p.content, createdTime: p.createdTime, targetTime: p.targetTime })),

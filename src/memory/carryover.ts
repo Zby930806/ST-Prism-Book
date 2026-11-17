@@ -170,6 +170,7 @@ function encodeStateAsDelta(state: ReturnType<typeof deriveMemory>, leafId: stri
         affinityOuter: n.affinityOuter,
         affinityNote: n.affinityNote,
         ties: n.ties,
+        intimacy: n.intimacy,
         title: n.title,
         desc: n.desc,
         personality: n.personality,

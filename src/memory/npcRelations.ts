@@ -42,6 +42,21 @@ export function fmtNpcTiesContext(npcs: Pick<MemNpc, 'name' | 'ties'>[]): string
   return rows.length ? `角色长期关系(血缘/婚姻/主仆/宿敌等，不因是否在场而失效):\n${rows.join('\n')}` : '';
 }
 
+/**
+ * 渲染各角色与主角的亲密记录,不受在场分档影响。
+ * 次数和避孕情况是跨很多楼累计的事实:只留在历史摘要里时,合并成总结、二次总结后容易被并成「多次亲密」而对不上数。
+ * 这里按档案原样发给正文模型,不参与压缩。
+ */
+export function fmtNpcIntimacyContext(npcs: Pick<MemNpc, 'name' | 'intimacy'>[]): string {
+  const rows = npcs
+    .map(npc => ({ name: oneLine(npc.name), text: oneLine(npc.intimacy) }))
+    .filter(row => row.name && row.text)
+    .map(row => `  - ${row.name}:${row.text}`);
+  return rows.length
+    ? `与主角的亲密记录(次数、避孕措施、后果和约定以此为准,写到相关内容时不得与之矛盾;只是事实依据,不是推进亲密情节的要求,无关时不必提起):\n${rows.join('\n')}`
+    : '';
+}
+
 export interface NpcSummaryView extends NpcAffinity {
   name: string;
   gender?: string;
@@ -49,6 +64,8 @@ export interface NpcSummaryView extends NpcAffinity {
   ageTime?: string;
   relation?: string;
   ties?: string;
+  /** 与主角的亲密记录(整体覆盖型,模型要看到旧值才能累加) */
+  intimacy?: string;
   title?: string;
   personality?: string;
   important?: boolean;
@@ -81,7 +98,9 @@ function fmtNpcSummaryLine(n: NpcSummaryView): string {
   const former = (n.formerNames ?? []).map(oneLine).filter(Boolean);
   if (n.brief) {
     const tail = [oneLine(n.title), former.length ? `原记为:${former.join('、')}` : ''].filter(Boolean);
-    return `  - ${star}${oneLine(n.name)}${bracket}${mark}${place}${tail.length ? ` —— ${tail.join(';')}` : ''}〔简列〕`;
+    // 亲密记录是整体覆盖的累计值:简列时也带上,免得正文只用代称提到这个人时,模型看不到旧记录而从头计数
+    const record = oneLine(n.intimacy) ? ` 〔与主角的亲密记录:${oneLine(n.intimacy)}〕` : '';
+    return `  - ${star}${oneLine(n.name)}${bracket}${mark}${place}${tail.length ? ` —— ${tail.join(';')}` : ''}${record}〔简列〕`;
   }
   const tail: string[] = [];
   if (oneLine(n.title)) tail.push(oneLine(n.title));
@@ -96,6 +115,7 @@ function fmtNpcSummaryLine(n: NpcSummaryView): string {
   if (oneLine(n.desc)) state.push(`既有外貌记录:${oneLine(n.desc)}`);
   if (oneLine(n.outfit)) state.push(`最后记录着装:${oneLine(n.outfit)}`);
   if (oneLine(n.condition)) state.push(`最后记录身体状态:${oneLine(n.condition)}`);
+  if (oneLine(n.intimacy)) state.push(`与主角的亲密记录:${oneLine(n.intimacy)}`);
   const stateStr = state.length ? ` 〔${state.join(';')}〕` : '';
   return `  - ${star}${oneLine(n.name)}${bracket}${mark}${place}${title}${stateStr}`;
 }

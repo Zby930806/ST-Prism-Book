@@ -54,6 +54,7 @@ function fmtNpc(x: NpcDelta): { text: string; sub?: string } {
   if (x.desc) parts.push(`外貌:${x.desc}`);
   if (x.personality) parts.push(`性格:${x.personality}`);
   if (x.ties) parts.push(`人际:${x.ties}`);
+  if (x.intimacy) parts.push(`亲密记录:${x.intimacy}`);
   if (x.location) parts.push(`位置:${x.location}`);
   if (x.follow === true) parts.push('随行');
   if (x.important === true) parts.push('主要角色');

@@ -23,6 +23,7 @@ export const NPC_FIELDS = [
   { key: 'desc', draft: 'npcDesc', label: '外貌' },
   { key: 'personality', draft: 'personality', label: '性格' },
   { key: 'ties', draft: 'ties', label: '人际' },
+  { key: 'intimacy', draft: 'intimacy', label: '亲密记录' },
   { key: 'location', draft: 'npcLoc', label: '位置' },
 ] as const;
 
@@ -43,7 +44,7 @@ export function parseVarValue(text: string): JsonValue {
 export interface LeafEditDraft {
   text: string; timeStart: string; timeEnd: string; location: string;
   name: string; qty: string; desc: string; content: string;
-  title: string; npcAge: string; relation: string; ties: string; outfit: string; condition: string; npcDesc: string; personality: string; npcLoc: string;
+  title: string; npcAge: string; relation: string; ties: string; intimacy: string; outfit: string; condition: string; npcDesc: string; personality: string; npcLoc: string;
   affinityInner: string; affinityOuter: string; affinityNote: string;
   varPath: string; varKey: string; varValue: string; varDelta: string;
 }
@@ -74,6 +75,7 @@ export function useLeafEdit(opts: {
     affinityOuter: '',
     affinityNote: '',
     ties: '',
+    intimacy: '',
     outfit: '',
     condition: '',
     npcDesc: '',
@@ -229,6 +231,7 @@ export function useLeafEdit(opts: {
     edit.affinityOuter = '';
     edit.affinityNote = '';
     edit.ties = '';
+    edit.intimacy = '';
     edit.outfit = '';
     edit.condition = '';
     edit.npcDesc = '';
@@ -260,6 +263,7 @@ export function useLeafEdit(opts: {
         edit.affinityOuter = x?.affinityOuter == null ? '' : String(x.affinityOuter);
         edit.affinityNote = x?.affinityNote ?? '';
         edit.ties = x?.ties ?? '';
+        edit.intimacy = x?.intimacy ?? '';
         edit.outfit = x?.outfit ?? '';
         edit.condition = x?.condition ?? '';
         edit.npcDesc = x?.desc ?? '';

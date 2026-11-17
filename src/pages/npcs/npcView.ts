@@ -75,6 +75,7 @@ export interface CardField {
 }
 
 const AFFINITY_TITLE = '对主角的内心好感与外在态度估计';
+const INTIMACY_TITLE = '与主角的亲密记录：累计次数、每次的避孕措施和是否在体内、仍有效的后果与约定。只记成年角色，不论是否在场都会发给正文模型';
 
 /**
  * 各档角色卡显示的字段（外貌在各档都显示，便于核对档案；发送范围见区块说明）：
@@ -87,9 +88,9 @@ export function npcCardFields(n: MemNpc, tier: NpcTier): CardField[] | null {
   const affinity = fmtNpcAffinity(n);
   const former = (n.formerNames ?? []).join('、');
   const shows: Record<NpcTier, boolean> = {
-    main: !!(n.title || n.relation || affinity || n.desc || n.personality || n.outfit || n.condition || n.follow || n.location || n.lastKnownLocation || former),
-    present: !!(n.title || n.relation || affinity || n.ties || n.personality || n.desc || n.outfit || n.condition || n.follow || n.location || n.lastKnownLocation || former),
-    nearby: !!(n.title || n.relation || affinity || n.personality || n.desc || n.location || n.lastKnownLocation || former),
+    main: !!(n.title || n.relation || affinity || n.intimacy || n.desc || n.personality || n.outfit || n.condition || n.follow || n.location || n.lastKnownLocation || former),
+    present: !!(n.title || n.relation || affinity || n.intimacy || n.ties || n.personality || n.desc || n.outfit || n.condition || n.follow || n.location || n.lastKnownLocation || former),
+    nearby: !!(n.title || n.relation || affinity || n.intimacy || n.personality || n.desc || n.location || n.lastKnownLocation || former),
     absent: true,
   };
   if (!shows[tier]) return null;
@@ -101,6 +102,7 @@ export function npcCardFields(n: MemNpc, tier: NpcTier): CardField[] | null {
   add('former', '原记为', former, { cls: 'f-former', labelTitle: '报出真名之前使用的名字' });
   add('relation', '关系', n.relation, { cls: 'f-rel' });
   add('affinity', '好感', affinity, { labelTitle: AFFINITY_TITLE });
+  add('intimacy', '亲密记录', n.intimacy, { cls: 'f-intimacy', labelTitle: INTIMACY_TITLE });
   const place = npcPlaceText(n);
   if (tier === 'main') {
     add('desc', '外貌', n.desc, { cls: 'f-desc' });
@@ -145,6 +147,7 @@ export interface NpcDraft {
   affinityOuter: string;
   affinityNote: string;
   ties: string;
+  intimacy: string;
   title: string;
   personality: string;
   desc: string;
@@ -156,7 +159,7 @@ export interface NpcDraft {
 }
 
 export function emptyNpcDraft(location: string): NpcDraft {
-  return { name: '', gender: '', age: '', relation: '', affinityInner: '', affinityOuter: '', affinityNote: '', ties: '', title: '', personality: '', desc: '', outfit: '', condition: '', important: false, follow: false, location };
+  return { name: '', gender: '', age: '', relation: '', affinityInner: '', affinityOuter: '', affinityNote: '', ties: '', intimacy: '', title: '', personality: '', desc: '', outfit: '', condition: '', important: false, follow: false, location };
 }
 
 /**

@@ -186,7 +186,7 @@ function cleanNpcDelta(raw: unknown, preserveEvidence = false): NpcDelta | null 
   }
   const name = namedText(raw, ['name', 'npc', 'id']);
   if (!name) return null;
-  // 性别、年龄、ties、性格:模型输出的空串当作省略(不让随手填的空字段洗掉档案);
+  // 性别、年龄、ties、亲密记录、性格:模型输出的空串当作省略(不让随手填的空字段洗掉档案);
   // 存储数据里的空串只来自手动编辑的清空,保留下来,重放时才能清掉。
   const archiveText = preserveEvidence ? patchText : optText;
   return {
@@ -200,6 +200,7 @@ function cleanNpcDelta(raw: unknown, preserveEvidence = false): NpcDelta | null 
     affinityOuter: cleanNpcAffinityLevel(raw.affinityOuter),
     affinityNote: patchText(raw.affinityNote),
     ties: archiveText(raw.ties),
+    intimacy: archiveText(raw.intimacy),
     title: patchText(raw.title),
     // 显式空串可清除误填的临时外貌;省略仍保持,不做关键词自动迁移。
     desc: patchText(raw.desc),
@@ -1727,6 +1728,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: ReplayLeafI
         if (add.age && !ex.age) applyAge(ex, add, npcTime);
         if (add.relation && !ex.relation) ex.relation = add.relation.trim();
         if (add.ties && !ex.ties) ex.ties = add.ties.trim();
+        if (add.intimacy && !ex.intimacy) ex.intimacy = add.intimacy.trim();
         if (add.title && !ex.title) ex.title = add.title.trim();
         if (add.desc && !ex.desc) ex.desc = add.desc.trim();
         if (add.personality && !ex.personality) ex.personality = add.personality.trim();
@@ -1742,6 +1744,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: ReplayLeafI
           gender: add.gender?.trim() || undefined,
           relation: add.relation?.trim() || undefined,
           ties: add.ties?.trim() || undefined,
+          intimacy: add.intimacy?.trim() || undefined,
           title: add.title?.trim() || undefined,
           desc: add.desc?.trim() || undefined,
           personality: add.personality?.trim() || undefined,
@@ -1767,6 +1770,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: ReplayLeafI
           gender: upd.gender?.trim() || undefined,
           relation: upd.relation?.trim() || undefined,
           ties: upd.ties?.trim() || undefined,
+          intimacy: upd.intimacy?.trim() || undefined,
           title: upd.title?.trim() || undefined,
           desc: upd.desc?.trim() || undefined,
           personality: upd.personality?.trim() || undefined,
@@ -1779,6 +1783,7 @@ function applyStoredDeltaTo(mem: BaibaiMemory, d: StoredDelta, leaf: ReplayLeafI
       applyAge(n, upd, npcTime); // 年龄覆盖 + 锚点自动刷新(过生日/纠正)
       if (typeof upd.relation === 'string') n.relation = upd.relation.trim() || undefined;
       if (typeof upd.ties === 'string') n.ties = upd.ties.trim() || undefined;
+      if (typeof upd.intimacy === 'string') n.intimacy = upd.intimacy.trim() || undefined;
       if (typeof upd.title === 'string') n.title = upd.title.trim() || undefined;
       if (typeof upd.desc === 'string') n.desc = upd.desc.trim() || undefined;
       if (typeof upd.personality === 'string') n.personality = upd.personality.trim() || undefined;
@@ -2800,6 +2805,7 @@ export function upsertNpc(
     age?: string;
     relation?: string;
     ties?: string;
+    intimacy?: string;
     title?: string;
     desc?: string;
     personality?: string;
@@ -2823,6 +2829,7 @@ export function upsertNpc(
         affinityOuter: cleanNpcAffinityLevel(fields.affinityOuter),
         affinityNote: fields.affinityNote?.trim(),
         ties: fields.ties?.trim() || undefined,
+        intimacy: fields.intimacy?.trim() || undefined,
         title: fields.title?.trim() || undefined,
         desc: fields.desc?.trim() || undefined,
         personality: fields.personality?.trim() || undefined,
@@ -2851,6 +2858,7 @@ export function editNpc(
     age?: string;
     relation?: string;
     ties?: string;
+    intimacy?: string;
     title?: string;
     desc?: string;
     personality?: string;
@@ -2873,6 +2881,7 @@ export function editNpc(
   const gender = text(patch.gender, prev?.gender);
   const relation = text(patch.relation, prev?.relation);
   const ties = text(patch.ties, prev?.ties);
+  const intimacy = text(patch.intimacy, prev?.intimacy);
   const title = text(patch.title, prev?.title);
   const desc = text(patch.desc, prev?.desc);
   const personality = text(patch.personality, prev?.personality);
@@ -2895,7 +2904,7 @@ export function editNpc(
   applyNpcAffinity(affinity, patch);
   const evidence = patch.location === undefined && patch.follow === undefined
     ? { locationStale: prev?.locationStale, lastKnownLocation: prev?.lastKnownLocation } : {};
-  const fields = { gender, age, ageTime, relation, ties, title, desc, personality, outfit, condition, conditionTime, important, follow, location, ...affinity, ...evidence };
+  const fields = { gender, age, ageTime, relation, ties, intimacy, title, desc, personality, outfit, condition, conditionTime, important, follow, location, ...affinity, ...evidence };
   if (norm(newName) !== norm(oldName)) {
     return appendOpToLatestLeaf({
       npcs: { remove: [oldName], add: [{ name: newName, ...fields }] },
