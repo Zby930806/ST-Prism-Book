@@ -12,7 +12,8 @@ async function hydrateWith(patch: Record<string, unknown> | null) {
   if (patch) {
     const stored = JSON.parse(JSON.stringify(settings.apiSettings));
     delete stored.memoryBudgetMigrated;
-    Object.assign(stored, { wiPatternsSeeded: true }, patch);
+    // 时间标签指令的预留份额按内置文本的长度算;这里的数值是按旧版文本核对的
+    Object.assign(stored, { wiPatternsSeeded: true, promptStyle: 'classic' }, patch);
     extensionSettings.baibai_book = stored;
   }
   const save = vi.fn();

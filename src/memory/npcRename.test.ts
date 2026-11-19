@@ -66,6 +66,17 @@ describe('改名操作的校验', () => {
     expect(() => parse(body as Record<string, unknown>)).toThrow(SummaryResponseError);
     expect(() => parse(body as Record<string, unknown>)).toThrow(message);
   });
+  it('自报姓名把姓和名拆开说的原句也算含新名字;各字相隔太远或顺序不对的不算', () => {
+    const split = ['货郎放下担子，拱手道：“小人姓秦，单名一个朔字，常年在两地之间跑。”远处有人喊了一声朔风起了，他又说自己是土生土长的秦地人。'];
+    const run = (to: string, evidence: string) => parseSummaryResponse(JSON.stringify({ summary: '货郎报出名字。', npcs: { rename: [{ from: '货郎A', to, evidence }] } }), {
+      builtin: false, sourceTexts: split, sourceContent: split[0], npcRoster: ['货郎A'], userName: '沈遥', finalize: d => finalizeDelta(d, []),
+    });
+    expect(run('秦朔', '小人姓秦，单名一个朔字').npcs?.rename).toEqual([{ from: '货郎A', to: '秦朔' }]);
+    // 顺序反了(先朔后秦)
+    expect(() => run('秦朔', '远处有人喊了一声朔风起了，他又说自己是土生土长的秦地人')).toThrow('没有新名字');
+    // 两个字都在原句里,但隔得太远
+    expect(() => run('拱跑', '拱手道：“小人姓秦，单名一个朔字，常年在两地之间跑')).toThrow('没有新名字');
+  });
   it('改名后用新名字整段改写伤情', () => {
     const d = parse({ npcs: { ...rename().npcs, update: [{ name: '老周', condition: '右手伤口结痂' }] } });
     expect(d.npcs?.update?.[0]).toMatchObject({ name: '老周', condition: '右手伤口结痂' });

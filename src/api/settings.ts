@@ -183,6 +183,14 @@ export interface UiPrefs {
 /** 字数详尽档位:detailed=详细(默认),concise=精简(总结/二次总结字数一并降低)。仅影响内置模板。 */
 export type Verbosity = 'detailed' | 'concise';
 
+/**
+ * 内置提示词版本:compact=精简版(1.4.18 起),classic=旧版(1.4.17 及以前的写法)。
+ * 管单楼摘要、合并摘要、总结、二次总结和时间标签指令的内置文本;字段协议两版相同,自定义模板不受影响。
+ */
+export type PromptStyle = 'compact' | 'classic';
+/** 没有保存过这一项时使用的版本。 */
+export const DEFAULT_PROMPT_STYLE: PromptStyle = 'compact';
+
 /** 每楼摘要字数要求(含标点)的默认值与可设范围。 */
 export const SUMMARY_MAX_CHARS_DEFAULT = 300;
 export const SUMMARY_MAX_CHARS_MIN = 50;
@@ -347,6 +355,12 @@ export interface InjectionSections {
    * 已有清单保留、照常重放。注入只看本项,不依赖 NPC 名册和场景信息(在场判定读的是记忆数据,不是注入文本)。
    */
   knowledge: boolean;
+  /**
+   * 亲密记录(角色档案的 intimacy),默认关闭。与了解清单一样同时控制记录和注入:关闭时摘要、总结请求不带相关规则和材料,
+   * 模型输出的 intimacy 也不收,提示词与没有这项功能时逐字相同;已有记录保留、照常重放和显示。
+   * 1.4.16 加入这项功能时没有开关、一律记录;1.4.17 起改为可选,没有保存过这一项的设置(含从 1.4.16 升级)按关闭处理。
+   */
+  intimacy: boolean;
 }
 
 export interface ApiSettings {
@@ -365,6 +379,8 @@ export interface ApiSettings {
   taskContextMode: 'default' | 'custom' | 'disabled';
   /** 内置规则开头的「内容边界」:auto 按模型名判断(含 deepseek 的不发送,其余发送),always 始终发送,never 不发送。 */
   contentBoundary: 'auto' | 'always' | 'never';
+  /** 内置提示词版本(精简版 / 旧版),见 PromptStyle。 */
+  promptStyle: PromptStyle;
   /** 主对话四类记忆槽的总估算token预算,0=不限(默认);不是模型精确token数。 */
   memoryBudgetTokens: number;
   /** 预算默认值改为不限制时的一次性迁移标记:旧版本按原默认值保存的 6000 改成 0,之后用户自己填的值不再改动。 */
@@ -428,6 +444,12 @@ export interface ApiSettings {
   recentResolvedPlansCount: number;
   /** 摘要/总结失败(请求报错或 JSON 解析失败)的最大重试次数。0=不重试;默认 1(最多再试一次)。 */
   summaryMaxRetries: number;
+  /**
+   * 总结写完后核对(默认开):总结或二次总结写好后多发一个请求,让模型对照输入找出写错的人物、日期、数量、地点和结果,
+   * 按原句替换(见 memory/summarySelfCheck.ts)。只换写错的那一句,不重写、不删内容;核对失败时照原样保存。
+   * 没有保存过这一项的设置(包括从旧版本升级)按开启处理。
+   */
+  resummarySelfCheck: boolean;
   /**
    * 跟随主 API(未给摘要/总结指派副 API 渠道)时,请求期间临时设置的主 API 最大回复(tokens)。
    * 酒馆的 generateRaw 会把它原样作为 max_tokens 发给服务商,超过模型的输出上限会被拒绝。
@@ -547,6 +569,7 @@ function defaults(): ApiSettings {
     promptBases: {},
     taskContextMode: 'default',
     contentBoundary: 'auto',
+    promptStyle: DEFAULT_PROMPT_STYLE,
     memoryBudgetTokens: 0,
     memoryBudgetMigrated: false,
     verbosity: 'detailed',
@@ -578,7 +601,7 @@ function defaults(): ApiSettings {
     autoSummaryEnabled: true,
     summarizeOnReplyEnd: false,
     summaryOnlyMode: false,
-    injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, npcAffinity: true, items: true, scenes: true, secrets: true, injuryReminder: true, knowledge: false },
+    injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, npcAffinity: true, items: true, scenes: true, secrets: true, injuryReminder: true, knowledge: false, intimacy: false },
     keepRecent: 4,
     keepRecentMigrated: false,
     excludedChars: [],
@@ -594,6 +617,7 @@ function defaults(): ApiSettings {
     higherResummaryThreshold: 3,
     recentResolvedPlansCount: 5,
     summaryMaxRetries: 1,
+    resummarySelfCheck: true,
     mainApiMaxTokens: MAIN_API_MAX_TOKENS_DEFAULT,
     mainApiPrefill: true,
     npcEnrichAuto: true,
@@ -631,6 +655,8 @@ function normalize(raw: unknown): ApiSettings {
     ? savedMode : (typeof merged.prompts.jailbreak === 'string' && merged.prompts.jailbreak.trim() ? 'custom' : 'default');
   const savedBoundary = (raw as Partial<ApiSettings>).contentBoundary;
   merged.contentBoundary = savedBoundary === 'always' || savedBoundary === 'never' ? savedBoundary : 'auto';
+  const savedStyle = (raw as Partial<ApiSettings>).promptStyle;
+  merged.promptStyle = savedStyle === 'compact' || savedStyle === 'classic' ? savedStyle : DEFAULT_PROMPT_STYLE;
   const budget = (raw as Partial<ApiSettings>).memoryBudgetTokens;
   merged.memoryBudgetTokens = normalizeMemoryBudgetTokens(budget);
   merged.memoryBudgetMigrated = (raw as Partial<ApiSettings>).memoryBudgetMigrated === true;
@@ -701,6 +727,7 @@ function normalize(raw: unknown): ApiSettings {
     secrets: typeof ri.secrets === 'boolean' ? ri.secrets : true,
     injuryReminder: typeof ri.injuryReminder === 'boolean' ? ri.injuryReminder : true,
     knowledge: ri.knowledge === true,
+    intimacy: typeof ri.intimacy === 'boolean' ? ri.intimacy : false,
   };
   // vector 同为嵌套对象(且内含子对象),逐层兜底,老数据缺字段时回退默认。
   // 注:旧结构曾有 vector.channels + {channel,model};扁平化后弃用,逐角色按 url/key/model 兜底,
@@ -762,6 +789,8 @@ function normalize(raw: unknown): ApiSettings {
     Number.isFinite(merged.summaryMaxRetries) && merged.summaryMaxRetries >= 0
       ? Math.floor(merged.summaryMaxRetries)
       : 1;
+  // 总结写完后核对:布尔,旧数据没有这个键(或值非法)时按默认处理
+  merged.resummarySelfCheck = typeof rb.resummarySelfCheck === 'boolean' ? rb.resummarySelfCheck : d.resummarySelfCheck;
   // 回看原文补全角色档案:布尔,旧数据没有这个键(或值非法)时按开启处理
   merged.npcEnrichAuto = typeof merged.npcEnrichAuto === 'boolean' ? merged.npcEnrichAuto : true;
   // 回复结束后立即摘要:布尔,缺失(老数据无此键)或类型不符时回退 false(默认在发送下一条时摘要)
@@ -886,6 +915,7 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.promptBases = src.promptBases;
   target.taskContextMode = src.taskContextMode;
   target.contentBoundary = src.contentBoundary;
+  target.promptStyle = src.promptStyle;
   target.memoryBudgetTokens = src.memoryBudgetTokens;
   target.memoryBudgetMigrated = src.memoryBudgetMigrated;
   target.verbosity = src.verbosity;
@@ -909,6 +939,7 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.higherResummaryThreshold = src.higherResummaryThreshold;
   target.recentResolvedPlansCount = src.recentResolvedPlansCount;
   target.summaryMaxRetries = src.summaryMaxRetries;
+  target.resummarySelfCheck = src.resummarySelfCheck;
   target.mainApiMaxTokens = src.mainApiMaxTokens;
   target.mainApiPrefill = src.mainApiPrefill;
   target.npcEnrichAuto = src.npcEnrichAuto;

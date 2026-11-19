@@ -1,6 +1,7 @@
 import { NpcRenameError, validateNpcRenames } from './npcRename';
 import { extractJsonObject } from './json';
 import { knowledgeEntryProblem, knowledgeNames } from './knowledge';
+import { implausibleSummary } from './summarySanity';
 import type { EvidenceDropReason } from './sourceEvidence';
 import type { StoredDelta, SummaryDelta } from './types';
 
@@ -228,6 +229,10 @@ export function parseSummaryResponse(raw: string, options: {
     throw new SummaryResponseError('摘要结果必须是根对象，且包含非空字符串 summary。');
   }
   const summary = parsed.summary.trim();
+  // 拒答、复述指令这类「不是摘要」的内容不保存,最后一次尝试也一样:存下来这一楼的内容就从记忆里丢了
+  const sourceChars = (options.sourceTexts ?? []).reduce((n, t) => n + Array.from(String(t ?? '')).length, 0);
+  const implausible = implausibleSummary(summary, sourceChars, 'floor');
+  if (implausible) throw new SummaryResponseError(`summary 不是这一楼的摘要（${implausible}）。请依据原文重写 summary。`);
   const lenient = !!options.onDroppedEvidence;
   const refs = options.refCounts ?? {};
   const dropped: DroppedEvidence[] = [];

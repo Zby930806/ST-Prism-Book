@@ -9,12 +9,15 @@ import { getContext, getCheckWorldInfo, getEjsTemplate, mainApiModelName, setMes
 import { toast } from '@/st/toast';
 import { addSummary, classifyNpcPresence, deriveAfterDelta, deriveMemory, finalizeDelta, fmtVarOpsInline, getLeaf, invalidateSummaryAncestors, itemChangesOf, leafValid, makeLeafId, pruneBrokenComps, relocateManualOps, syncItemLogFromMessage } from './apply';
 import { extractJsonObject } from './json';
+import { uncoveredInputs, unrelatedToInputs } from './summaryCoverage';
+import { applyFixes, buildSelfCheckPrompt, parseSelfCheckReply } from './summarySelfCheck';
+import { implausibleSummary } from './summarySanity';
 import { npcMentioned } from './npcLabel';
 import { planAutoEnrichment, readEnrichRecord, runAutoEnrichment, writeEnrichRecords, type EnrichRecordUpdate } from './npcEnrich';
 import { parseSummaryResponse, SummaryResponseError, describeDropped, type DroppedEvidence } from './summaryResponse';
 import { selectKnowledgeForSummary } from './knowledge';
 import { clearInjection, refreshInjection, renderHistoryNodes, selectHistoryNodesBefore } from './inject';
-import { BATCH_SUMMARY_THINKING_CHECKLIST, buildBatchSummaryPrompt, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, sendsContentBoundary, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
+import { batchSummaryChecklist, buildBatchSummaryPrompt, buildCharCardSystem, buildPersonaSystem, buildResummaryPrompt, buildSummaryPrompt, buildSummaryThinking, sendsContentBoundary, summaryMaxChars, usesBuiltinSummary, buildWorldInfoSystem, fmtItemLogInline, RESUMMARY_THINKING_PREFILL, selectRecentResolvedPlans } from './prompts';
 import { clampToTimeTags, cleanBody, explicitOpeningTime, hasStoryBody, INITIAL_TIME_ORIGIN_KEY, initialStoryTime, isBeingRegenerated, latestStoryTime, markRegenerating, parseTimeRange, storyTimeValue, syncTimeTagRegex, writeItemLogTag, writeVarLogTag } from './timeTag';
 import { renderSourceHints, type SourceExcerpt } from './sourceHints';
 import { memory, memoryWriteIssue, checkCompatibility, recomputeDerived, scheduleLeafFlush } from './store';
@@ -1635,7 +1638,7 @@ async function summarizeFloorWork(
   }, { contentBoundary: sender.contentBoundary });
 
   const builtin = usesBuiltinSummary();
-  const { checklist, prefill } = buildSummaryThinking(ctx.name1, !!knowledge);
+  const { checklist, prefill } = buildSummaryThinking(ctx.name1, !!knowledge, hasTimeTags);
   // 越稳定的越靠前:任务说明、规则、角色卡、主角设定在同一个聊天里基本不变;世界书按本楼内容激活、每楼不同,
   // 排在它们后面。这样支持前缀缓存的服务商能复用前面那段两三万字的规则,批量补摘省钱也更快。
   const messages: ChatMsg[] = [];
@@ -2236,13 +2239,13 @@ interface LiteItem {
 }
 
 /**
- * 解析合并摘要:根键 floors 为数组,材料中的每个楼层恰好一条非空 summary。
+ * 解析合并摘要:根键 floors 为数组,材料中的每个楼层恰好一条非空 summary(内容明显不是摘要的按空摘要处理,见 summarySanity.ts)。
  * 前几次尝试:任何格式问题抛 SummaryResponseError,由 sendAndParse 附上原因重试。
  * 最后一次尝试(finalAttempt):材料里的楼层都写全了时,忽略材料以外的楼层号、同层重复的取第一条;
  * 有漏写或空摘要的楼层时,只采用第一个缺口之前的连续楼层(不在中间留缺口),其余交给调用方拆小重试。
  * 既有缺口、又出现材料以外的楼层号或同层重复时多半是编号整体错位,仍整组不保存,免得把摘要挂到错误的楼层上。
  */
-function parseLiteReply(raw: string, floors: number[], finalAttempt = false): { items: Map<number, LiteItem>; rest: number[] } {
+function parseLiteReply(raw: string, floors: number[], finalAttempt = false, sourceChars?: (floor: number) => number): { items: Map<number, LiteItem>; rest: number[] } {
   const d = extractJsonObject<Record<string, unknown>>(raw);
   if (d === null) {
     const unfinished = unfinishedReply(raw);
@@ -2280,6 +2283,12 @@ function parseLiteReply(raw: string, floors: number[], finalAttempt = false): { 
     const summary = llmString(item.summary);
     if (!summary) {
       if (!finalAttempt) throw new SummaryResponseError(`楼层 #${floor} 的 summary 为空。`);
+      continue;
+    }
+    // 拒答、复述指令这类不是摘要的内容,与空摘要同样处理:这一层不保存
+    const implausible = sourceChars ? implausibleSummary(summary, sourceChars(floor), 'floor') : '';
+    if (implausible) {
+      if (!finalAttempt) throw new SummaryResponseError(`楼层 #${floor} 的 summary 不是这一楼的摘要（${implausible}）。请依据原文重写。`);
       continue;
     }
     out.set(floor, { summary, timeStart: storyTimeValue(llmScalar(item.timeStart)), timeEnd: storyTimeValue(llmScalar(item.timeEnd)) });
@@ -2349,12 +2358,12 @@ async function summarizeLiteChunk(chat: STMessage[], floors: number[], sender: S
   if (persona) messages.push({ role: 'system', content: buildPersonaSystem(persona) });
   messages.push(
     { role: 'user', content: prompt.user },
-    { role: 'system', content: BATCH_SUMMARY_THINKING_CHECKLIST },
+    { role: 'system', content: batchSummaryChecklist() },
     { role: 'assistant', content: RESUMMARY_THINKING_PREFILL },
   );
   assertUnchanged();
   const items = await sendAndParse(request => { assertUnchanged(); return sender.send(request); }, messages, (raw, finalAttempt) => {
-    const parsed = parseLiteReply(raw, floors, finalAttempt);
+    const parsed = parseLiteReply(raw, floors, finalAttempt, f => floorSourceChars(chat, f));
     console.log('[棱镜宝书] 合并摘要校验通过:', { floors: [...parsed.items.keys()], rest: parsed.rest, chars: [...parsed.items.values()].map(item => Array.from(item.summary).length) });
     return parsed;
   }).catch((error: unknown) => {
@@ -2652,12 +2661,14 @@ const HOLD_KINDS = new Set(['truncated', 'context-length', 'bad-request', 'filte
 
 /** 总结所用 API 的相关设置;变化后暂停的批次可以再自动尝试。 */
 function resummarySettingsKey(): string {
+  // 提示词换了(内置版本或自定义模板)也算设置变了:漏写输入、写得太长被截断的同一批,换一版提示词可能就写得成
+  const prompts = [apiSettings.promptStyle, apiSettings.prompts.resummary, apiSettings.prompts.resummary2];
   const channel = getChannelForTask('resummary');
   if (channel) {
     const { key: _key, ...rest } = channel;
-    return JSON.stringify(['channel', rest]);
+    return JSON.stringify(['channel', rest, prompts]);
   }
-  return JSON.stringify(['main', mainApiModelName(getContext()), apiSettings.mainApiMaxTokens, apiSettings.mainApiPrefill]);
+  return JSON.stringify(['main', mainApiModelName(getContext()), apiSettings.mainApiMaxTokens, apiSettings.mainApiPrefill, prompts]);
 }
 
 function clearResummaryHold(): void {
@@ -2745,11 +2756,14 @@ async function resummaryPass(options: ResummaryOptions = {}): Promise<{ made: nu
         { role: 'assistant', content: RESUMMARY_THINKING_PREFILL },
       );
       // 发请求 + 解析,失败按设置重试(请求报错或 JSON 无效/缺 summary 都算失败)
-      const delta = await sendAndParse(request => { assertSourcesUnchanged(); return sender.send(request); }, messages, raw => {
+      const delta = await sendAndParse(request => { assertSourcesUnchanged(); return sender.send(request); }, messages, (raw, finalAttempt) => {
         console.log('[棱镜宝书] 总结原始返回(未清洗):\n', raw);
-        return parseResummaryReply(raw, what);
+        return parseResummaryReply(raw, what, content.length, prompt.coverage ? { inputs: batch.map(n => n.text), finalAttempt, second: level + 1 >= 2 } : undefined);
       });
 
+      assertSourcesUnchanged();
+      // 写完后核对一遍(设置开启时):只换写错的句子,核对失败照原样保存
+      const text = await selfCheckedSummary(sender, what, content, delta.summary.trim(), assertSourcesUnchanged);
       assertSourcesUnchanged();
       // 生成上层节点收纳这批(**不删 batch**),时间戳取批内最新,排在它们之后
       const newCreatedAt = Math.max(...batch.map(s => s.createdAt)) + 1;
@@ -2757,7 +2771,7 @@ async function resummaryPass(options: ResummaryOptions = {}): Promise<{ made: nu
       const timeStart = batch.find(s => s.timeStart)?.timeStart;
       const timeEnd = [...batch].reverse().find(s => s.timeEnd)?.timeEnd;
       addSummary({
-        text: delta.summary.trim(),
+        text,
         level: level + 1,
         childIds: ids,
         auto: true,
@@ -2766,13 +2780,15 @@ async function resummaryPass(options: ResummaryOptions = {}): Promise<{ made: nu
         timeEnd,
       });
       made += 1;
+      if (delta.missed.length) toast(missedInputsNotice(what, delta.missed), 'warning');
       if (resummaryHold.active && resummaryHold.level === level) clearResummaryHold();
       refreshInjection();
       // 不 break:继续外层 for,上一层可能也攒够了 → 连锁压更高层
     } catch (e) {
       const failure = failureFor(e, `${what}未完成`, sender);
       recordFailure(failure);
-      if (failure instanceof ApiError && HOLD_KINDS.has(failure.kind)) {
+      // 漏掉输入、重试后仍然如此的批次同样暂停自动重发:否则每来一楼都会原样再请求一次
+      if ((failure instanceof ApiError && HOLD_KINDS.has(failure.kind)) || e instanceof ResummaryCoverageError) {
         Object.assign(resummaryHold, { active: true, chatId, level, ids, settingsKey: resummarySettingsKey(), message: engineState.lastError });
       }
       return { made, failed: true }; // 本层失败则停止连锁
@@ -2798,17 +2814,158 @@ function singleParagraph(text: string): string {
   return parts.map((p, i) => (i < parts.length - 1 && !SENTENCE_END.test(p) ? `${p}。` : p)).join('');
 }
 
-/** 解析总结回复;拿不到 summary 时说清是截断、空回还是没按格式输出。 */
-function parseResummaryReply(raw: string, what: string): { summary: string } {
-  const d = extractJsonObject<{ summary?: string }>(raw);
-  const summary = singleParagraph(llmString(d?.summary));
-  if (summary) return { summary };
+/**
+ * 取出总结正文。模型偶尔把长正文拆成几个字段,只取 summary 的话后面几段就无声地丢了。
+ * 实测(deepseek-v4.1-flash,约 700 次总结请求里 2 次):{"summary": "…", "summary_continued": "…"},最多拆到 summary_continued4。
+ * 名字是 summary 加「continued / part / 续 / 序号」的字符串字段,按出现的先后接在后面;
+ * summary_note、summary_chars 这类模型自己加的备注和字数不是正文,不接。
+ */
+const SUMMARY_CONTINUATION_KEY = /^summary[\s_-]*(cont(inued|inuation)?|part|续)?[\s_-]*\d*$/i;
+
+/**
+ * 精简版二次总结的大事记:{"timeline": [{ "date": "日期", "event": "一句话", "agreed": "短语" }, …]},接成一段文字保存。
+ * 一项接成「日期：事件；定下的事」,补上句号;项直接写成一个字符串的照用。
+ * 内置提示词不要求 state(结束时仍然有效的事,实测里这一段错得最多);模型自己带了,或自定义模板要了,就接在最后并标明。
+ */
+function chronicleItems(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(item => {
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      // { date, event, agreed }:日期在前,其余字段按出现的先后用分号接起来;没有 date 字段时第一个字段当开头
+      const { date, ...rest } = item as Record<string, unknown>;
+      const parts = [date, ...Object.values(rest)].map(llmScalar).map(text => text.replace(/[。；;，,\s]+$/, '')).filter(Boolean);
+      return parts.length > 1 ? `${parts[0]}：${parts.slice(1).join('；')}` : parts[0] ?? '';
+    }
+    return llmScalar(item);
+  }).map(text => text.replace(/\s*\n+\s*/g, '')).filter(Boolean);
+}
+function chronicleText(d: Record<string, unknown>): string {
+  const timeline = chronicleItems(d.timeline);
+  if (!timeline.length) return '';
+  const state = chronicleItems(d.state).map(text => text.replace(/[。；;.，,、\s]+$/, '')).filter(Boolean);
+  // 每项收在句号上(以引号、括号收尾的也补):各项接成一段后,一项就是一句
+  const body = timeline.map(text => text.replace(/[；;，,、\s]+$/, '')).map(text => (/[。！？…!?.][」』”）)]?$/.test(text) ? text : `${text}。`)).join('');
+  return state.length ? `${body}到此为止仍然有效：${state.join('；')}。` : body;
+}
+
+function resummaryText(d: Record<string, unknown> | null): string {
+  const head = llmString(d?.summary);
+  if (d && !head) return chronicleText(d);
+  if (!d || !head) return head;
+  const rest = Object.entries(d)
+    .filter(([key, value]) => key !== 'summary' && SUMMARY_CONTINUATION_KEY.test(key) && llmString(value))
+    .map(([, value]) => llmString(value));
+  return [head, ...rest].join('\n');
+}
+
+/** 核对每条输入有没有被写到(见 summaryCoverage.ts);只有精简版内置提示词才核对。 */
+interface CoverageCheck { inputs: string[]; finalAttempt: boolean; second: boolean }
+/** 大事记一项的字数超过它,就当作是把输入整段搬了进来(提示词里要求的是一百字以内,留一倍余量给事多的场合)。 */
+const CHRONICLE_ITEM_MAX = 200;
+/** 总结漏掉了输入、重试后仍然如此。这一批暂停自动重发(同截断等失败),免得每来一楼都原样再请求一次。 */
+class ResummaryCoverageError extends Error {}
+function missedInputsNotice(what: string, missed: number[]): string {
+  return `${what}已保存，但其中没有写到输入的${missed.map(i => `第 ${i + 1} 条`).join('、')}摘要（重试后仍然如此）；这部分内容只留在逐楼摘要里。`;
+}
+
+/**
+ * 解析总结回复;拿不到 summary 时说清是截断、空回还是没按格式输出。
+ * inputChars 是待合并内容的字数:summary 相对它短得离谱,或者是拒答、复述指令时不保存(见 summarySanity.ts)——
+ * 存下来的话,这一批摘要的内容就被一句废话顶替了。
+ * coverage(只有精简版内置提示词):
+ *  - 字句和输入一处也对不上(「没有收到材料」之类的说明):不保存;
+ *  - 有整条输入没被写到,还能重试:按格式错误处理,把漏掉的是第几条告诉模型重写;
+ *  - 最后一次尝试:二次总结漏了任何一条(一条就是十几楼)、或总结漏了两条以上或四分之一以上,不保存;
+ *    总结只漏一条时照常保存,由调用方提示(missed),这条摘要的内容仍在逐楼摘要里;
+ *  - 二次总结的大事记把输入整段搬进了各项,还能重试就让模型重写一次。
+ */
+function parseResummaryReply(raw: string, what: string, inputChars = 0, coverage?: CoverageCheck): { summary: string; missed: number[] } {
+  const d = extractJsonObject<Record<string, unknown>>(raw);
+  const summary = singleParagraph(resummaryText(d));
+  if (summary) {
+    const implausible = implausibleSummary(summary, inputChars, 'merge');
+    if (implausible) throw new Error(`${what}失败：模型交回的不是总结（${implausible}），没有保存，可以重试或换个模型。`);
+    // 交回的是「没有收到材料」之类的说明,或写成了别的内容:字句和输入一处也对不上
+    if (coverage && unrelatedToInputs(coverage.inputs, summary)) throw new Error(`${what}失败：模型交回的内容和输入对不上（没有写到输入里的事），没有保存，可以重试或换个模型。`);
+    const missed = coverage ? uncoveredInputs(coverage.inputs, summary) : [];
+    if (coverage && missed.length) {
+      const list = missed.map(i => `第 ${i + 1} 条`).join('、');
+      if (!coverage.finalAttempt) throw new SummaryResponseError(`${what}里没有写到输入的${list}。每条输入里的场合都要写到，请重新输出完整的${what}。`);
+      if (coverage.second || missed.length >= 2 || missed.length / coverage.inputs.length >= 0.25) {
+        throw new ResummaryCoverageError(`${what}失败：${what}里没有写到输入的${list}（重试后仍然如此），没有保存。可以重试，或换个模型。`);
+      }
+    }
+    // 大事记的一项只该是一个场合的一两句话。把输入整段搬进各项的(开预填充时常见),还能重试就让模型重写;最后一次照常保存(事都在,只是没有缩短)
+    if (coverage && !coverage.finalAttempt && d && !llmString(d.summary)) {
+      const sizes = chronicleItems(d.timeline).map(text => Array.from(text).length);
+      const long = sizes.filter(size => size > CHRONICLE_ITEM_MAX);
+      if (long.length >= 3) {
+        throw new SummaryResponseError(`timeline 里有 ${long.length} 项超过 ${CHRONICLE_ITEM_MAX} 字（最长的 ${Math.max(...long)} 字），是把输入整段搬了进来。每一项重新写成一两句话（不超过一百个字），只留这个场合的事件、结果和定下的事，场合里的细节这一级不带；不用逐项数字数，也不要在检查块里打草稿。请重新输出完整的 timeline。`);
+      }
+    }
+    return { summary, missed };
+  }
   if (d === null) {
     const unfinished = unfinishedReply(raw);
     if (unfinished) throw unfinished;
   }
   if (!raw.trim()) throw new Error(`${what}失败：模型返回了空内容，可以重试或换个渠道。`);
   throw new Error(`${what}失败：模型没有按要求输出 JSON（可能是拒答，或只写了说明文字），可以重试或换个模型。`);
+}
+
+/** 核对的回复不超过这么多个字符就当成空回复(开着预填充时,个别渠道偶尔只回一个「>」就结束)。 */
+const SELF_CHECK_EMPTY_CHARS = 8;
+
+/**
+ * 总结、二次总结写完后的核对(设置「总结写完后核对」,默认开;规则和替换办法见 summarySelfCheck.ts):
+ * 多发一个请求,让模型对照输入找出写错的句子,按原句替换后返回。
+ * 不重试,只有空回复(几乎不花钱)再发一次。请求失败、没按格式回复、一处也没改上、解析或替换时出了意料之外的错,都原样返回——
+ * 核对出了问题,不能让刚写好的总结存不下来。
+ * 核对期间来源变了(切换聊天、要合并的摘要被改动)照常抛出,由调用方按「结果未写入」处理。
+ */
+async function selfCheckedSummary(sender: Sender, what: string, content: string, summary: string, assertSourcesUnchanged: () => void): Promise<string> {
+  if (!apiSettings.resummarySelfCheck) return summary;
+  let raw = '';
+  try {
+    const prompt = buildSelfCheckPrompt(what, content, summary);
+    const jb = taskContextPrompt();
+    const messages: ChatMsg[] = [];
+    if (jb) messages.push({ role: 'system', content: jb });
+    messages.push(
+      { role: 'system', content: prompt.system },
+      { role: 'user', content: prompt.user },
+      { role: 'system', content: prompt.note },
+      { role: 'assistant', content: prompt.prefill },
+    );
+    for (let attempt = 0; attempt < 2; attempt++) {
+      assertSourcesUnchanged();
+      try {
+        raw = await sender.send(messages);
+      } catch (e) {
+        if (attempt === 0 && e instanceof ApiError && e.kind === 'empty') continue;
+        throw e;
+      }
+      if (Array.from(String(raw ?? '').trim()).length > SELF_CHECK_EMPTY_CHARS) break;
+    }
+  } catch (e) {
+    if (e instanceof SummarySourceChangedError) throw e;
+    console.warn(`[棱镜宝书] ${what}写完后的核对没有完成,按原样保存:`, e instanceof Error ? e.message : String(e));
+    return summary;
+  }
+  console.log(`[棱镜宝书] ${what}核对原始返回(未清洗):\n`, raw);
+  try {
+    const fixes = parseSelfCheckReply(raw);
+    if (!fixes) {
+      console.warn(`[棱镜宝书] ${what}核对的回复没有按格式输出,按原样保存。`);
+      return summary;
+    }
+    const result = applyFixes(summary, fixes);
+    if (fixes.length) console.log(`[棱镜宝书] ${what}核对:改正 ${result.applied.length} 处,没有采用 ${result.skipped.length} 处`, { applied: result.applied, skipped: result.skipped });
+    return result.text.trim() ? result.text : summary;
+  } catch (e) {
+    console.warn(`[棱镜宝书] ${what}核对的结果没能套用,按原样保存:`, e instanceof Error ? e.message : String(e));
+    return summary;
+  }
 }
 
 /* ============ 手动强制总结(多选合并,无视阈值) ============ */
@@ -2939,23 +3096,26 @@ export async function summarizeSelected(nodeIds: string[]): Promise<{ made: numb
       { role: 'system', content: prompt.checklist },
       { role: 'assistant', content: RESUMMARY_THINKING_PREFILL },
     );
-    const delta = await sendAndParse(request => { assertSourcesUnchanged(); return sender.send(request); }, messages, raw => {
+    const delta = await sendAndParse(request => { assertSourcesUnchanged(); return sender.send(request); }, messages, (raw, finalAttempt) => {
       console.log('[棱镜宝书] 强制总结原始返回(未清洗):\n', raw);
-      return parseResummaryReply(raw, what);
+      return parseResummaryReply(raw, what, content.length, prompt.coverage ? { inputs: picked.map(n => n.text), finalAttempt, second: level >= 2 } : undefined);
     });
 
+    assertSourcesUnchanged();
+    const text = await selfCheckedSummary(sender, what, content, delta.summary.trim(), assertSourcesUnchanged);
     assertSourcesUnchanged();
     // 时间范围:picked 已按楼层升序 → 首个有起始的作 start,末个有结束的作 end(同 checkResummary)
     const timeStart = picked.find(s => s.timeStart)?.timeStart;
     const timeEnd = [...picked].reverse().find(s => s.timeEnd)?.timeEnd;
     addSummary({
-      text: delta.summary.trim(),
+      text,
       level,
       childIds: picked.map(s => s.id),
       auto: false, // 手动合并
       timeStart,
       timeEnd,
     });
+    if (delta.missed.length) toast(missedInputsNotice(what, delta.missed), 'warning');
     engineState.lastRunAt = Date.now();
     recomputeDerived();
   } catch (e) {

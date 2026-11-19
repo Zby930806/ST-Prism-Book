@@ -21,6 +21,7 @@ describe('已安装用户的默认时间提示词受控升级', () => {
     stored.autoSummaryEnabled = true;
     stored.memoryBudgetTokens = 0; // 自定义长文本不因预算裁剪混淆迁移断言。
     stored.wiPatternsSeeded = true;
+    stored.promptStyle = 'classic'; // 下面核对的是旧版的时间标签指令;精简版见 timeTagPlacement.test.ts
     const slots = new Map<string, string>();
     const extensionSettings = { baibai_book: stored };
     const save = vi.fn();

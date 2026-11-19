@@ -151,7 +151,8 @@ describe('总结字数设置的规整', () => {
     const stored = JSON.parse(JSON.stringify(settings.apiSettings));
     delete stored.resummaryMaxChars;
     delete stored.resummary2MaxChars;
-    Object.assign(stored, patch, { wiPatternsSeeded: true });
+    // 下面核对的是旧版内置文本:存档里写明旧版(没有这一项的旧存档升级后用精简版,见 promptStyle.test.ts)
+    Object.assign(stored, patch, { wiPatternsSeeded: true, promptStyle: 'classic' });
     vi.spyOn(context, 'getContext').mockReturnValue({
       chat: [], chatMetadata: {}, extensionSettings: { baibai_book: stored }, saveSettingsDebounced: vi.fn(),
     } as unknown as import('@/st/context').STContext);

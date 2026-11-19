@@ -21,12 +21,24 @@ const BOUNDARY_OPTIONS: { value: ApiSettings['contentBoundary']; label: string }
   { value: 'never', label: '不发送' },
 ];
 
+const STYLE_OPTIONS: { value: ApiSettings['promptStyle']; label: string }[] = [
+  { value: 'compact', label: '精简版' },
+  { value: 'classic', label: '旧版' },
+];
+
 const dialog = ref<InstanceType<typeof PromptDialog> | null>(null);
 </script>
 
 <template>
   <Collapsible class="prism-settings-card" title="自定义提示词" :open="false">
     <p class="prism-card-intro">点击一项打开编辑，可插入宏或恢复默认。修改过的提示词不随内置版本更新；内置版本更新后，此处标有「内置已更新」，打开可查看内置的改动。</p>
+    <SettingRow
+      kind="num" as="div" label="内置提示词版本"
+      hint="摘要、合并摘要、总结、二次总结和时间标签指令使用的内置文本。精简版的规则篇幅约为旧版的三分之一，输出字段相同；旧版为 1.4.17 及以前的文本。"
+      details="切换后新生成的摘要和总结使用所选版本，已有记录不变，无需重新摘要。「精简」指提示词本身的篇幅：精简版的总结要求每个场合至少留一句，写出的总结比旧版长，留下的事实更多；二次总结写成按日期排列的大事记。想要更短的总结可改回旧版。已自定义的提示词不受此项影响：照哪一版修改，就按那一版的材料格式和核对步骤发送。下方列表中未自定义的项，打开后显示所选版本的内置文本。"
+    >
+      <BbsSelect v-model="apiSettings.promptStyle" :options="STYLE_OPTIONS" class="prism-mode-select" aria-label="内置提示词版本" />
+    </SettingRow>
     <SettingRow kind="num" as="div" label="任务说明模式" hint="已有的自定义内容会保留。模式为内置或自定义时，保存与内置不同的任务说明自动切换为「自定义」，恢复默认后保存即使用内置说明；模式为「禁用」时，保存只修改内容，不会启用。「禁用」只是不发送这段说明，输出格式要求照常发送。">
       <BbsSelect v-model="apiSettings.taskContextMode" :options="TASK_MODE_OPTIONS" class="prism-mode-select" aria-label="任务说明模式" />
     </SettingRow>

@@ -554,8 +554,8 @@ export function fmtNpcContextBlocks(npcs: MemNpc[], scenes: MemScene[], here: st
   if ([...main, ...present, ...nearby, ...lastSeen.map(x => x.n), ...absentShown].some(n => aff(n))) preface.push(NPC_AFFINITY_BRIEFING);
   const ties = fmtNpcTiesContext(npcs);
   if (ties) preface.push(ties);
-  // 亲密记录同样全局输出一次:次数与避孕情况是累计事实,不随在场分档省略
-  const intimacy = fmtNpcIntimacyContext(npcs);
+  // 亲密记录同样全局输出一次:次数与避孕情况是累计事实,不随在场分档省略;「注入设置 → 亲密记录」关闭时不发
+  const intimacy = apiSettings.injection.intimacy === true ? fmtNpcIntimacyContext(npcs) : '';
   if (intimacy) preface.push(intimacy);
   const withPreface = (header: string, body: string): string => {
     const head = preface.length ? `${header}\n${preface.splice(0).join('\n')}` : header;

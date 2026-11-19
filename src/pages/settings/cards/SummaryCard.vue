@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/* 摘要设置：摘要时机、摘要与总结的篇幅、全文保留范围、总结合并频率、失败重试次数、跟随主 API 时的请求参数和回看原文补全角色档案。 */
+/* 摘要设置：摘要时机、摘要与总结的篇幅、全文保留范围、总结合并频率、失败重试次数、总结写完后的核对、跟随主 API 时的请求参数和回看原文补全角色档案。 */
 import BbsSelect from '@/components/BbsSelect.vue';
 import Collapsible from '@/components/Collapsible.vue';
 import { mainApiTokenState } from '@/api/client';
@@ -63,7 +63,7 @@ const resummary2Cap = computed(() => resummary2MaxChars());
 
 <template>
   <Collapsible class="prism-settings-card" title="摘要设置" :open="false">
-    <p class="prism-card-intro">摘要时机、摘要与总结的篇幅、全文保留范围、总结合并频率、失败重试次数、跟随主 API 时的请求参数和角色档案补全。</p>
+    <p class="prism-card-intro">摘要时机、摘要与总结的篇幅、全文保留范围、总结合并频率、失败重试次数、总结写完后的核对、跟随主 API 时的请求参数和角色档案补全。</p>
     <SettingRow label="启用自动摘要" hint="启用后自动摘要并隐藏旧楼层，同时启用正文时间标签（剧情时间的锚点）和积压拦截（有楼层漏摘时拦截发送并提示补摘）。">
       <input v-model="apiSettings.autoSummaryEnabled" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" />
     </SettingRow>
@@ -87,7 +87,7 @@ const resummary2Cap = computed(() => resummary2MaxChars());
       as="div"
       label="字数档位"
       hint="调整总结和二次总结的篇幅，仅影响内置提示词。"
-      details="详细：总结 600–1000 字，二次总结约为输入的 40%–50%；精简：总结 300–600 字，二次总结约为 30%–40%。总结只在「总结字数」为 0 时按档位计算：「摘要字数」高于 300 时，两档的总结字数都按同一比例放大，最多 3 倍，例如摘要字数 600 时，详细档总结为 1200–2000 字、精简档为 600–1200 字。二次总结不超过「二次总结字数」。信息较少时可更短。已生成的总结不会重写。每楼摘要的字数由上方「摘要字数」决定。"
+      details="详细：总结 600–1000 字，二次总结约为输入的 40%–50%；精简：总结 300–600 字，二次总结约为 30%–40%。总结只在「总结字数」为 0 时按档位计算：「摘要字数」高于 300 时，两档的总结字数都按同一比例放大，最多 3 倍，例如摘要字数 600 时，详细档总结为 1200–2000 字、精简档为 600–1200 字。二次总结不超过「二次总结字数」。信息较少时可更短。已生成的总结不会重写。每楼摘要的字数由上方「摘要字数」决定。内置提示词用精简版时：「总结字数」为 0 的总结，上限取上述字数与输入的一半（精简档四成）中较大的一个；二次总结写成按日期排列的大事记，上述比例只作参考目标。"
     >
       <BbsSelect v-model="apiSettings.verbosity" :options="VERBOSITY_OPTIONS" class="bbs-select-narrow" aria-label="字数档位" />
     </SettingRow>
@@ -95,7 +95,7 @@ const resummary2Cap = computed(() => resummary2MaxChars());
       kind="num"
       label="总结字数"
       :hint="`要求每条总结（L1）不超过该字数（含标点）。填 0 按字数档位和摘要字数自动计算，当前为 ${resummaryRange} 字。`"
-      :details="`可填 ${RESUMMARY_MAX_CHARS_MIN}–${RESUMMARY_MAX_CHARS_MAX}。填了数值后不再随字数档位和摘要字数变化，参考下限为该值的 60%（精简档 50%），信息较少时会更短。只约束模型生成，不限制保存：模型超出或手动改长均照常保存。仅对内置总结提示词生效，自定义模板中的 {{resummary_words}} 也按此填入。已生成的总结不会重写。`"
+      :details="`可填 ${RESUMMARY_MAX_CHARS_MIN}–${RESUMMARY_MAX_CHARS_MAX}。填了数值后不再随字数档位和摘要字数变化，参考下限为该值的 60%（精简档 50%），信息较少时会更短。只约束模型生成，不限制保存：模型超出或手动改长均照常保存。仅对内置总结提示词生效，自定义模板中的 {{resummary_words}} 也按此填入。已生成的总结不会重写。内置提示词用精简版、且此处为 0 时，上限放宽到输入的一半（精简档四成）：十几条摘要压进一千字，会丢掉细节和一部分情节；填了数值则以该数值为上限。`"
     >
       <input v-model.number="apiSettings.resummaryMaxChars" class="bbs-input bbs-num" type="number" min="0" :max="RESUMMARY_MAX_CHARS_MAX" @change="commit.resummaryMaxChars" />
     </SettingRow>
@@ -103,7 +103,7 @@ const resummary2Cap = computed(() => resummary2MaxChars());
       kind="num"
       label="二次总结字数"
       :hint="`要求每条二次总结（L2 及以上）不超过该字数（含标点）。填 0 自动取总结字数上限的 ${RESUMMARY2_AUTO_FACTOR} 倍，当前为 ${resummary2Cap} 字。`"
-      :details="`可填 ${RESUMMARY2_MAX_CHARS_MIN}–${RESUMMARY2_MAX_CHARS_MAX}。二次总结的篇幅按输入长度计算（详细档约为输入的 40%–50%，精简档约为 30%–40%），超过该字数时按该字数；没有上限时，合并的总结越长，二次总结就越长。只约束模型生成，不限制保存：模型超出或手动改长均照常保存。仅对内置二次总结提示词生效，自定义模板中的 {{target_min}}、{{target_max}} 也按此填入。已生成的二次总结不会重写。`"
+      :details="`可填 ${RESUMMARY2_MAX_CHARS_MIN}–${RESUMMARY2_MAX_CHARS_MAX}。二次总结的篇幅按输入长度计算（详细档约为输入的 40%–50%，精简档约为 30%–40%），超过该字数时按该字数；没有上限时，合并的总结越长，二次总结就越长。只约束模型生成，不限制保存：模型超出或手动改长均照常保存。仅对内置二次总结提示词生效，自定义模板中的 {{target_min}}、{{target_max}} 也按此填入。已生成的二次总结不会重写。内置提示词用精简版时，二次总结写成按日期排列的大事记（一个场合一项），该字数只作参考目标，场合多时会超过。`"
     >
       <input v-model.number="apiSettings.resummary2MaxChars" class="bbs-input bbs-num" type="number" min="0" :max="RESUMMARY2_MAX_CHARS_MAX" @change="commit.resummary2MaxChars" />
     </SettingRow>
@@ -135,8 +135,15 @@ const resummary2Cap = computed(() => resummary2MaxChars());
     >
       <input v-model.number="apiSettings.recentResolvedPlansCount" class="bbs-input bbs-num" type="number" min="0" @change="commit.recentResolvedPlansCount" />
     </SettingRow>
-    <SettingRow kind="num" label="失败重试次数" hint="摘要或总结失败（报错或返回内容无法解析）时的最多重试次数。密钥错误、额度不足、输出被截断等重试无效的错误不重试。最后一次尝试中不合格的单项更新只去掉该项，摘要和其余内容照常保存。填 0 不重试，默认 1。">
+    <SettingRow kind="num" label="失败重试次数" hint="摘要或总结失败（报错或返回内容无法解析）时的最多重试次数。密钥错误、额度不足、输出被截断等重试无效的错误不重试。最后一次尝试中不合格的单项更新只去掉该项，摘要和其余内容照常保存。填 0 不重试，默认 1。" details="内容没有通过校验时也按失败重试：交回的不是摘要（拒答的话、对输出要求的复述）；内置提示词用精简版时，总结没有写到某条输入，或二次总结把输入整段照搬。重试后仍然漏掉输入的总结不保存（十几条摘要里只漏一条时照常保存并提示）；二次总结重写后仍然照搬的照常保存，内容都在，只是没有缩短。">
       <input v-model.number="apiSettings.summaryMaxRetries" class="bbs-input bbs-num" type="number" min="0" @change="commit.summaryMaxRetries" />
+    </SettingRow>
+    <SettingRow
+      label="总结写完后核对"
+      hint="总结或二次总结写完后多发送一个请求，让模型对照输入逐个场合核对，改正写错的人物、日期、数量、地点和结果。默认开启；不想多用这个请求可以关闭。"
+      details="只替换写错的句子，不重写整条总结，也不删内容：找不到原句的改动、把内容删掉或换成别的话的改动都不采用。核对请求失败或没有按格式回复时，总结照原样保存。每次合并多用一个请求（默认设置下大约每 12 楼一次），用量和耗时比写这条总结的请求略多，使用总结任务的 API；跟随主 API 时，这个请求发完之前下一条回复会等它。内置提示词和自定义模板写出的总结都会核对，逐楼摘要不核对。核对只拿总结和输入比，看不到原文，逐楼摘要自己写错的地方查不出来。改了哪几句记在浏览器控制台里（搜「核对」）。"
+    >
+      <input v-model="apiSettings.resummarySelfCheck" type="checkbox" role="switch" class="bbs-checkbox bbs-switch" />
     </SettingRow>
     <SettingRow
       kind="num"

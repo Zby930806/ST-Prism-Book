@@ -1,7 +1,7 @@
 import { apiSettings } from '@/api/settings';
 import { getContext } from '@/st/context';
 import { chatShowsLedgerTags, LEDGER_PROTOCOL } from './ledgerProtocol';
-import { formatRange, TIME_TAG_PROMPT, timeTagBaselineLine, timeTagPrompt } from './timeTag';
+import { builtinTimeTagPrompt, formatRange, timeTagBaselineLine, timeTagPrompt } from './timeTag';
 import { isAiFloor, resolveKeepStart } from './engine';
 import { currentBundleHashes, currentVectorDb } from './vector/scope';
 
@@ -67,7 +67,7 @@ export function budgetLayout(): BudgetLayout {
   if (!total) {
     return { total: 0, history: Infinity, state: Infinity, recall: Infinity, timeTag: Infinity, timeTagReserved: 0, ledger: Infinity, ledgerReserved: 0, recallActive };
   }
-  const timeTag = Math.max(estimateTokens(TIME_TAG_PROMPT + timeTagBaselineLine()), Math.floor(total * TIME_TAG_SHARE));
+  const timeTag = Math.max(estimateTokens(builtinTimeTagPrompt() + timeTagBaselineLine()), Math.floor(total * TIME_TAG_SHARE));
   const timeTagActual = estimateTokens(timeTagPrompt());
   const timeTagReserved = apiSettings.autoSummaryEnabled && timeTagActual <= timeTag ? timeTagActual : 0;
   const ledgerReserved = chatShowsLedgerTags(getContext()?.chat) ? ledger : 0;

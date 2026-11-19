@@ -61,6 +61,8 @@ export default defineConfig(({ mode }) => ({
     // 只跑本项目的测试:根目录的 .pnpm-store(本地虚拟商店,gitignore)里存着
     // 其它 workspace 项目的源码,默认 glob 会扫进去产生无关失败。
     include: ['src/**/*.test.ts'],
+    // 每个测试开始前把内置提示词切到旧版(见 src/testSetup.ts)
+    setupFiles: ['src/testSetup.ts'],
     exclude: ['node_modules/**', '.pnpm-store/**'],
   },
 

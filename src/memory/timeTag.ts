@@ -52,14 +52,29 @@ export const RULE_COMPLETE_TIME_ANCHOR = `【时间锚点证据与精度】
 - 只有明确锚点和明确经过时长才能直接换算。推测不作为确定时间,不按楼数推算时长。
 - 时间标签维护当前主线时钟;闪回/插叙的过去时间写在正文叙述中,不倒灌当前时间。`;
 
-/** 注入主对话的固定提示词默认值(可在设置里覆盖)。 */
+/** 注入主对话的固定提示词默认值(可在设置里覆盖)。旧版;精简版见 TIME_TAG_PROMPT_COMPACT。 */
 export const TIME_TAG_PROMPT = `【主线时间锚点】
 正文前后各输出一次 <${START_TAG}>时间</${START_TAG}> 与 <${END_TAG}>时间</${END_TAG}>。标签不留空:优先用户时间与正文主线时间;仅深夜/黄昏/清晨等时段也保留,不得被虚构08:00覆盖;确无依据的新开场才用系统统一虚构起点,不另选日期或用现实日期。明确推进才更新,不每楼重置;只凭明确锚点与时长换算,不按经验推算。保留已知年份及原精度,不补未知年份/分钟。纯闪回沿用主线时间,过去时间只写正文。`;
+
+/**
+ * 精简版的时间标签指令(1.4.18 起,随「内置提示词版本」切换)。读它的是写正文的模型,所以:
+ * 写明两个标签各自的位置(预设要求把正文包进别的标签、正文后还有状态栏时,旧版的「正文前后」容易被理解成两个标签一起写在最后),
+ * 给出格式示例,并把「系统统一虚构起点」直接写成具体的时间。
+ */
+export const TIME_TAG_PROMPT_COMPACT = `【故事时间标签】
+每条回复都要标出这段剧情的故事内时间：正文之前写一行 <${START_TAG}>开始时间</${START_TAG}>，正文之后写一行 <${END_TAG}>结束时间</${END_TAG}>，各写一次，不写进思考过程。正文要包在别的标签里、或后面还有状态栏和选项时，仍然一前一后，两个标签不连着写。
+- 取值：开始时间沿用下面的「当前主线时间基准」；用户消息或正文写明了新的时间，或写明过了多久（「半个时辰后」「次日清晨」），才照着改。结束时间同理：正文没有写明时间推进，就和开始时间相同，不自己估算谈话、赶路用了多久。没有基准也没有任何时间线索的新开场，两个标签都写「${FICTIONAL_OPENING_TIME}」，不用现实日期。回忆和闪回不改变主线时间。
+- 写法：照基准的写法和精度，如 <${START_TAG}>2025/3/14 21:30</${START_TAG}> 或 <${END_TAG}>三月初七 深夜</${END_TAG}>；只知道时段就写时段，不补年份和分钟，标签不留空。`;
+
+/** 当前选用版本的内置时间标签指令。 */
+export function builtinTimeTagPrompt(): string {
+  return apiSettings.promptStyle === 'compact' ? TIME_TAG_PROMPT_COMPACT : TIME_TAG_PROMPT;
+}
 
 /** 当前生效的固定提示词(用户自定义优先,空则用内置默认)。 */
 export function timeTagPrompt(): string {
   const custom = normalizeSavedTimeTag(apiSettings.prompts.timeTag).trim();
-  return (custom || TIME_TAG_PROMPT) + timeTagBaselineLine();
+  return (custom || builtinTimeTagPrompt()) + timeTagBaselineLine();
 }
 
 /**
@@ -406,7 +421,17 @@ function collectTimeTagSegments(s: string): string {
     if (last) segments.push(s.slice(start.index, last.end));
   });
   // 每个开始标签之后都没有结束标签:按只有开始标签处理
-  return segments.length ? segments.join('\n') : s.slice(starts[starts.length - 1].index);
+  if (!segments.length) return s.slice(starts[starts.length - 1].index);
+  const joined = segments.join('\n');
+  // 各对标签之间都没有正文、标签之外却有文字:模型把两个标签连在一起写在了正文之前或之后。
+  // 这时标签只当时间用,不拿来裁正文,否则这一楼的正文会被整段丢掉,无法摘要。
+  if (!withoutTimeTags(joined) && withoutTimeTags(s)) return s;
+  return joined;
+}
+
+/** 去掉时间标签和空白后剩下的文字;用来判断一段里有没有正文。 */
+function withoutTimeTags(s: string): string {
+  return s.replace(RE_START_ALL, '').replace(RE_END_ALL, '').trim();
 }
 
 /**

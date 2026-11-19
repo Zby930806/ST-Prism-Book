@@ -205,6 +205,40 @@ describe('较早楼层合并摘要', () => {
     expect(chat[1].extra?.bbs_leaf?.text).toBe('楼层1。');
   });
 
+  it('某一层交回的不是摘要（复述输出要求、拒答）时与空摘要同样处理：附原因重试；一直这样就不保存这一层', async () => {
+    const ECHO = '检查必需项是否齐全，然后只输出 JSON。';
+    const chat = chatOf(4, i => `第${i}层正文。` + '林舟沿着河岸往下游走。'.repeat(40));
+    useChat(chat);
+    Object.assign(settings.apiSettings, { batchFullRecent: 0, batchMaxFloors: 4, summaryMaxRetries: 1 });
+    const good = (f: number) => ({ floor: f, summary: `楼层${f}：林舟沿着河岸往下游走了很久。`, timeStart: '第1天', timeEnd: '第1天' });
+    let liteCalls = 0;
+    vi.mocked(client.requestViaMainApi).mockImplementation(async messages => {
+      if (!isLite(messages)) return response('林舟沿着河岸往下游走了很久。');
+      const floors = liteFloorsOf(messages);
+      return JSON.stringify({ floors: floors.map(f => (liteCalls === 0 && f === 5 ? { ...good(f), summary: ECHO } : good(f))) }, (liteCalls++, undefined));
+    });
+
+    expect(await batchBackfill({ lite: true })).toEqual({ done: 4, total: 4, cancelled: false });
+    const calls = vi.mocked(client.requestViaMainApi).mock.calls.map(c => c[0]);
+    expect(calls.filter(isLite)).toHaveLength(2);
+    expect(textOf(calls[1])).toContain('楼层 #5 的 summary 不是这一楼的摘要（内容是拒答或对输出要求的复述，不是剧情）');
+    expect(aiFloors(0, 3).map(f => chat[f].extra?.bbs_leaf?.text)).toEqual(aiFloors(0, 3).map(f => good(f).summary));
+
+    // 每次都这样:缺口之前的两层照常保存,这一层和之后的不用这次的结果
+    const again = chatOf(4, i => `第${i}层正文。` + '林舟沿着河岸往下游走。'.repeat(40));
+    useChat(again);
+    vi.mocked(client.requestViaMainApi).mockClear().mockImplementation(async messages => {
+      if (!isLite(messages)) return response(ECHO);
+      return JSON.stringify({ floors: liteFloorsOf(messages).map(f => (f === 5 ? { ...good(f), summary: ECHO } : good(f))) });
+    });
+    const result = await batchBackfill({ lite: true });
+    expect(result.done).toBeLessThan(4);
+    expect(again[1].extra?.bbs_leaf?.text).toBe(good(1).summary);
+    expect(again[3].extra?.bbs_leaf?.text).toBe(good(3).summary);
+    expect(again[5].extra?.bbs_leaf).toBeUndefined();
+    expect(again.some(m => m.extra?.bbs_leaf?.text === ECHO)).toBe(false);
+  });
+
   it('回复被截断时对半拆开重试，拆到一层改为逐层摘要，仍被截断才停下', async () => {
     const chat = chatOf(4);
     useChat(chat);

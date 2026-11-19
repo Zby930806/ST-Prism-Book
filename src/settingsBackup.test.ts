@@ -132,13 +132,13 @@ describe('导入：合并与保存', () => {
     expect(lines.join('\n')).not.toContain('其他设置');
   });
 
-  it('内容边界算在「自定义提示词、任务说明与内容边界」里，导入后生效', async () => {
+  it('内容边界算在「自定义提示词、任务说明、内容边界与内置提示词版本」里，导入后生效', async () => {
     const { ext, settings, backup } = await setup(localExt);
     const file = backup.buildSettingsBackup(ext);
     expect((file.settings.baibai_book as Rec).contentBoundary).toBe('auto');
     (file.settings.baibai_book as Rec).contentBoundary = 'never';
     const plan = backup.planSettingsImport(file, ext);
-    expect(backup.describeImportPlan(plan)).toContain('以下设置改用文件中的值：自定义提示词、任务说明与内容边界。');
+    expect(backup.describeImportPlan(plan)).toContain('以下设置改用文件中的值：自定义提示词、任务说明、内容边界与内置提示词版本。');
     backup.applySettingsImport(plan);
     expect(settings.apiSettings.contentBoundary).toBe('never');
   });

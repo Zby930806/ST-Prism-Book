@@ -449,7 +449,7 @@ onUnmounted(() => {
     <p v-if="resummaryHint" class="bbs-resummary-hint">{{ resummaryHint }}</p>
     <div v-if="holdShown" class="bbs-callout is-warning bbs-resummary-hold" role="status">
       <strong class="bbs-callout-title">总结已暂停自动重试</strong>
-      <span class="bbs-callout-help">上次合并这批摘要时失败：{{ resummaryHold.message }} 修改总结所用的渠道、模型或最大输出之前，不再自动重发同一批，以免每楼重复扣费；调整后会照常自动总结，也可以点「重试总结」立即再试。</span>
+      <span class="bbs-callout-help">上次合并这批摘要时失败：{{ resummaryHold.message }} 修改总结所用的渠道、模型、最大输出或总结的提示词之前，不再自动重发同一批，以免每楼重复扣费；调整后会照常自动总结，也可以点「重试总结」立即再试。</span>
       <button class="bbs-btn bbs-btn-sm" type="button" :disabled="resummaryRunning || engineState.running" @click="doResummarize">重试总结</button>
     </div>
 

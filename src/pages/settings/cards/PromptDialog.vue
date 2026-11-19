@@ -8,7 +8,7 @@ import ModalShell from '@/components/ModalShell.vue';
 import { apiSettings } from '@/api/settings';
 import { computed, nextTick, ref } from 'vue';
 import { diffHunks, diffLines, diffStats, type DiffRow } from '../promptDiff';
-import { isCustom, promptSync, taskContextModeAfterSave, type PromptMeta, type PromptSync } from '../promptMeta';
+import { builtinLike, isCustom, promptSync, taskContextModeAfterSave, type PromptMeta, type PromptSync } from '../promptMeta';
 
 // 正在编辑的提示词;draft 是草稿,点「完成」才写回 apiSettings(取消则丢弃)。
 const editingPrompt = ref<PromptMeta | null>(null);
@@ -25,7 +25,9 @@ const promptDiff = computed<{ title: string; rows: DiffRow[] } | null>(() => {
   if (!meta || !promptDiffOpen.value) return null;
   const base = apiSettings.promptBases[meta.key];
   const fromBase = editorSync.value === 'outdated' && !!base;
-  const lines = fromBase ? diffLines(base!, meta.builtin) : diffLines(promptDraft.value, meta.builtin);
+  // 与同一写法(旧版或精简版)的内置比较
+  const from = fromBase ? base! : promptDraft.value;
+  const lines = diffLines(from, builtinLike(meta, from));
   const { added, removed } = diffStats(lines);
   return {
     title: fromBase

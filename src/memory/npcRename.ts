@@ -1,7 +1,8 @@
 import { createSourceEvidenceMatcher, type EvidenceDropReason } from './sourceEvidence';
 
 /**
- * npcs.rename 的校验:只接受「名册里已有的名字 → 名册里没有的新名字」,并要求本楼原文的连续原句中含新名字。
+ * npcs.rename 的校验:只接受「名册里已有的名字 → 名册里没有的新名字」,并要求本楼原文的连续原句中含新名字
+ * (名字被拆开说、各字按顺序出现且相隔不远的也算,见 evidenceNames)。
  * 不从正文猜改名;校验不通过时整份结果按格式错误处理(由 sendAndParse 附原因重试)。
  * 最后一次尝试(传入 onDrop)时只去掉不合格的那条改名,并把同楼引用改到正确的名字上,以免建出重复角色;
  * 多余字段直接忽略。
@@ -11,6 +12,37 @@ export class NpcRenameError extends Error {}
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const norm = (s: string) => s.trim().toLowerCase();
 const squash = (s: string) => s.replace(/\s+/g, '');
+
+/** 名字被拆开说时,相邻两个字之间最多隔几个字。 */
+const NAME_GAP = 8;
+
+/**
+ * 原句里有没有新名字:整个名字原样出现,或者名字被拆开说、各字仍按顺序出现且相隔不远
+ * (「小人姓秦,单名一个朔字」→ 秦朔)。小说里常这样自报姓名,整句里不会出现连在一起的全名;
+ * 相隔过远的不算,免得随便一句长句都能凑出名字。原句本身仍须与本楼正文逐字相符(另行核对)。
+ */
+function evidenceNames(evidence: string, name: string): boolean {
+  const text = Array.from(squash(evidence));
+  const target = Array.from(squash(name));
+  if (!target.length) return false;
+  if (text.join('').includes(target.join(''))) return true;
+  if (target.length < 2) return false;
+  for (let start = 0; start < text.length; start++) {
+    if (text[start] !== target[0]) continue;
+    let pos = start;
+    let matched = 1;
+    while (matched < target.length) {
+      const limit = Math.min(text.length - 1, pos + 1 + NAME_GAP);
+      let found = -1;
+      for (let i = pos + 1; i <= limit; i++) if (text[i] === target[matched]) { found = i; break; }
+      if (found < 0) break;
+      pos = found;
+      matched++;
+    }
+    if (matched === target.length) return true;
+  }
+  return false;
+}
 
 /** 最后一次尝试中去掉的一条改名。 */
 export interface DroppedRename {
@@ -85,7 +117,7 @@ export function validateNpcRenames(parsed: Record<string, unknown>, options: Npc
       if (userKey && norm(to) === userKey) throw new RenameCheck(path + '.to 不能是主角的名字;主角只写 protagonist。', 'invalid', '新名字是主角的名字');
       if (targets.has(norm(to))) throw new RenameCheck(path + '.to「' + to + '」与本楼另一项改名重复。', 'invalid', '与本楼另一项改名的新名字重复');
       if (!evidence) { revert.set(norm(to), from); throw new RenameCheck(path + '.evidence 缺失;请连续照录本楼正文中含新名字的原句。', 'missing', '没有给出正文原句'); }
-      if (!squash(evidence).includes(squash(to))) { revert.set(norm(to), from); throw new RenameCheck(path + '.evidence 中没有新名字「' + to + '」;请照录正文中报出或称呼该名字的原句。', 'mismatch', '给出的原句里没有新名字'); }
+      if (!evidenceNames(evidence, to)) { revert.set(norm(to), from); throw new RenameCheck(path + '.evidence 中没有新名字「' + to + '」;请照录正文中报出或称呼该名字的原句。', 'mismatch', '给出的原句里没有新名字'); }
       if (!matches(evidence)) { revert.set(norm(to), from); throw new RenameCheck(path + '.evidence 与本楼正文不匹配;请连续照录【本轮对话】中的原句,不改写、不拼接,不引用旧名册或历史。', 'mismatch', '给出的原句与本楼正文对不上'); }
       map.set(norm(from), to);
       targets.add(norm(to));

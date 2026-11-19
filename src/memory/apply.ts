@@ -2220,6 +2220,8 @@ export function finalizeDelta(
     const npcs: NonNullable<StoredDelta['npcs']> = {};
     const add = cleanNpcList(delta.npcs.add);
     const update = cleanNpcList(delta.npcs.update);
+    // 亲密记录关闭时,模型硬给也不收(与了解清单同口径);手动修改不经过这里,不受影响
+    if (apiSettings.injection.intimacy !== true) for (const npc of [...add, ...update]) delete npc.intimacy;
     const rename = cleanNpcRenameList(delta.npcs.rename);
     const remove = cleanTextList(delta.npcs.remove, ['name', 'npc', 'id']);
     if (add.length) npcs.add = add;

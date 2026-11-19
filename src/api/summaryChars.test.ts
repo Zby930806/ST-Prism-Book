@@ -30,7 +30,8 @@ describe('每楼摘要字数设置', () => {
     const prompts = await import('@/memory/prompts');
     const stored = JSON.parse(JSON.stringify(settings.apiSettings));
     delete stored.summaryMaxChars;
-    Object.assign(stored, patch, { wiPatternsSeeded: true });
+    // 下面核对的是旧版内置文本:存档里写明旧版(没有这一项的旧存档升级后用精简版,见 promptStyle.test.ts)
+    Object.assign(stored, patch, { wiPatternsSeeded: true, promptStyle: 'classic' });
     const extensionSettings = { baibai_book: stored };
     vi.spyOn(context, 'getContext').mockReturnValue({
       chat: [], chatMetadata: {}, extensionSettings, saveSettingsDebounced: vi.fn(),

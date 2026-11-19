@@ -14,12 +14,23 @@
  *         {{protagonist_block}} {{items_block}} {{plans_block}} {{content}}
  */
 
-import { apiSettings, normalizeResummary2MaxChars, normalizeResummaryMaxChars, normalizeSummaryMaxChars, type Verbosity } from '@/api/settings';
+import { apiSettings, normalizeResummary2MaxChars, normalizeResummaryMaxChars, normalizeSummaryMaxChars, type PromptStyle, type Verbosity } from '@/api/settings';
 import { fmtLifeDetail } from './lifeDetails';
 import { fmtKnowledgeForSummary } from './knowledge';
 import { fmtNpcSummaryList, NPC_AFFINITY_FIELDS, type NpcSummaryView } from './npcRelations';
+import { INTIMACY_SUMMARY_RULE, RULE_NPC_INTIMACY } from './promptIntimacy';
+import {
+  COMPACT_BATCH_SUMMARY_INPUT, COMPACT_BATCH_SUMMARY_RULES_BODY, COMPACT_BATCH_THINKING_CHECKLIST, COMPACT_EXAMPLE_TIME, COMPACT_EXAMPLE_TIME_CHECK, COMPACT_EXAMPLE_TIME_FIELDS, COMPACT_INTIMACY_SNIPPETS,
+  COMPACT_MINIMAL_NO_TAGS, COMPACT_MINIMAL_WITH_TAGS, COMPACT_REQUIRED_NO_TAGS, COMPACT_REQUIRED_WITH_TAGS, COMPACT_TIME_CHECK,
+  COMPACT_KNOWLEDGE_CHECK, COMPACT_KNOWLEDGE_FIELD, COMPACT_LENGTH_NOTE, COMPACT_LENGTH_NOTE2, COMPACT_LENGTH_NOTE2_SHORT, COMPACT_LENGTH_NOTE_SHORT, COMPACT_LENGTH_RULE, COMPACT_LENGTH_RULE2, COMPACT_LENGTH_RULE2_SHORT, COMPACT_LENGTH_RULE_SHORT, COMPACT_RESUMMARY2_CHECKLIST, COMPACT_RESUMMARY2_INPUT, COMPACT_RESUMMARY2_RULES_BODY, COMPACT_RESUMMARY_CHECKLIST,
+  COMPACT_RESUMMARY_INPUT, COMPACT_RESUMMARY_RULES_BODY, COMPACT_RULE_KNOWLEDGE, COMPACT_RULE_VARS, COMPACT_SUMMARY_CAP_CHECK, COMPACT_SUMMARY_INPUT, COMPACT_SUMMARY_RULES_BODY,
+  COMPACT_THINKING_CHECKLIST, COMPACT_THINKING_PREFILL, COMPACT_TIME_FIELD_NO_TAGS, COMPACT_TIME_FIELD_WITH_TAGS, COMPACT_TIME_RULE_NO_TAGS,
+  COMPACT_TIME_RULE_WITH_TAGS, COMPACT_VARS_FIELD,
+} from './promptsCompact';
 import { RULE_COMPLETE_TIME_ANCHOR } from './timeTag';
 import type { ItemLogEntry, JsonValue, MemKnowledge, MemLifeDetail, MemPlan, MemProtagonist, PlanOutcome, SceneFocus } from './types';
+
+export { RULE_NPC_INTIMACY };
 
 /** 一个可用占位符(宏):token 用于插入,desc 给用户看「这里会替换成什么」。 */
 export interface PromptMacro {
@@ -54,6 +65,9 @@ export const RESUMMARY_MACROS: PromptMacro[] = [
   { token: '{{char}}', desc: '角色名' },
   { token: '{{content}}', desc: '待融合的多条摘要正文' },
   { token: '{{resummary_words}}', desc: '总结目标字数范围(设置里「总结字数」为 0 时按档位:详细 600-1000、精简 300-600,随「摘要字数」等比放大,最多 3 倍)' },
+  { token: '{{resummary_max}}', desc: '总结字数上限(即上面范围的上限)' },
+  { token: '{{input_chars}}', desc: '待融合内容的总字数' },
+  { token: '{{length_rule}}', desc: '精简版内置模板用的篇幅要求(一句话):目标字数,以及没有填「总结字数」时按输入长度放宽的上限' },
 ];
 
 /** 二次总结提示词可用的宏(动态字数区间随详细/精简档位变化) */
@@ -64,6 +78,9 @@ export const RESUMMARY2_MACROS: PromptMacro[] = [
   { token: '{{target_min}}', desc: '最低字数(详细为输入的 40%,精简为 30%;超过「二次总结字数」时按比例缩小)' },
   { token: '{{target_max}}', desc: '最高字数(详细为输入的 50%,精简为 40%,不超过「二次总结字数」)' },
   { token: '{{target}}', desc: '兼容旧自定义模板:等同于最高字数 {{target_max}}' },
+  { token: '{{target_percent}}', desc: '最高字数占待融合内容的百分比(整数)' },
+  { token: '{{input_chars}}', desc: '待融合内容的总字数' },
+  { token: '{{length_rule}}', desc: '精简版内置模板用的篇幅要求(一句话):大事记的目标字数,约为输入的几成(没有填「二次总结字数」时按输入长度放宽)' },
 ];
 
 /**
@@ -225,23 +242,17 @@ NPC 是其余登场的人:登场并说话、行动或被具体描写的个人都
 - 没有名字:以「职业或身份 + 大写字母」作名字,如「酒保A」「酒保B」「守卫A」。同一职业的第一个用 A,依次往后;同一人再出现复用原标签;一个标签只给一个人,改名后也不再分给别人。新建前先查名册中已有的标签和「原记为」。
 - 报出真名:无名角色(或只以称呼记录的角色,主要角色同样适用)后来报出真名或被明确称呼真名时,用 npcs.rename 接续原档案,不另建新角色:{"from":"名册中的原名","to":"新名字","evidence":"本楼正文中含新名字的连续原句"}。from 必须是名册已有的名字,to 不能与名册已有的名字重复;同一楼对该角色的其他操作一律使用新名字。外号、新称呼或身份变化不算改名。`;
 
-/** 主要角色与 NPC 共用的字段规则(npcs 字段)。好感估计规则另成一段,接在本段之后(见 RULE_NPCS)。 */
-/**
- * 亲密记录(npcs 的 intimacy 字段):次数、每次的避孕措施和是否在体内、事后的后果与约定。
- * 这类事实跨很多楼累计,只留在摘要里时,合并成总结、二次总结后常被并成「多次亲密」,正文模型对不上次数、记不清哪次没戴套。
- * 放进角色档案由摘要模型逐次累加,注入时原样发给正文模型,不参与压缩。
- * 「内容边界」对 DeepSeek 系列默认不发送,所以只记成年人的限制直接写在本规则里。
- */
-export const RULE_NPC_INTIMACY = `- intimacy:该角色与{{user}}的亲密记录,整体覆盖,写累积后的完整内容。
-  【只记成年人】双方都明确是成年人才记录;任何一方未成年、带未成年特征或年龄无法判断,一律不记、不输出本字段。
-  【何时更新】本楼正文明确写到两人发生性行为;或出现与已有记录相关的新后果、新约定(事后服药、例假或验孕结果、怀孕、改用别的避孕办法、关于避孕的约定)。亲吻、拥抱、调情,以及中途停下没有做成的,不算一次、不改次数。名册里已有记录而本楼没有这些新情况时,不输出本字段。
-  【写法】分三部分,用分号隔开:
-  ① 累计「共N次」:在名册已有次数上加本楼的次数。正文写明当晚几次就加几次,只写发生了、没写几次的按一次。
-  ② 逐次记录,每个晚上一条:「日期 地点 几次:避孕措施(戴套/未戴套/其他办法)」;只有未戴套或出了意外(如破损、滑脱)的那一次,才在后面写明是否在体内结束,戴套且没有意外的不写这一项。同一晚几次情况不同的分开写明;正文没写明的项写「未写明」,不猜,也不按常理补。最多保留最近 8 条,更早的可并成一句概括(如「此前3次均戴套」),但未戴套或出过意外的那几次照留日期,累计次数不能少。
-  ③ 仍有效的后果与约定,只写与避孕、怀孕有关的:事后服药(写日期)、例假或验孕结果、怀孕、双方关于避孕的约定、现用的避孕办法。被新情况取代的改写,不留互相矛盾的两句;别的对话和情感表态不写在这里。
-  【硬事实】次数、是否戴套,以及未戴套或出意外时是否在体内,不得省略、估算或改写成含糊说法;不写过程、姿势和感官描写,不加评价。{{user}}以外的人之间发生的不写在这里,写 summary。
-  例(只示范格式,不是剧情资料):「共4次;3/2 她家 1次:戴套;3/9 旅馆 2次:第一次戴套,第二次未戴套、体外;3/15 他家 1次:未戴套、体内;3/16 已服紧急避孕药;约定此后必须戴套」。`;
+/** 输出字段示意里的 intimacy(add / update),连同后面的逗号和空格。字段规则与摘要要求两段在 promptIntimacy.ts(新旧两版共用)。 */
+const INTIMACY_FIELD_ADD = '"intimacy": "与主角的亲密记录(可选,写法见【角色档案字段规则】)", ';
+const INTIMACY_FIELD_UPDATE = '"intimacy": "累积后的完整亲密记录(可选,整体覆盖;共N次;逐次的日期、地点、几次、避孕措施,未戴套或出意外时是否体内;与避孕有关的后果与约定)", ';
+/** 总结与二次总结核查里的一条。 */
+const INTIMACY_REVIEW = `- 亲密情节：输入写明的每次性行为的日期、次数、是否戴套、是否在体内，以及事后的服药和避孕约定都还在，没有被并成笼统的一句；没做成的没有算进次数。
+`;
+/** 单楼摘要输出前核查「人物盘点」里的一条。 */
+const INTIMACY_CHECK = `   - 亲密记录:本楼正文是否明确写到{{user}}与某个角色发生性行为,或出现了与已有记录相关的新后果、新约定(服药、例假、验孕、避孕办法)?有 → 该角色 npcs.update intimacy:次数在名册原有记录上累加,逐次写明日期、地点、几次、是否戴套,未戴套或出意外时是否在体内,与避孕有关的后果与约定同步改写,并把这些事实写进 summary;正文没写明的写「未写明」,不按常理补;中途停下没有做成的不加次数。没有 → 不输出 intimacy。
+`;
 
+/** 主要角色与 NPC 共用的字段规则(npcs 字段)。好感估计规则另成一段,接在本段之后(见 RULE_NPCS)。 */
 const RULE_NPC_FIELDS = `═══ 【角色档案字段规则】(npcs 字段,主要角色与 NPC 共用) ═══
 每个角色可带档案层、即时层及独立的好感估计,更新门槛不同。
 【档案层】长期稳定:正文有描写就记,之后只在实质变化或首次补全时更新;普通互动、对话不更新。update 的 desc/title 是整体覆盖,写累积后的完整内容,不丢旧要点。
@@ -495,8 +506,7 @@ export const RESUMMARY_FACT_REVIEW = `【压缩取舍：先后果，再经过】
 - 回源对词：条件与后果是否仍逐条对应，主体、来源、否定、程度、时段和方位是否保留原限定；合并前后是否仍绑定原对象，不把多段重复说法当成额外证实。
 - 段落时间范围没有被摊派给段内事件，有效期限与必要时刻没有被抹掉；按本层时间粒度合并重复标时。
 - 再删没有结果的检查收纳与重复过程，不删重要参数、有效伤情及关系互动。
-- 亲密情节：输入写明的每次性行为的日期、次数、是否戴套、是否在体内，以及事后的服药和避孕约定都还在，没有被并成笼统的一句；没做成的没有算进次数。
-- 逐句查空话：只有评价、感受、气氛或笼统概括，删掉也不少任何具体人和事的句子，删去或换成输入里的具体事实；事件写清后篇幅还够，才照抄输入「」中仍有效的承诺、条件和表态，整段最多三四句。`;
+${INTIMACY_REVIEW}- 逐句查空话：只有评价、感受、气氛或笼统概括，删掉也不少任何具体人和事的句子，删去或换成输入里的具体事实；事件写清后篇幅还够，才照抄输入「」中仍有效的承诺、条件和表态，整段最多三四句。`;
 
 /** 只演示表达转换,不得将示范事实写入摘要。 */
 export const RULE_SUMMARY_EXAMPLES = `【表达示范,不是剧情资料】
@@ -574,6 +584,8 @@ export const RULE_INTIMACY_KEEP = `═══ 【亲密情节的硬事实】(总�
 - 篇幅紧时,情况相同的几次可以并成一句,但要写明各自的日期和次数(如「3月2日、3月20日各一次,均戴套」);未戴套、在体内结束或出过意外(如破损)的单独写明;中途停下没有做成的写明没有做成。
 - 次数只按输入写明的累加,不估算,不把没做成的算进去;事后服药、例假或验孕结果和仍有效的避孕约定,写到输入结束时的状态。
 - 不写过程、姿势和感官描写。示例只演示写法,不是剧情资料。`;
+/** 总结、二次总结规则里的整段,连同后面的空行。 */
+const INTIMACY_KEEP_BLOCK = `${RULE_INTIMACY_KEEP}\n\n`;
 
 /**
  * 摘要撰写规则(summary 字段)。含 {{summary_max_chars}} 宏,由 fill() 填入设置里的摘要字数。
@@ -584,8 +596,7 @@ export const RULE_SUMMARY_WRITE = `═══ 【摘要撰写规则】(summary �
 - 文风:这是前情提要，不是详写原文的缩小版。用自然完整的短句讲清变化及必要依据,不写审讯笔录、字段清单或阅读理解;客观指事实可靠,不等于删光语气与互动。纯叙述句,不要标题、列表、加粗等任何 markdown 标记。
 - 写作流程：先找本楼最后的关键变化，再回取解释变化的必要前因，最后补仍有用的限制与关键互动；按发生先后写成短段。改变行动方向的决定优先保留：即时决定即使不够资格新增长期计划，也须进入摘要；不能只写拒绝、收尾或物品交接而漏掉明确的新行动方向。关系互动按信息价值保留关键动作、回应或短台词,不要求每段装饰性地补一处,也不硬限为一处。
 - 重要对话留原话:之后剧情还会用到的话,用「」照抄说话人的原话并写明谁对谁说,不改写成「表示…」「表达了…」。先留承诺、约定、条件、保密要求和威胁,其次是表白、拒绝、道歉和明确表态,揭示身份、秘密或关键情报的话,以及第一次改口的称呼。可以删去句中与要点无关的部分(用……连接),但不改字、不把几句话拼成一句、不替人物补话。一楼一般引一两句,最多三句,每句一般不超过 40 字,计入字数上限,放不下时先保事件、再减原话;玩笑、拌嘴、寒暄、日常问答、叮嘱和只有语气的话不引用,照常概括或删去;没有这类对话就不引用。
-- 亲密情节的硬事实:本楼正文明确写到成年角色之间发生性行为时,用一两句平实的话写清:谁和谁、当晚几次(正文写明才写)、每次是否戴套或用了别的避孕办法,未戴套或出了意外(如破损)时是否在体内结束,以及事后的处理和约定(买药、服药、约好以后必须戴套等);亲热中途停下没有做成的,写明没有做成和原因。这些与关键数值同等对待,不因属于过程或同类互动而省略,也不得只写成「发生关系」「共度一夜」。过程、姿势和感官描写不写,正文没写明的不猜;人物未成年或年龄无法判断时不写这些内容。
-- 持续事实与背景参照:本轮正文明确揭示、会影响后续理解的客观处境、规则条件及比较关系,即使不推动剧情也应保留;可压缩日常过程,不能连同其中的持续事实一起删除。明确变化须保留必要的阶段差异和变化后结果,不将局部事实泛化。
+${INTIMACY_SUMMARY_RULE}- 持续事实与背景参照:本轮正文明确揭示、会影响后续理解的客观处境、规则条件及比较关系,即使不推动剧情也应保留;可压缩日常过程,不能连同其中的持续事实一起删除。明确变化须保留必要的阶段差异和变化后结果,不将局部事实泛化。
 - 条件与影响成对保留:对当前局面或后续理解有约束作用的事实,写清条件限制了谁或什么、具体影响及必要程度,不能只留下条件名称;意图、建议、已启动与已完成不得混写。
 - 准确与时间:日期、必要时分、人名、地名、物品名与关键数值准确;事件自身的明示时间与本楼标签分别归位,不用输入旧时点替代本楼范围;普通连续动作不反复标时,不能用模糊词抹掉有效期限或顺序依据。
 - 严禁无中生有:禁止写出原文未明确指出的情绪(禁止“这引出了…的珍视”“体现了…的心态”等阅读理解句式),禁止氛围总结(“气氛变得…”),不添加原文没有的修辞或心理。
@@ -701,8 +712,8 @@ ${RULE_LONGTERM_DB}
     "reparent": [{ "node": ["某已有地点当前完整路径"], "newPath": ["新上级","...","该地点"], "descs": { "新上级": "新上级的描述(可选)" } }]
   },
   "npcs": {
-    "add": [{ "name": "主要角色名", "important": true, "gender": "性别(正文或明确设定有依据才填,未知省略)", "age": "年龄(正文明确才填,写原话值,勿换算)", "relation": "与主角的稳定关系称谓,称谓在前,可附有据的持续立场(如「主角的师姐」)", "ties": "与其他角色的重要关系(仅血缘/婚姻/宿敌等长期结构,可选)", "intimacy": "与主角的亲密记录(可选;只记成年人,写法见【角色档案字段规则】)", "affinityInner": "可选:五档整数-2/-1/0/1/2或null,不变省略", "affinityOuter": "可选:独立五档整数或null,不变省略", "affinityNote": "可选:稳定的一句依据/表现说明,不变省略", "title": "身份/职业一句话", "desc": "固定外貌:发色/身材/永久疤痕等稳定体貌;未知省略,不填临时伤情/绷带/装备", "personality": "性格(可选)", "outfit": "当前着装(可选,即时层)", "condition": "当前身体状态,如受伤、疲惫(可选,即时层)", "location": "所在地点(当面互动通常就是主角本楼所在地点;正文没交代就省略)", "follow": "随行同伴填true(可选;随行时不要写 location)" }, { "name": "NPC名;没有名字用职业或身份加大写字母,如酒保A", "title": "身份/职业", "gender": "性别(有依据才填)", "desc": "固定外貌(正文有描写才填)", "location": "所在地点(当面互动通常就是主角本楼所在地点;正文没交代就省略)" }],
-    "update": [{ "name": "已有角色名(主要角色或NPC)", "gender": "补填性别(可选)", "age": "补填或正文明确纠正后的年龄(可选,勿按时间流逝自行换算)", "relation": "关系质变后的新称谓,或纠正错填后的稳定部分(可选,称谓在前;质变须明确说出、约定或有无歧义的客观事件,吵架冷战不算)", "ties": "更新后的完整人际关系(可选,整体覆盖)", "intimacy": "累积后的完整亲密记录(可选,整体覆盖;共N次;逐次的日期、地点、几次、避孕措施,未戴套或出意外时是否体内;与避孕有关的后果与约定)", "affinityInner": "可选:五档整数-2/-1/0/1/2或null,不变省略", "affinityOuter": "可选:独立五档整数或null,不变省略", "affinityNote": "可选:稳定的一句依据/表现说明,不变省略", "title": "新身份(可选)", "desc": "完整稳定体貌(可选;空字符串=清除错填,省略=保持)", "personality": "新性格(可选)", "outfit": "换装后的当前着装(可选;空字符串=清空)", "condition": "变化后的完整身体状态(可选,整段覆盖;全部恢复填空字符串)", "important": "NPC升为主要角色填true,主要角色降为NPC填false(可选,需有证据)", "location": "新所在地(可选;仅主角换景而该角色未同行、无新消息时不重报旧地点;离场去向未明填空字符串;随行时省略)", "follow": "随行true/离队false(可选;离队要显式写 false,空 location 不能代替)" }],
+    "add": [{ "name": "主要角色名", "important": true, "gender": "性别(正文或明确设定有依据才填,未知省略)", "age": "年龄(正文明确才填,写原话值,勿换算)", "relation": "与主角的稳定关系称谓,称谓在前,可附有据的持续立场(如「主角的师姐」)", "ties": "与其他角色的重要关系(仅血缘/婚姻/宿敌等长期结构,可选)", ${INTIMACY_FIELD_ADD}"affinityInner": "可选:五档整数-2/-1/0/1/2或null,不变省略", "affinityOuter": "可选:独立五档整数或null,不变省略", "affinityNote": "可选:稳定的一句依据/表现说明,不变省略", "title": "身份/职业一句话", "desc": "固定外貌:发色/身材/永久疤痕等稳定体貌;未知省略,不填临时伤情/绷带/装备", "personality": "性格(可选)", "outfit": "当前着装(可选,即时层)", "condition": "当前身体状态,如受伤、疲惫(可选,即时层)", "location": "所在地点(当面互动通常就是主角本楼所在地点;正文没交代就省略)", "follow": "随行同伴填true(可选;随行时不要写 location)" }, { "name": "NPC名;没有名字用职业或身份加大写字母,如酒保A", "title": "身份/职业", "gender": "性别(有依据才填)", "desc": "固定外貌(正文有描写才填)", "location": "所在地点(当面互动通常就是主角本楼所在地点;正文没交代就省略)" }],
+    "update": [{ "name": "已有角色名(主要角色或NPC)", "gender": "补填性别(可选)", "age": "补填或正文明确纠正后的年龄(可选,勿按时间流逝自行换算)", "relation": "关系质变后的新称谓,或纠正错填后的稳定部分(可选,称谓在前;质变须明确说出、约定或有无歧义的客观事件,吵架冷战不算)", "ties": "更新后的完整人际关系(可选,整体覆盖)", ${INTIMACY_FIELD_UPDATE}"affinityInner": "可选:五档整数-2/-1/0/1/2或null,不变省略", "affinityOuter": "可选:独立五档整数或null,不变省略", "affinityNote": "可选:稳定的一句依据/表现说明,不变省略", "title": "新身份(可选)", "desc": "完整稳定体貌(可选;空字符串=清除错填,省略=保持)", "personality": "新性格(可选)", "outfit": "换装后的当前着装(可选;空字符串=清空)", "condition": "变化后的完整身体状态(可选,整段覆盖;全部恢复填空字符串)", "important": "NPC升为主要角色填true,主要角色降为NPC填false(可选,需有证据)", "location": "新所在地(可选;仅主角换景而该角色未同行、无新消息时不重报旧地点;离场去向未明填空字符串;随行时省略)", "follow": "随行true/离队false(可选;离队要显式写 false,空 location 不能代替)" }],
     "rename": ${NPC_RENAME_FIELD},
     "remove": ["永久退场的已有角色名"]
   },
@@ -796,9 +807,7 @@ ${RULE_ABSOLUTE_TIME_LANGUAGE}
 
 ${RULE_RELATION_MOMENTUM}
 
-${RULE_INTIMACY_KEEP}
-
-${RULE_SUMMARY_COMPOSITION}
+${INTIMACY_KEEP_BLOCK}${RULE_SUMMARY_COMPOSITION}
 
 ${RULE_CONCRETE_SUMMARY}
 
@@ -860,9 +869,7 @@ ${RULE_ABSOLUTE_TIME_LANGUAGE}
 
 ${RULE_RELATION_MOMENTUM}
 
-${RULE_INTIMACY_KEEP}
-
-${RULE_SUMMARY_COMPOSITION}
+${INTIMACY_KEEP_BLOCK}${RULE_SUMMARY_COMPOSITION}
 
 ${RULE_CONCRETE_SUMMARY}
 
@@ -950,6 +957,61 @@ ${SUMMARY_FACT_PREPARATION}
 时间:带时间标记的楼层沿用标记;其余只取明确时间,没有推进依据就沿用上一层的结束时间,不编造。
 
 全部核对完成后闭合 </thinking>,再输出一个根键只有 floors 的 JSON 对象;不输出任何状态更新字段或额外解释。`;
+
+/* ============ 内置提示词版本:精简版(promptsCompact.ts)与旧版(本文件上面各段) ============ */
+
+/**
+ * 精简版的完整模板(内容边界 + 规则 + 材料),供设置页显示与编辑、导出核对;发送时规则与材料分开。
+ * 核对步骤(COMPACT_THINKING_CHECKLIST 等)单独发在材料之后,不在模板里。
+ */
+export const SUMMARY_PROMPT_COMPACT = `${RULE_CONTENT_BOUNDARY}\n\n${COMPACT_SUMMARY_RULES_BODY}\n\n${COMPACT_SUMMARY_INPUT}`;
+export const RESUMMARY_PROMPT_COMPACT = `${RULE_CONTENT_BOUNDARY}\n\n${COMPACT_RESUMMARY_RULES_BODY}\n\n${COMPACT_RESUMMARY_INPUT}`;
+export const RESUMMARY2_PROMPT_COMPACT = `${RULE_CONTENT_BOUNDARY}\n\n${COMPACT_RESUMMARY2_RULES_BODY}\n\n${COMPACT_RESUMMARY2_INPUT}`;
+export const BATCH_SUMMARY_PROMPT_COMPACT = `${RULE_CONTENT_BOUNDARY}\n\n${COMPACT_BATCH_SUMMARY_RULES_BODY}\n\n${COMPACT_BATCH_SUMMARY_INPUT}`;
+
+/** 当前选用的内置提示词版本(「设置 → 提示词 → 自定义提示词 → 内置提示词版本」)。 */
+export function promptStyle(): PromptStyle {
+  return apiSettings.promptStyle === 'compact' ? 'compact' : 'classic';
+}
+
+type BuiltinTask = 'summary' | 'resummary' | 'resummary2';
+const BUILTIN_TEMPLATES: Record<BuiltinTask, Record<PromptStyle, string>> = {
+  summary: { classic: SUMMARY_PROMPT, compact: SUMMARY_PROMPT_COMPACT },
+  resummary: { classic: RESUMMARY_PROMPT, compact: RESUMMARY_PROMPT_COMPACT },
+  resummary2: { classic: RESUMMARY2_PROMPT, compact: RESUMMARY2_PROMPT_COMPACT },
+};
+
+/** 某项任务在指定版本(缺省为当前选用的版本)下的内置完整模板。 */
+export function builtinPrompt(task: BuiltinTask, style: PromptStyle = promptStyle()): string {
+  return BUILTIN_TEMPLATES[task][style];
+}
+
+/**
+ * 这项任务实际按哪一版内置模板发送;用了自定义模板时返回 null。
+ * 没有自定义时按设置里选的版本;保存的文本与某一版内置逐字相同时,按那一版内置处理(与保存前所见一致)。
+ */
+export function builtinStyleFor(task: BuiltinTask): PromptStyle | null {
+  const custom = apiSettings.prompts[task].trim();
+  if (!custom) return promptStyle();
+  if (custom === BUILTIN_TEMPLATES[task].classic.trim()) return 'classic';
+  if (custom === BUILTIN_TEMPLATES[task].compact.trim()) return 'compact';
+  return null;
+}
+
+/** 自定义模板是否照精简版内置改写:据此选用同一套材料写法和核对步骤,不补发旧版的兼容协议。 */
+function compactFlavored(task: BuiltinTask, custom: string): boolean {
+  if (task === 'summary') return custom.includes('═══ summary 怎么写 ═══') && custom.includes('【角色 npcs】');
+  // 精简版的总结有「取舍」一节,二次总结是「写成大事记」一节
+  return (custom.includes('═══ 取舍 ═══') || custom.includes('═══ 写成大事记 ═══')) && custom.includes('═══ 写法 ═══');
+}
+
+/** 这项任务的请求按哪一版的写法组装:内置模板按其版本,自定义模板看它照哪一版改写。 */
+function flavorFor(task: BuiltinTask): PromptStyle {
+  return builtinStyleFor(task) ?? (compactFlavored(task, apiSettings.prompts[task]) ? 'compact' : 'classic');
+}
+
+/** 照精简版改写的自定义模板自带全部规则;没有别的系统规则要发时,用这一句占位(system 不能为空)。 */
+const CUSTOM_COMPACT_SYSTEM = '下面的用户消息包含任务说明和材料，请按其中的规则处理，并遵守随后的【核对步骤】。';
 
 /* ============ 回看原文补档案:从较早楼层的原文摘录补全角色档案的空字段 ============ */
 
@@ -1381,7 +1443,7 @@ const INTIMACY_PROTOCOL_SUPPLEMENT = `【棱镜宝书亲密记录兼容协议】
 }
 字段省略表示保持旧值。名册里该角色已有的记录写在「与主角的亲密记录」之后。
 ${RULE_NPC_INTIMACY}
-本楼正文明确写到成年角色之间发生性行为时,summary 里也用一两句平实的话写清谁和谁、几次、是否戴套或用了别的避孕办法,未戴套或出意外时是否在体内结束,以及事后的处理和约定;不写过程和感官描写。`;
+本楼正文明确写到发生性行为时(未成年或年龄不明的角色除外),summary 里也用一两句平实的话写清谁和谁、几次、是否戴套或用了别的避孕办法,未戴套或出意外时是否在体内结束,以及事后的处理和约定;不写过程和感官描写。`;
 
 /** 自定义摘要可能没用 {{time_field}}/{{time_rule}},无标签楼仍须强制产出锚点字段。 */
 const TIME_ANCHOR_PROTOCOL_SUPPLEMENT = `【棱镜宝书时间锚点兼容协议】
@@ -1447,22 +1509,51 @@ const LOCATION_EVIDENCE_RETIRED_SUPPLEMENT = `【棱镜宝书角色位置写法�
 
 /** 每楼摘要字数要求(含标点):只写进提示词,不作为保存门槛。字符数而非 token,与提示词里的说法一致。 */
 export function summaryMaxChars(): number { return normalizeSummaryMaxChars(apiSettings.summaryMaxChars, apiSettings.verbosity); }
+/**
+ * 精简版单楼摘要、合并摘要里「一般写到多少字左右」的目标:字数上限的四分之三,取整到十位。
+ * 模型数不准字数:只给上限时,实测(deepseek-v4.1-flash)精简版的单楼摘要常写到上限以上。上限本身照设置写进提示词,不变。
+ * 总结和二次总结的目标也用它,不过那两级的上限在自动时按输入长度放宽(见 compactLength)。
+ */
+export function aimChars(maxChars: number): number {
+  return Math.max(10, Math.round(maxChars * 0.75 / 10) * 10);
+}
 /** 旧宏 {{summary_words}} 的参考范围:摘要字数要求的一半到全额(300 → 150-300)。 */
 function summaryWordsRange(): string {
   const max = summaryMaxChars();
   return `${Math.round(max / 2)}-${max}`;
 }
 export function usesBuiltinSummary(): boolean {
-  const custom = apiSettings.prompts.summary.trim();
-  return !custom || custom === SUMMARY_PROMPT.trim();
+  return builtinStyleFor('summary') !== null;
 }
 
 /** 内置规则与材料分别展开;自定义模板不猜测边界,只将兼容规范移到 system。 */
+/** 「设置 → 注入设置 → 亲密记录」是否开启(默认关闭)。与了解清单一样,同时控制记录和注入。 */
+export function intimacyEnabled(): boolean {
+  return apiSettings.injection.intimacy === true;
+}
+
+/** 提示词里与亲密记录有关的几段文字(旧版与精简版);逐字去掉后,旧版提示词与没有这项功能时(1.4.15)相同。 */
+const INTIMACY_SNIPPETS = [`${RULE_NPC_INTIMACY}\n`, INTIMACY_FIELD_ADD, INTIMACY_FIELD_UPDATE, INTIMACY_SUMMARY_RULE, INTIMACY_KEEP_BLOCK, INTIMACY_REVIEW, INTIMACY_CHECK, ...COMPACT_INTIMACY_SNIPPETS];
+
+/** 亲密记录关闭时去掉相关文字。须在展开宏之前调用(几段文字里带 {{user}});照内置模板改写、保留了这些原文的自定义模板同样生效。 */
+function gateIntimacy(text: string): string {
+  if (intimacyEnabled()) return text;
+  for (const snippet of INTIMACY_SNIPPETS) text = text.split(snippet).join('');
+  return text;
+}
+
 export function buildSummaryPrompt(a: BuildArgs, opts: { contentBoundary?: boolean } = {}): { system: string; user: string } {
   const boundary = opts.contentBoundary !== false;
   const custom = apiSettings.prompts.summary.trim();
+  // 内置模板按其版本发送;自定义模板看它照哪一版改写,材料写法和补发的协议随之而定
+  const style = builtinStyleFor('summary');
+  const compact = (style ?? (compactFlavored('summary', custom) ? 'compact' : 'classic')) === 'compact';
+  const userName = a.user || '主角';
+  // 亲密记录关闭时名册不带出旧记录,请求里不出现任何相关内容
+  const roster = intimacyEnabled() ? a.npcs : a.npcs.map(({ intimacy: _intimacy, ...rest }) => rest);
+  const lifeDetailsList = fmtLifeDetails(a.lifeDetails, userName);
   const macros = {
-    user: a.user || '主角',
+    user: userName,
     char: a.char || '角色',
     history_block: a.history.trim() || '(无,这是开篇)',
     state_time: a.time ? a.time + (a.timeIsFictional ? '(程序虚构后备起点；本楼正文/用户明确的主线时间优先，不当作真实日期)' : '') : '(未知)',
@@ -1471,41 +1562,79 @@ export function buildSummaryPrompt(a: BuildArgs, opts: { contentBoundary?: boole
     items_block: fmtItems(a.items),
     itemlog_block: fmtItemLog(a.itemLog),
     scenes_block: fmtScenes(a.scenes),
-    npcs_block: fmtNpcSummaryList(a.npcs, { tiers: true, user: a.user || '主角' }),
+    npcs_block: fmtNpcSummaryList(roster, { tiers: true, user: userName }),
     plans_block: fmtPlans(a.openPlans),
     resolved_plans_block: fmtResolvedPlans(a.resolvedPlans),
     secrets_block: fmtSecrets(a.secrets ?? []),
     scenefocus_block: fmtSceneFocus(a.sceneFocus),
-    lifedetails_block: `- 生活小档案(已记录,用编号 d1/d2… 指代;只读参考,勿重复记录 —— 见【生活小档案规则】):\n${fmtLifeDetails(a.lifeDetails, a.user || '主角')}\n`,
+    lifedetails_block: compact
+      ? `- 生活小档案（编号 d1、d2…）：\n${lifeDetailsList}\n`
+      : `- 生活小档案(已记录,用编号 d1/d2… 指代;只读参考,勿重复记录 —— 见【生活小档案规则】):\n${lifeDetailsList}\n`,
+    // 精简版材料里只放清单本身,标签写在模板里
+    lifedetails_list: lifeDetailsList,
     lifedetails_field: LIFE_DETAILS_FIELD_TMPL,
     lifedetails_rule: `\n${RULE_LIFE_DETAILS}\n`,
     // 了解清单三处:功能关闭(未传 knowledge)时全为空串,提示词与没有这项功能时逐字相同
-    knowledge_block: a.knowledge
-      ? `- 角色对主角的了解(相关角色已记下的认知,用编号 k1、k2… 指代;只读参考,勿重复记录 —— 见【了解清单规则】):\n${fmtKnowledgeForSummary(a.knowledge)}\n`
-      : '',
-    knowledge_field: a.knowledge ? KNOWLEDGE_FIELD_TMPL : '',
-    knowledge_rule: a.knowledge ? `\n${RULE_KNOWLEDGE}\n` : '',
+    knowledge_block: !a.knowledge ? ''
+      : compact ? `- 角色对主角的了解（编号 k1、k2…）：\n${fmtKnowledgeForSummary(a.knowledge)}\n`
+        : `- 角色对主角的了解(相关角色已记下的认知,用编号 k1、k2… 指代;只读参考,勿重复记录 —— 见【了解清单规则】):\n${fmtKnowledgeForSummary(a.knowledge)}\n`,
+    knowledge_field: !a.knowledge ? '' : compact ? COMPACT_KNOWLEDGE_FIELD : KNOWLEDGE_FIELD_TMPL,
+    knowledge_rule: !a.knowledge ? '' : compact ? `\n\n${COMPACT_RULE_KNOWLEDGE}` : `\n${RULE_KNOWLEDGE}\n`,
     content: a.content,
-    time_field: a.hasTimeTags ? TIME_FIELD_WITH_TAGS : TIME_FIELD_NO_TAGS,
-    time_rule: a.hasTimeTags ? TIME_RULE_WITH_TAGS : TIME_RULE_NO_TAGS,
+    time_field: compact
+      ? (a.hasTimeTags ? COMPACT_TIME_FIELD_WITH_TAGS : COMPACT_TIME_FIELD_NO_TAGS)
+      : (a.hasTimeTags ? TIME_FIELD_WITH_TAGS : TIME_FIELD_NO_TAGS),
+    time_rule: compact
+      ? (a.hasTimeTags ? COMPACT_TIME_RULE_WITH_TAGS : COMPACT_TIME_RULE_NO_TAGS)
+      : (a.hasTimeTags ? TIME_RULE_WITH_TAGS : TIME_RULE_NO_TAGS),
+    // 精简版:没有时间标签时两个时间字段必填,输出格式、最小输出和示例都随之带上(旧版模板里没有这几个宏)
+    required_fields: a.hasTimeTags ? COMPACT_REQUIRED_WITH_TAGS : COMPACT_REQUIRED_NO_TAGS,
+    minimal_json: a.hasTimeTags ? COMPACT_MINIMAL_WITH_TAGS : COMPACT_MINIMAL_NO_TAGS,
+    example_time_check: a.hasTimeTags ? '' : COMPACT_EXAMPLE_TIME_CHECK,
+    example_time: a.hasTimeTags ? '' : COMPACT_EXAMPLE_TIME,
+    example_time_fields: a.hasTimeTags ? '' : COMPACT_EXAMPLE_TIME_FIELDS,
     summary_words: summaryWordsRange(),
     summary_max_chars: String(summaryMaxChars()),
+    summary_aim: String(aimChars(summaryMaxChars())),
     // 自定义变量三处:未配置变量(空状态 + 空说明)时全为空串(零 token 开销,老用户行为不变)
-    vars_state_block: hasVars(a)
-      ? `- 自定义变量·当前状态(结算到此刻的 JSON,只读参考,严禁重复结算):\n${renderVarsState(a.varsState)}`
-        + (a.varsMeaning.trim() ? `\n- 变量含义(各字段是什么):\n${a.varsMeaning.trim()}` : '')
-        + (a.varsRule.trim() ? `\n- 变量变化规则(何时怎么改/可否新建):\n${a.varsRule.trim()}` : '')
-      : '',
-    vars_field: hasVars(a) ? VARS_FIELD_TMPL : '',
-    vars_rule: hasVars(a) ? `\n${RULE_VARS}\n` : '',
+    vars_state_block: !hasVars(a) ? ''
+      : compact
+        ? `- 自定义变量（JSON 状态树，已结算到本楼之前）：\n${renderVarsState(a.varsState)}`
+          + (a.varsMeaning.trim() ? `\n- 变量含义：\n${a.varsMeaning.trim()}` : '')
+          + (a.varsRule.trim() ? `\n- 变量变化规则：\n${a.varsRule.trim()}` : '')
+        : `- 自定义变量·当前状态(结算到此刻的 JSON,只读参考,严禁重复结算):\n${renderVarsState(a.varsState)}`
+          + (a.varsMeaning.trim() ? `\n- 变量含义(各字段是什么):\n${a.varsMeaning.trim()}` : '')
+          + (a.varsRule.trim() ? `\n- 变量变化规则(何时怎么改/可否新建):\n${a.varsRule.trim()}` : ''),
+    vars_field: !hasVars(a) ? '' : compact ? COMPACT_VARS_FIELD : VARS_FIELD_TMPL,
+    vars_rule: !hasVars(a) ? '' : compact ? `\n\n${COMPACT_RULE_VARS}` : `\n${RULE_VARS}\n`,
     // 供自定义模板单独取用的原始块
     vars_block: renderVarsState(a.varsState),
     varlog_block: [a.varsMeaning.trim(), a.varsRule.trim()].filter(Boolean).join('\n\n') || '(无)',
   };
-  if (usesBuiltinSummary()) {
-    return { system: fill(boundary ? SUMMARY_RULES : SUMMARY_RULES_BODY, macros), user: fill(SUMMARY_INPUT, macros) };
+  if (style === 'compact') {
+    return {
+      system: fill(gateIntimacy(boundary ? `${RULE_CONTENT_BOUNDARY}\n\n${COMPACT_SUMMARY_RULES_BODY}` : COMPACT_SUMMARY_RULES_BODY), macros),
+      user: fill(COMPACT_SUMMARY_INPUT, macros),
+    };
   }
-  const prompt = fill(custom, macros);
+  if (style === 'classic') {
+    return { system: fill(gateIntimacy(boundary ? SUMMARY_RULES : SUMMARY_RULES_BODY), macros), user: fill(SUMMARY_INPUT, macros) };
+  }
+  const prompt = fill(gateIntimacy(custom), macros);
+  if (compact) {
+    // 照精简版改写的自定义模板自带全部规则:只在没写内容边界时补上,不补发旧版的兼容协议;
+    // 模板里删掉了的材料(主角档案、名册、生活小档案、信息差、了解清单)接在后面,状态更新才有对照。
+    const missing: string[] = [];
+    if (!prompt.includes(macros.protagonist_block)) missing.push(`【主角当前档案（本楼之前）】\n${macros.protagonist_block}`);
+    if (!prompt.includes(macros.npcs_block)) missing.push(`【角色名册（本楼之前；〔〕里是位置标记，[随行] 表示正跟着主角）】\n${macros.npcs_block}`);
+    if (!prompt.includes(lifeDetailsList)) missing.push(`【生活小档案（编号 d1、d2…）】\n${lifeDetailsList}`);
+    if (a.secrets?.length && !prompt.includes(macros.secrets_block)) missing.push(`【信息差（编号 s1、s2…）】\n${macros.secrets_block}`);
+    if (a.knowledge && !prompt.includes(macros.knowledge_block.trim())) missing.push(macros.knowledge_block.trim());
+    return {
+      system: boundary && !prompt.includes('【内容边界') ? RULE_CONTENT_BOUNDARY : CUSTOM_COMPACT_SYSTEM,
+      user: [prompt, ...missing].join('\n\n'),
+    };
+  }
   // 内容边界优先于模板自身规则:自定义模板没写这一段时由代码补上,不依赖用户同步。
   // 不发送内容边界时不补;模板里自己写了就保留,不去掉。
   const supplements = !boundary || prompt.includes('【内容边界') ? [] : [RULE_CONTENT_BOUNDARY];
@@ -1529,8 +1658,8 @@ export function buildSummaryPrompt(a: BuildArgs, opts: { contentBoundary?: boole
   if (!prompt.includes('【内心好感与外在态度规则】')) supplements.push(RULE_NPC_AFFINITY);
   // 关系线保留:自定义模板未带入时补上,保证慢热互动不在摘要/压缩里被删空(与内置模板同源)
   if (!prompt.includes('【关系线保留】')) supplements.push(RULE_RELATION_MOMENTUM);
-  // 亲密记录:自定义模板没提到时补上字段协议(可选字段,不破坏旧模板)
-  if (!prompt.includes('亲密记录')) supplements.push(INTIMACY_PROTOCOL_SUPPLEMENT);
+  // 亲密记录:开启且自定义模板没提到时补上字段协议(可选字段,不破坏旧模板);关闭时不补任何相关文字
+  if (intimacyEnabled() && !prompt.includes('亲密记录')) supplements.push(INTIMACY_PROTOCOL_SUPPLEMENT);
   // {{time_rule}} 在无时间标签时本身已经带有完整时间协议;
   // 只有自定义模板没有带入它时,才追加兼容协议,避免完整时间要求重复注入。
   if (!a.hasTimeTags && !prompt.includes('【时间锚点证据与精度】')) {
@@ -1603,50 +1732,110 @@ function resummaryChecklist(maxChars: number): string {
 }
 
 /**
+ * 精简版总结、二次总结的篇幅:上限和目标(上限的四分之三)。
+ *  - 设置里没有填具体字数(自动)时,上限取「档位算出的字数」与「输入的一定比例」中较大的一个
+ *    (比例与二次总结的最高比例相同:详细 50%、精简 40%,取整到十位)。
+ *  - 设置里填了具体字数时以它为上限,不再放宽。
+ * 另外按输入的条数给出「平均每条输入占多少字、约为原来的几成」:总字数模型数不准,按条给的份额容易照着写。
+ * 实测(deepseek-v4.1-flash,12 条摘要约 3800 字):上限照档位的 1000 字给时写出约 1200 字,有分量的情节丢 4%、细节丢三分之一;
+ * 说「放不下可以超过」时总结成了输入的照抄。旧版写的是 1000 字的硬线,模型实际写到约 2000 字。
+ */
+const SHARE_WORDS = ['不到一成', '一成', '两成', '三成', '四成', '一半', '六成', '七成', '八成', '九成'];
+export function compactLength(isSecond: boolean, target: number, content: string): { ceiling: number; aim: number; rule: string; note: string } {
+  const inputChars = content.length;
+  const explicit = isSecond ? normalizeResummary2MaxChars(apiSettings.resummary2MaxChars) : normalizeResummaryMaxChars(apiSettings.resummaryMaxChars);
+  const ceiling = explicit ? target : Math.max(target, Math.round(inputChars * currentVerbosity().resummary2MaxRatio / 10) * 10);
+  const aim = aimChars(ceiling);
+  // 输入的条数:engine 的 joinNodesForResummary 给每条加了 [序号] 前缀,条与条之间空一行
+  const count = Math.max(1, content.split(/\n\s*\n/).filter(part => /^\[\d+\] /.test(part)).length);
+  const perItem = Math.max(10, Math.round(aim / count / 10) * 10);
+  const ratio = inputChars ? aim / inputChars : 1;
+  const share = SHARE_WORDS[Math.min(9, Math.max(0, Math.round(ratio * 10)))];
+  const put = (text: string) => text.replace('{{length_aim}}', String(aim)).replace('{{length_ceiling}}', String(ceiling))
+    .replace('{{length_per_item}}', String(perItem)).replace('{{length_share}}', share);
+  // 输入本来就不比目标长(摘要很少或很短):只说上限,不谈「占原来的几成」
+  if (ratio >= 0.95) {
+    return isSecond
+      ? { ceiling, aim, rule: put(COMPACT_LENGTH_RULE2_SHORT), note: put(COMPACT_LENGTH_NOTE2_SHORT) }
+      : { ceiling, aim, rule: put(COMPACT_LENGTH_RULE_SHORT), note: put(COMPACT_LENGTH_NOTE_SHORT) };
+  }
+  // 二次总结只给目标,不给硬上限(见 promptsCompact.ts 的 COMPACT_LENGTH_RULE2)
+  return isSecond
+    ? { ceiling, aim, rule: put(COMPACT_LENGTH_RULE2), note: put(COMPACT_LENGTH_NOTE2) }
+    : { ceiling, aim, rule: put(COMPACT_LENGTH_RULE), note: put(COMPACT_LENGTH_NOTE) };
+}
+
+/**
  * 构造总结提示词。按层级分两套:
  *  - level<=1(L0 叶子 → L1):普通总结,字数取「总结字数」,为 0 时以档位为基准、随「摘要字数」等比放大 → RESUMMARY_PROMPT。
  *  - level>=2(L1+ → 更上层):二次总结,目标字数随输入规模动态给,不超过「二次总结字数」 → RESUMMARY2_PROMPT。
- * 各自优先用对应的自定义模板,空则回退内置。字数随档位(详细/精简)切换。
- * checklist 是请求末尾的核查清单(见 resummaryChecklist)。
+ * 各自优先用对应的自定义模板,空则回退内置(版本见 promptStyle)。字数随档位(详细/精简)切换。
+ * checklist 是请求末尾的核查清单(见 resummaryChecklist)。coverage 为真时,engine 在解析结果后核对每条输入有没有被写到(只有精简版内置提示词)。
  */
 export function buildResummaryPrompt(
   a: Pick<BuildArgs, 'user' | 'char' | 'content'> & { level: number },
   opts: { contentBoundary?: boolean } = {},
-): { system: string; user: string; checklist: string } {
+): { system: string; user: string; checklist: string; coverage?: boolean } {
   const boundary = opts.contentBoundary !== false;
   const isSecond = a.level >= 2;
-  const custom = isSecond
-    ? apiSettings.prompts.resummary2.trim()
-    : apiSettings.prompts.resummary.trim();
-  const builtin = isSecond ? RESUMMARY2_PROMPT : RESUMMARY_PROMPT;
+  const task = isSecond ? 'resummary2' : 'resummary';
+  const custom = apiSettings.prompts[task].trim();
+  const style = builtinStyleFor(task);
   const targets = isSecond ? resummary2Targets(a.content.length) : { min: 0, max: 0 };
   const words = resummaryWordsRange();
+  const maxChars = isSecond ? targets.max : words.max;
+  const length = compactLength(isSecond, maxChars, a.content);
   const macros = {
     user: a.user || '主角',
     char: a.char || '角色',
     content: a.content,
     resummary_words: `${words.min}-${words.max}`,
+    resummary_max: String(words.max),
+    input_chars: String(a.content.length),
     target_min: isSecond ? String(targets.min) : '',
     target_max: isSecond ? String(targets.max) : '',
+    target_percent: isSecond && a.content.length ? String(Math.max(1, Math.round(targets.max / a.content.length * 100))) : '',
     // 兼容保存过旧版 {{target}} 的自定义模板;旧语义对应目标/最高字数。
     target: isSecond ? String(targets.max) : '',
+    length_rule: length.rule,
   };
-  if (custom && custom !== builtin.trim()) {
+  // 精简版的核对步骤:总结的检查块点日期和仍然有效的事,二次总结(大事记)只点日期
+  const compactChecklist = isSecond ? COMPACT_RESUMMARY2_CHECKLIST : COMPACT_RESUMMARY_CHECKLIST;
+  if (!style) {
+    if (compactFlavored(task, custom)) {
+      // 照精简版改写的自定义模板自带全部规则:只在没写内容边界时补上;核对步骤用精简版的,篇幅以模板为准
+      return {
+        system: boundary && !custom.includes('【内容边界') ? RULE_CONTENT_BOUNDARY : CUSTOM_COMPACT_SYSTEM,
+        user: fill(gateIntimacy(custom), macros),
+        checklist: gateIntimacy(compactChecklist),
+      };
+    }
     // 不发送内容边界时不补;模板里自己写了就保留
     const supplements = !boundary || custom.includes('【内容边界') ? [] : [RULE_CONTENT_BOUNDARY];
     supplements.push(RULE_ABSOLUTE_TIME_LANGUAGE);
     if (!custom.includes('【关系线保留】')) supplements.push(RULE_RELATION_MOMENTUM);
-    return { system: supplements.join('\n\n'), user: fill(custom, macros), checklist: RESUMMARY_THINKING_CHECKLIST };
+    return { system: supplements.join('\n\n'), user: fill(gateIntimacy(custom), macros), checklist: gateIntimacy(RESUMMARY_THINKING_CHECKLIST) };
+  }
+  if (style === 'compact') {
+    const body = isSecond ? COMPACT_RESUMMARY2_RULES_BODY : COMPACT_RESUMMARY_RULES_BODY;
+    return {
+      system: fill(gateIntimacy(boundary ? `${RULE_CONTENT_BOUNDARY}\n\n${body}` : body), macros),
+      user: fill(isSecond ? COMPACT_RESUMMARY2_INPUT : COMPACT_RESUMMARY_INPUT, macros),
+      // 篇幅在紧挨输出的位置再说一次(文字在 promptsCompact.ts)
+      checklist: gateIntimacy(maxChars > 0 ? `${compactChecklist}\n${length.note}` : compactChecklist),
+      // 精简版要求每条输入里的场合都写到:写完后由 engine 核对有没有整条没写到的输入(summaryCoverage.ts)
+      coverage: true,
+    };
   }
   return {
-    system: fill(isSecond ? (boundary ? RESUMMARY2_RULES : RESUMMARY2_RULES_BODY) : (boundary ? RESUMMARY_RULES : RESUMMARY_RULES_BODY), macros),
+    system: fill(gateIntimacy(isSecond ? (boundary ? RESUMMARY2_RULES : RESUMMARY2_RULES_BODY) : (boundary ? RESUMMARY_RULES : RESUMMARY_RULES_BODY)), macros),
     user: fill(isSecond ? RESUMMARY2_INPUT : RESUMMARY_INPUT, macros),
-    checklist: resummaryChecklist(isSecond ? targets.max : words.max),
+    checklist: gateIntimacy(resummaryChecklist(maxChars)),
   };
 }
 
 /**
- * 构造合并摘要提示词(批量补摘的较早楼层)。始终用内置模板:自定义摘要模板是按单楼和状态字段写的,
+ * 构造合并摘要提示词(批量补摘的较早楼层)。始终用内置模板(版本见 promptStyle):自定义摘要模板是按单楼和状态字段写的,
  * 套不进「一次写若干层」的输出格式。每层篇幅沿用设置里的「摘要字数」。
  */
 export function buildBatchSummaryPrompt(
@@ -1660,11 +1849,24 @@ export function buildBatchSummaryPrompt(
     state_time: a.time ? a.time + (a.timeIsFictional ? '(程序虚构后备起点；正文明确的主线时间优先，不当作真实日期)' : '') : '(未知)',
     content: a.content,
     summary_max_chars: String(summaryMaxChars()),
+    summary_aim: String(aimChars(summaryMaxChars())),
   };
+  if (promptStyle() === 'compact') {
+    const body = COMPACT_BATCH_SUMMARY_RULES_BODY;
+    return {
+      system: fill(gateIntimacy(opts.contentBoundary === false ? body : `${RULE_CONTENT_BOUNDARY}\n\n${body}`), macros),
+      user: fill(COMPACT_BATCH_SUMMARY_INPUT, macros),
+    };
+  }
   return {
-    system: fill(opts.contentBoundary === false ? BATCH_SUMMARY_RULES_BODY : BATCH_SUMMARY_RULES, macros),
+    system: fill(gateIntimacy(opts.contentBoundary === false ? BATCH_SUMMARY_RULES_BODY : BATCH_SUMMARY_RULES), macros),
     user: fill(BATCH_SUMMARY_INPUT, macros),
   };
+}
+
+/** 合并摘要请求末尾的核对清单,随内置提示词版本。 */
+export function batchSummaryChecklist(): string {
+  return promptStyle() === 'compact' ? COMPACT_BATCH_THINKING_CHECKLIST : BATCH_SUMMARY_THINKING_CHECKLIST;
 }
 
 /**
@@ -1715,8 +1917,7 @@ ${SUMMARY_FACT_PREPARATION}
 3. 人物盘点:
    - 新人物:本楼登场而名册中没有的人都要 npcs.add(含此前只被提到、主角不在场或其他角色视角中登场的),不能只写进 summary;主要角色带 important:true,无名的用「职业+字母」标签并复用,报出真名用 rename 接续、不另建。正文写了身份、性别、外貌、着装、伤病、年龄就一并记下。当面互动的 location 通常填{{user}}本楼所在,一同行动的写 follow:true,只被提起或远程联络的没交代所在就省略 location。
    - 在册人物:名册里本楼出场的逐个过一遍,换装、受伤或恢复、离开、重逢、入队或离队、身份或关系质变,有变化就 npcs.update;正文没写的保持旧值,不重报。
-   - 亲密记录:本楼正文是否明确写到{{user}}与某个成年角色发生性行为,或出现了与已有记录相关的新后果、新约定(服药、例假、验孕、避孕办法)?有 → 该角色 npcs.update intimacy:次数在名册原有记录上累加,逐次写明日期、地点、几次、是否戴套,未戴套或出意外时是否在体内,与避孕有关的后果与约定同步改写,并把这些事实写进 summary;正文没写明的写「未写明」,不按常理补;中途停下没有做成的不加次数。没有 → 不输出 intimacy。未成年或年龄不明的人物不记。
-   - 离场同步 follow/location:标 [随行] 的人本楼没跟着走 → follow:false 并填他留下或去往的地点(不重报只适用于定点角色);去向不明明确清空 location;明确重逢必须提交 npcs.update,不能只在摘要中说他/她回来了;暂时离场不 remove。好感估计不外溢为事实,关系线保留具体互动证据。
+${INTIMACY_CHECK}   - 离场同步 follow/location:标 [随行] 的人本楼没跟着走 → follow:false 并填他留下或去往的地点(不重报只适用于定点角色);去向不明明确清空 location;明确重逢必须提交 npcs.update,不能只在摘要中说他/她回来了;暂时离场不 remove。好感估计不外溢为事实,关系线保留具体互动证据。
 4. 局势盘点:对照【当前互动局势】,本楼是否换了场面、有人进场或离场、正在做的事转了、持续的互动张力出现或解除?有 → 整卡重写 sceneFocus(situation 与 participants 必填,participants 与上一步核对后的在场名单一致);场面彻底结束 → null;同一局面里多说几句、多做一个动作 → 省略。发现目标、存在威胁或提出建议不等于决定下一步,不替{{user}}选择行动。
 5. 物品盘点:对照【现有物品】,本楼{{user}}得到、给出、用掉、寄存、取回了什么 → 逐件 add/update/remove;新物品按此刻在不在身上写 carried,不在身上的写明 location;数不清的按包装记一份;【近期物品变动】里已生效的不再结算。
 6. 生活小档案盘点:本楼{{user}}或主要角色是否明说、或正文明确揭示了偏好、习惯、近期个人状态?先确认是谁的,未记过 → lifeDetails.add;已有条目被推翻或过时 → update/archive/remove。单次行为不升级为习惯。
@@ -1745,10 +1946,26 @@ export const THINKING_PREFILL = `<thinking>
 /** 了解清单开启时补在人物盘点最后一项之后的一项;已先展开 {{user}}。 */
 const KNOWLEDGE_CHECK = '   - 了解清单:对照「角色对主角的了解」,本楼有谁亲耳听到、亲眼看到或听人转告了{{user}}的名字、身世、经历、秘密、私人喜好或自称的身份?未记过 → knowledge.add,照该角色以为的写;旧认知被揭穿或加深 → update 原条,不另加矛盾的一条。{{user}}的内心独白、该角色不在场时发生的事不算;没有新得知就不输出 knowledge。';
 
-/** 与批量清单一样在发送前展开宏,不把占位符留给渠道处理。knowledge 关闭时清单与没有这项功能时逐字相同。 */
-export function buildSummaryThinking(user: string, knowledge = false): { checklist: string; prefill: string } {
+/**
+ * 与批量清单一样在发送前展开宏,不把占位符留给渠道处理。knowledge 关闭时清单与没有这项功能时逐字相同。
+ * 清单和预填随摘要模板的版本:内置精简版和照它改写的自定义模板用精简版的核对步骤,其余用旧版。
+ * hasTimeTags 为 false(本楼正文没有时间标签)时,精简版的核对步骤多一行提醒填两个时间字段;旧版清单不变。
+ */
+export function buildSummaryThinking(user: string, knowledge = false, hasTimeTags = true): { checklist: string; prefill: string } {
   const name = user || '主角';
-  let checklist = fill(THINKING_CHECKLIST, { user: name });
+  if (flavorFor('summary') === 'compact') {
+    return {
+      checklist: fill(gateIntimacy(COMPACT_THINKING_CHECKLIST), {
+        user: name,
+        knowledge_check: knowledge ? fill(COMPACT_KNOWLEDGE_CHECK, { user: name }) : '',
+        time_check: hasTimeTags ? '' : COMPACT_TIME_CHECK,
+        // 字数上限在紧挨输出的位置再说一次;自定义模板的篇幅以模板为准,不加
+        summary_cap_check: usesBuiltinSummary() ? fill(COMPACT_SUMMARY_CAP_CHECK, { summary_max_chars: String(summaryMaxChars()) }) : '',
+      }),
+      prefill: COMPACT_THINKING_PREFILL,
+    };
+  }
+  let checklist = fill(gateIntimacy(THINKING_CHECKLIST), { user: name });
   if (knowledge) checklist = checklist.replace(/^( {3}- 离场同步.*)$/m, `$1\n${fill(KNOWLEDGE_CHECK, { user: name })}`);
   return { checklist, prefill: THINKING_PREFILL };
 }
