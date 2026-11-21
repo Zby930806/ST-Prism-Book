@@ -21,7 +21,7 @@ export { ApiError } from './errors';
  * 因此没有浏览器 CORS 问题,也无需把密钥存进 ST 的 secrets。
  */
 
-const GENERATE_URL = '/api/backends/chat-completions/generate';
+export const GENERATE_URL = '/api/backends/chat-completions/generate';
 const DEFAULT_TIMEOUT_SEC = 180;
 /** 流式请求的总上限:超时设置的 3 倍,至少这么多秒(超时设置在流式请求里按空闲时长计算)。 */
 const STREAM_TOTAL_MIN_SEC = 600;
@@ -293,7 +293,7 @@ function finishReply(text: string, meta: ReplyMeta): string {
 }
 
 /** 酒馆非流式代理把上游错误改写为 200 + { error: { message: statusText }, quota_error }。 */
-function envelopeFailure(data: any): ApiError {
+export function envelopeFailure(data: any): ApiError {
   const message = data?.error && typeof data.error === 'object' ? String(data.error.message ?? '') : typeof data?.error === 'string' ? data.error : '';
   return classifyHttpFailure({ status: statusFromText(message), body: data, quotaFlag: data?.quota_error === true });
 }

@@ -74,7 +74,16 @@ export interface CustomPrompts {
   jailbreak: string;
   /** 固定提示词(时间标签):注入**主对话**模型,要求每条正文前后输出时间标签;空=用内置默认。 */
   timeTag: string;
+  /** 创作规划·生成草稿的规划要求（发给规划 API 的系统提示词里可改的部分；输出格式由插件固定接在后面）。空=用内置。 */
+  outline: string;
+  /** 创作规划·注入正文的写作要求（随当前阶段发给正文模型；标记行和规划内容由插件固定生成）。空=用内置。 */
+  outlineGuidance: string;
+  /** 创作规划·推进条件检查的判断标准（输出格式由插件固定接在后面）。空=用内置。 */
+  outlineProgress: string;
 }
+
+/** 规划的三项自定义提示词的键。 */
+export const OUTLINE_PROMPT_KEYS = ['outline', 'outlineGuidance', 'outlineProgress'] as const;
 
 /**
  * 单个向量角色的端点配置(扁平:自带地址+密钥+模型,不再经「渠道」中转)。
@@ -129,6 +138,12 @@ export interface VectorRecallSettings {
   stickyTurns: number;
 }
 
+/**
+ * 查询重写的请求方式:direct = 浏览器直连(默认;1.4.18 及以前的做法),
+ * backend = 由酒馆服务器转发(用户自己选;不受浏览器跨域限制,本地模型一般要用它)。Embedding 与 Rerank 始终由浏览器直连。
+ */
+export type QueryRewriteRoute = 'backend' | 'direct';
+
 /** 向量记忆设置。embedding 为基准,rerank/queryRewrite 的 url 留空则整体复用 embedding。 */
 export interface VectorSettings {
   /** 向量记忆开关 */
@@ -148,6 +163,8 @@ export interface VectorSettings {
    * 默认 16000;0 = 不限制(1.4.0 及以前的做法,上下文两三万字时重写明显变慢)。
    */
   queryRewriteContextChars: number;
+  /** 查询重写的请求方式。默认 direct;老数据没有此键时也按 direct(升级后与 1.4.18 相同)。选 backend 时酒馆服务器连不上会自动改用浏览器直连。 */
+  queryRewriteRoute: QueryRewriteRoute;
   /** 召回参数(候选数/阈值/条数) */
   recall: VectorRecallSettings;
 }
@@ -565,7 +582,7 @@ function defaults(): ApiSettings {
       orbOpacity: 62,
       orbSize: 48,
     },
-    prompts: { summary: '', resummary: '', resummary2: '', jailbreak: '', timeTag: '' },
+    prompts: { summary: '', resummary: '', resummary2: '', jailbreak: '', timeTag: '', outline: '', outlineGuidance: '', outlineProgress: '' },
     promptBases: {},
     taskContextMode: 'default',
     contentBoundary: 'auto',
@@ -583,6 +600,7 @@ function defaults(): ApiSettings {
       queryRewriteJailbreak: false,
       queryRewriteMaxTokens: 8192,
       queryRewriteContextChars: QUERY_REWRITE_CONTEXT_DEFAULT,
+      queryRewriteRoute: 'direct',
       recall: {
         injectionDepth: DEFAULT_RECALL_INJECTION_DEPTH,
         rerankCandidates: 20,
@@ -641,6 +659,10 @@ function normalize(raw: unknown): ApiSettings {
   // prompts 是嵌套对象,展开合并不会补全缺字段,单独兜底(老数据没有 prompts 键时回退默认)
   merged.prompts = { ...d.prompts, ...((raw as Partial<ApiSettings>).prompts ?? {}) };
   merged.prompts.timeTag = normalizeSavedTimeTag(merged.prompts.timeTag);
+  // 规划的三项提示词（1.4.19 起）：老数据没有这些键时为空串（用内置的）；类型不对的也按空串
+  for (const key of OUTLINE_PROMPT_KEYS) {
+    if (typeof merged.prompts[key] !== 'string') merged.prompts[key] = '';
+  }
   // 自定义提示词的基准版本:只留已知键的非空字符串;旧数据没有这个字段就是空对象(未记录)
   const rawBases = (raw as Partial<ApiSettings>).promptBases;
   merged.promptBases = {};
@@ -763,6 +785,8 @@ function normalize(raw: unknown): ApiSettings {
       : 8192;
   // 查询重写附带上下文上限:0 = 不限制,其余不小于 2000;老数据没有此键时用默认 16000(只压很长的上下文)
   merged.vector.queryRewriteContextChars = normalizeQueryRewriteContextChars(merged.vector.queryRewriteContextChars);
+  // 查询重写的请求方式:只有明确存成 backend 才经酒馆后端转发,老数据没有此键或值不认识时按浏览器直连(与 1.4.18 相同)
+  merged.vector.queryRewriteRoute = merged.vector.queryRewriteRoute === 'backend' ? 'backend' : 'direct';
   // 副 API 渠道:逐个补全新加的字段(老数据没有 timeoutSec/stream/excludeParams),并校验类型
   merged.channels = (Array.isArray(merged.channels) ? merged.channels : []).map(normalizeChannel);
   // 字数档位:仅两个合法值,旧数据缺失/非法回退详细(= 老用户行为不变)

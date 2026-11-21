@@ -11,9 +11,12 @@ import { memoryWriteIssue } from '@/memory/store';
 import { outlineSettings, outlineSettingsIssue, hydrateOutlineSettings, saveOutlineSettings, resolveOutlineChannel, OUTLINE_SETTINGS_KEY } from './settings';
 import { parseOutlineReply, validateOutlineContent } from './protocol';
 import { buildOutlineContext } from './context';
-import { OUTLINE_PROMPT } from './prompt';
+import {
+  OUTLINE_FORMAT, OUTLINE_GUIDE, OUTLINE_PROGRESS_FORMAT, OUTLINE_PROGRESS_GUIDE, OUTLINE_PROGRESS_PROMPT, OUTLINE_PROMPT,
+  outlineProgressSystemPrompt, outlineSystemPrompt,
+} from './prompt';
 import { OUTLINE_LIMITS as L } from './limits';
-import { outlineGuidanceLength, renderOutlineGuidance } from './injection';
+import { OUTLINE_GUIDANCE_TEMPLATE, outlineGuidanceLayout, outlineGuidanceLength, outlineGuidanceText, renderOutlineGuidance } from './injection';
 import type { OutlineActive } from './types';
 
 // 仅 mock 外部边界；四个大纲模块、札记设置和正文清洗均使用真实实现。
@@ -32,7 +35,10 @@ vi.mock('@/memory/store', () => ({
   memoryWriteIssue: vi.fn(() => ''),
 }));
 vi.mock('@/memory/inject', () => ({ selectHistoryNodesBefore: vi.fn(() => []), renderHistoryNodes: vi.fn(() => '') }));
-vi.mock('@/api/settings', () => ({ apiSettings: { customStripTags: [], channels: [{ url: 'https://forbidden.invalid', model: '禁止回退' }], memoryBudgetTokens: 0 } }));
+vi.mock('@/api/settings', () => ({ apiSettings: {
+  customStripTags: [], channels: [{ url: 'https://forbidden.invalid', model: '禁止回退' }], memoryBudgetTokens: 0,
+  prompts: { outline: '', outlineGuidance: '', outlineProgress: '' },
+} }));
 
 const copy = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 function content(): OutlineContent {
@@ -398,6 +404,53 @@ describe('放宽篇幅、角色连续性与安全诊断', () => {
     // 生成规划时要求阶段经过多轮回复展开
     expect(OUTLINE_PROMPT).toContain('每个阶段要在正文中经过多轮回复才能逐步展开');
   });
+  it('自定义写作要求:标记行和规划内容不变,{{pace_rule}} 按节奏替换;留空或与内置相同时就是内置的', () => {
+    const record = active(content());
+    const builtin = outlineGuidanceText(record, 'slow');
+    expect(outlineGuidanceText(record, 'slow', '')).toBe(builtin);
+    expect(outlineGuidanceText(record, 'slow', '  \n')).toBe(builtin);
+    expect(outlineGuidanceText(record, 'slow', OUTLINE_GUIDANCE_TEMPLATE)).toBe(builtin);
+    expect(OUTLINE_GUIDANCE_TEMPLATE.split('{{pace_rule}}')).toHaveLength(2);
+
+    const custom = renderOutlineGuidance(record, 'slow', '按规划写，文风保持冷峻。{{pace_rule}}不要赶进度。');
+    const lines = custom.split('\n');
+    expect(lines[0]).toBe('[用户已确认的创作规划：未来创作指引，不是已发生事实]');
+    expect(lines[1]).toBe('按规划写，文风保持冷峻。本阶段要经过多轮回复逐步展开：每轮最多推进一个剧情要点，也可以一个都不推进，先把当前场景的互动写充分，回复停在需要用户回应的地方；不要赶进度。');
+    expect(lines[2]).toBe('规划：远行的可能性');
+    expect(custom).not.toContain('角色的活人感优先于节点完成');
+    // 规划内容部分与内置写法逐字相同
+    expect(custom.slice(custom.indexOf('\n规划：'))).toBe(builtin.slice(builtin.indexOf('\n规划：')));
+    expect(custom.endsWith('[创作规划结束]')).toBe(true);
+    // 换节奏时宏换成那一档的句子
+    expect(renderOutlineGuidance(record, 'fast', '{{pace_rule}}收尾。').split('\n')[1]).toBe('每轮可以推进多个剧情要点，但不在一轮写完整个阶段；收尾。');
+    // 不写宏时不带节奏那一句,剧情要点标题里的节奏提示仍在
+    const plain = renderOutlineGuidance(record, 'slow', '只按规划的方向写。');
+    expect(plain).not.toContain('每轮最多推进一个剧情要点');
+    expect(plain).toContain('剧情要点（尚未发生；按顺序分多轮展开，每轮最多推进一个）');
+  });
+  it('注入上限按内置的写作要求计算,不随自定义的长短变化', () => {
+    const value = content(); value.premise = '前'.repeat(L.premise);
+    value.constraints = Array(8).fill('约'.repeat(L.constraint));
+    const record = active(value);
+    value.chapters[0].goal += '目'.repeat(L.injection - outlineGuidanceLength(record));
+    expect(outlineGuidanceLength(record)).toBe(L.injection);
+    const long = '写'.repeat(5000);
+    const text = renderOutlineGuidance(record, 'normal', long);
+    expect(text).toContain(long);
+    expect(text.length).toBeGreaterThan(L.injection);
+    value.chapters[0].goal += '目';
+    expect(() => renderOutlineGuidance(record, 'normal', '短')).toThrow('16000');
+  });
+  it('设置页展示的固定部分示意与实际注入的结构一致', () => {
+    const layout = outlineGuidanceLayout().split('\n');
+    expect(layout[0]).toBe('[用户已确认的创作规划：未来创作指引，不是已发生事实]');
+    expect(layout[1]).toBe('（此处是上面编辑的写作要求）');
+    expect(layout.slice(2)).toEqual([
+      '规划：…', '总体方向：…', '持续约束：', '- …', '当前第 1 / 1 阶段：…', '阶段目标：…', '发展方式：…',
+      '剧情要点（尚未发生；按顺序分多轮展开，每轮最多推进一到两个）：', '1. …', '2. …',
+      '推进条件（由用户或推进条件检查核对）：…', '[创作规划结束]',
+    ]);
+  });
 });
 
 describe('只读上下文与通用未来提示词', () => {
@@ -508,5 +561,41 @@ describe('只读上下文与通用未来提示词', () => {
     expect(OUTLINE_PROMPT).toContain('不写入 memory.plans 或正文 leaf');
     expect(OUTLINE_PROMPT).toContain('严禁把提案'); expect(OUTLINE_PROMPT).toContain('不输出状态更新');
     expect(OUTLINE_PROMPT).not.toMatch(/凝嘤嘤|远行的可能性|楼层标记/);
+  });
+});
+
+describe('规划提示词的自定义', () => {
+  afterEach(() => {
+    Object.assign(apiSettings.prompts, { outline: '', outlineGuidance: '', outlineProgress: '' });
+  });
+  it('内置提示词由可以自定义的要求和固定的输出格式接成', () => {
+    expect(OUTLINE_PROMPT).toBe(`${OUTLINE_GUIDE}\n${OUTLINE_FORMAT}`);
+    expect(OUTLINE_FORMAT.startsWith('【输出格式】\n只输出一个 JSON 对象')).toBe(true);
+    expect(OUTLINE_GUIDE).not.toContain('【输出格式】');
+    expect(OUTLINE_GUIDE.endsWith('也不得声明已保存、已执行或已成为事实。')).toBe(true);
+    expect(OUTLINE_PROGRESS_PROMPT).toBe(`${OUTLINE_PROGRESS_GUIDE}\n${OUTLINE_PROGRESS_FORMAT}`);
+    expect(OUTLINE_PROGRESS_FORMAT.startsWith('只输出一个 JSON 对象，不附其他文字：{"met": true 或 false')).toBe(true);
+    expect(OUTLINE_PROGRESS_GUIDE).not.toContain('"met"');
+  });
+  it('自定义规划要求时输出格式固定接在后面;留空或只有空白时用内置的', () => {
+    expect(outlineSystemPrompt('')).toBe(OUTLINE_PROMPT);
+    expect(outlineSystemPrompt('  \n ')).toBe(OUTLINE_PROMPT);
+    const custom = outlineSystemPrompt('\n你是编剧助手，按三幕式规划。\n\n');
+    expect(custom).toBe(`你是编剧助手，按三幕式规划。\n${OUTLINE_FORMAT}`);
+    expect(custom).not.toContain('尊重主角自主性');
+    expect(() => parseOutlineReply(custom.slice(custom.lastIndexOf('\n') + 1))).not.toThrow();
+    expect(outlineProgressSystemPrompt(' ')).toBe(OUTLINE_PROGRESS_PROMPT);
+    expect(outlineProgressSystemPrompt('从严判断。\n')).toBe(`从严判断。\n${OUTLINE_PROGRESS_FORMAT}`);
+  });
+  it('生成规划的请求使用设置里的规划要求,其余消息不变', () => {
+    const builtin = buildOutlineContext(ctx, '需求', 2);
+    expect(builtin[0]).toEqual({ role: 'system', content: OUTLINE_PROMPT });
+    apiSettings.prompts.outline = '只规划日常线，不安排冲突升级。';
+    const custom = buildOutlineContext(ctx, '需求', 2);
+    expect(custom[0]).toEqual({ role: 'system', content: `只规划日常线，不安排冲突升级。\n${OUTLINE_FORMAT}` });
+    expect(custom.slice(1)).toEqual(builtin.slice(1));
+    // 注入指引和推进条件检查的设置不影响生成规划的请求
+    Object.assign(apiSettings.prompts, { outline: '', outlineGuidance: '另一段要求', outlineProgress: '另一套标准' });
+    expect(buildOutlineContext(ctx, '需求', 2)).toEqual(builtin);
   });
 });

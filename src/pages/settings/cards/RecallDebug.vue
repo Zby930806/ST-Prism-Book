@@ -68,7 +68,7 @@ const stepMeta = (count: string, ...ms: Array<number | undefined>) => {
   const known = ms.filter((v): v is number => typeof v === 'number');
   return known.length ? `${count} · ${sec(known.reduce((a, b) => a + b, 0))}` : count;
 };
-// 查询重写这次发了多少:字数、是否按上限精简、token 用量(接口返回了才显示)
+// 查询重写这次发了多少:字数、是否按上限精简、token 用量(接口返回了才显示),以及请求经哪条路取得回复
 const rewriteLine = computed(() => {
   const s = recallDebug.rewriteStats;
   if (!s) return '';
@@ -78,7 +78,10 @@ const rewriteLine = computed(() => {
   const tokens = typeof s.promptTokens === 'number' && typeof s.completionTokens === 'number'
     ? `；输入 ${s.promptTokens} token，输出 ${s.completionTokens} token` : '';
   const hedged = s.hedged ? '第一次请求 12 秒没有返回，补发了一次，用的是先返回的那次。' : '';
-  return `发送 ${s.inputChars} 字，${context}${tokens}。${hedged}`;
+  const route = s.fellBack
+    ? '请求方式设置的是酒馆后端转发；经后端的请求在本次会话里没有走通（酒馆服务器连不上这个地址、迟迟没有返回，或被服务商按来路拒绝），这次的回复由浏览器直连取得。经常这样时，可以把请求方式改回浏览器直连。'
+    : s.route === 'backend' ? '请求经酒馆后端转发。' : s.route === 'direct' ? '请求由浏览器直连发出。' : '';
+  return `发送 ${s.inputChars} 字，${context}${tokens}。${route}${hedged}`;
 });
 </script>
 

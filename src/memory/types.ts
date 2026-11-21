@@ -203,7 +203,7 @@ export interface MemNpc extends NpcAffinity {
   relation?: string;
   /** 与其他角色的重要关系(档案层,高门槛;如「阿黛尔之父;与镇长有旧怨」) */
   ties?: string;
-  /** 与主角的亲密记录(只记成年角色;覆盖型累积文本:累计次数、逐次的避孕措施与是否体内、仍有效的后果与约定)。不受在场分档影响,始终注入 */
+  /** 与主角的亲密记录(覆盖型累积文本:累计次数、逐次的避孕措施与是否体内、仍有效的后果与约定)。不受在场分档影响,始终注入 */
   intimacy?: string;
   /** 身份/职业一句话(不在场时唯一保留的信息) */
   title?: string;
@@ -670,7 +670,7 @@ export interface NpcDelta extends NpcAffinity {
   relation?: string;
   /** 与其他角色的重要关系(档案层,高门槛) */
   ties?: string;
-  /** 与主角的亲密记录(只记成年角色;update 整体覆盖,写累积后的完整内容) */
+  /** 与主角的亲密记录(update 整体覆盖,写累积后的完整内容) */
   intimacy?: string;
   /** 身份/职业一句话 */
   title?: string;

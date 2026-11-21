@@ -8,9 +8,11 @@ import {
   type PromptMacro,
 } from '@/memory/prompts';
 import { builtinTimeTagPrompt, TIME_TAG_PROMPT, TIME_TAG_PROMPT_COMPACT } from '@/memory/timeTag';
+import { OUTLINE_GUIDANCE_TEMPLATE, OUTLINE_PACE_MACRO, outlineGuidanceLayout } from '@/outline/injection';
+import { OUTLINE_FORMAT, OUTLINE_GUIDE, OUTLINE_PROGRESS_FORMAT, OUTLINE_PROGRESS_GUIDE } from '@/outline/prompt';
 
-/* —— 自定义提示词:列表(摘要/总结/破限/时间标签),点开在弹窗里编辑大文本 —— */
-export type PromptKey = 'summary' | 'resummary' | 'resummary2' | 'jailbreak' | 'timeTag';
+/* —— 自定义提示词:列表(摘要/总结/破限/时间标签,以及创作规划的三项),点开在弹窗里编辑大文本 —— */
+export type PromptKey = 'summary' | 'resummary' | 'resummary2' | 'jailbreak' | 'timeTag' | 'outline' | 'outlineGuidance' | 'outlineProgress';
 export interface PromptMeta {
   key: PromptKey;
   label: string;
@@ -20,6 +22,11 @@ export interface PromptMeta {
   /** 各版本的内置文本:自定义内容照其中任何一版改写、而那一版没变,都不算「内置已更新」 */
   readonly builtins: string[];
   macros: PromptMacro[];
+  /**
+   * 不能改的部分(只读,编辑窗口里折叠展示):插件要按固定格式读取回复,或内容由插件按规划生成,
+   * 所以不放进可编辑的文本,发送时由插件接上。只有创作规划的三项有。
+   */
+  readonly fixed?: { label: string; text: string };
 }
 export const PROMPT_METAS: PromptMeta[] = [
   {
@@ -61,6 +68,33 @@ export const PROMPT_METAS: PromptMeta[] = [
     get builtin() { return builtinTimeTagPrompt(); },
     get builtins() { return [TIME_TAG_PROMPT, TIME_TAG_PROMPT_COMPACT]; },
     macros: [],
+  },
+  {
+    key: 'outline',
+    label: '规划生成提示词',
+    hint: '「创作规划」生成草稿时（按创作要求生成、一键生成、按讨论修改）发给规划 API 的要求：模型的身份、原则、人物怎么写、规划内容怎么写。任务说明和内容边界不随规划请求发送，需要时可以写在这里。不支持宏。',
+    builtin: OUTLINE_GUIDE,
+    builtins: [OUTLINE_GUIDE],
+    macros: [],
+    fixed: { label: '固定接在后面的输出格式（只读）', text: OUTLINE_FORMAT },
+  },
+  {
+    key: 'outlineGuidance',
+    label: '规划注入指引',
+    hint: '规划启用后，每次生成正文时随当前阶段一起发给正文模型的写作要求。每次生成都会发送，写得越长占用的上下文越多。也可以写酒馆的宏（如 {{user}}、{{char}}），由酒馆在发送时替换。',
+    builtin: OUTLINE_GUIDANCE_TEMPLATE,
+    builtins: [OUTLINE_GUIDANCE_TEMPLATE],
+    macros: [{ token: OUTLINE_PACE_MACRO, desc: '当前「推进节奏」对应的一句要求（慢、适中、快各不相同）；删掉这个宏就不发送这一句' }],
+    get fixed() { return { label: '插件固定生成的部分（只读示意）', text: outlineGuidanceLayout() }; },
+  },
+  {
+    key: 'outlineProgress',
+    label: '推进条件检查提示词',
+    hint: '检查当前阶段的推进条件是否已在正文中满足时，发给规划 API 的判断标准。不支持宏。',
+    builtin: OUTLINE_PROGRESS_GUIDE,
+    builtins: [OUTLINE_PROGRESS_GUIDE],
+    macros: [],
+    fixed: { label: '固定接在后面的输出格式（只读）', text: OUTLINE_PROGRESS_FORMAT },
   },
 ];
 

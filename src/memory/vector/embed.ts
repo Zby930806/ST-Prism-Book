@@ -45,7 +45,7 @@ export async function vectorHttpFailure(label: string, resp: Response): Promise<
 /* ============ 超时 + 自动重试 ============ */
 
 /** 重试前的固定退避(毫秒)。 */
-const RETRY_BACKOFF_MS = 800;
+export const RETRY_BACKOFF_MS = 800;
 
 /**
  * 带超时 + 自动重试的 fetch。向量上游常挂住不返回,裸 fetch 会一直干等——
@@ -56,13 +56,15 @@ const RETRY_BACKOFF_MS = 800;
  *  - 4xx(鉴权/格式错等)→ 直接返回 resp,由调用方走既有 !resp.ok 抛错分支(重试无意义);
  *  - 外部 signal(用户取消生成)触发的中断 → 立即抛出,绝不重试(重试是浪费额度与时间)。
  * 返回 Response(正文已读完,可能 4xx,交调用方处理);重试耗尽仍失败则抛最后一次错误。
+ * network:连不上时怎么说明;不给时按浏览器直连上游来写(提示跨域)。查询重写经酒馆后端转发时请求发给酒馆,要换一种说法。
  */
 export async function fetchWithTimeoutRetry(
   url: string,
   init: RequestInit,
-  opts: { timeoutSec: number; retries: number; label: string; externalSignal?: AbortSignal; retryOnTimeout?: boolean },
+  opts: { timeoutSec: number; retries: number; label: string; externalSignal?: AbortSignal; retryOnTimeout?: boolean; network?: (message: string) => ApiError },
 ): Promise<Response> {
   const { label, externalSignal } = opts;
+  const network = opts.network ?? ((message: string) => networkFailure(message, { direct: true }));
   // 设置页的输入框可能暂时为空或越界:超时按至少 1 秒,重试按非负整数
   const timeoutSec = typeof opts.timeoutSec === 'number' && Number.isFinite(opts.timeoutSec) && opts.timeoutSec > 0 ? opts.timeoutSec : 10;
   const retries = typeof opts.retries === 'number' && Number.isFinite(opts.retries) ? Math.max(0, Math.floor(opts.retries)) : 0;
@@ -93,14 +95,18 @@ export async function fetchWithTimeoutRetry(
         // 正文在超时计时内读完:服务商发了响应头却迟迟不发正文时,同样按超时处理
         const body = await resp.text();
         const nullBody = resp.status === 204 || resp.status === 205 || resp.status === 304;
-        return new Response(nullBody ? null : body, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+        const rebuilt = new Response(nullBody ? null : body, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+        // 原响应没有 Content-Type 时保持没有(用字符串重建会被自动补上 text/plain):查询重写要靠有没有它
+        // 来分辨酒馆自己的响应和酒馆原样转来的服务商回复(见 rewrite.ts 的 readBackendResponse)
+        if (!resp.headers.has('content-type')) rebuilt.headers.delete('content-type');
+        return rebuilt;
       }
     } catch (e) {
       // 外部取消触发的 abort:立即抛,不重试
       if (externalSignal?.aborted && !timedOut) throw new EmbedError(`${label}已取消`, { kind: 'cancelled' });
       lastErr = timedOut
         ? vectorFailure(label, timeoutFailure('请求', timeoutSec))
-        : vectorFailure(label, networkFailure(e instanceof Error ? e.message : String(e), { direct: true }));
+        : vectorFailure(label, network(e instanceof Error ? e.message : String(e)));
       if (timedOut && !retryOnTimeout) throw lastErr;
     } finally {
       clearTimeout(timer);

@@ -10,11 +10,12 @@ const mocks = vi.hoisted(() => ({
   channelIssue: '',
   state: { active: null as OutlineActive | null },
   settings: { apiMode: 'notes', progressCheck: { auto: false, interval: 2, autoAdvance: false } },
+  api: { prompts: { outline: '', outlineGuidance: '', outlineProgress: '' } },
 }));
 vi.mock('@/api/client', () => ({ requestCompletion: mocks.request }));
 vi.mock('@/st/context', () => ({ getContext: () => mocks.context }));
 vi.mock('@/st/toast', () => ({ toast: mocks.toast }));
-vi.mock('@/api/settings', () => ({ engineActiveHere: () => true }));
+vi.mock('@/api/settings', () => ({ engineActiveHere: () => true, apiSettings: mocks.api }));
 vi.mock('@/memory/engine', () => ({ isAiFloor: (m: { is_user: boolean }) => !m.is_user }));
 vi.mock('@/memory/timeTag', () => ({ cleanBody: (s: string) => s }));
 vi.mock('@/memory/apply', () => ({
@@ -29,6 +30,7 @@ vi.mock('./settings', () => ({
 vi.mock('./store', () => ({ outlineState: mocks.state, outlineSourceCurrent: () => true, outlineStorageCurrent: () => true, setOutlineChapter: mocks.setChapter }));
 
 import { autoAdvanceForCurrentStage, buildProgressContext, checkOutlineProgress, maybeAutoCheckProgress, outlineProgress, parseProgressReply, progressForCurrentStage, progressMinMessages, PROGRESS_LIMITS } from './progress';
+import { OUTLINE_PROGRESS_FORMAT, OUTLINE_PROGRESS_PROMPT } from './prompt';
 
 const active = (): OutlineActive => ({
   id: 'o1', createdAt: 1, sourceFloor: 0, sourceHash: 'h', brief: '', enabled: true, currentChapter: 0,
@@ -50,6 +52,7 @@ beforeEach(() => {
   mocks.state.active = active();
   mocks.channelIssue = '';
   mocks.settings.progressCheck = { auto: false, interval: 2, autoAdvance: false };
+  mocks.api.prompts.outlineProgress = '';
   useChat();
   Object.assign(outlineProgress, { busy: false, outlineId: '', chapter: -1, met: null, reason: '', floor: -1, auto: false, dismissed: false, error: '', errorDetail: '', advanced: null, autoNote: '' });
 });
@@ -71,6 +74,20 @@ describe('推进条件检查（全部本地 mock）', () => {
     expect(user).toContain('第1楼 正文：\n两人来到钟塔下。');
     expect(user).not.toContain('内部提示');
     expect(user).not.toContain('番外');
+  });
+
+  it('判断标准可以自定义，输出格式固定接在后面；留空时用内置的', async () => {
+    const builtin = buildProgressContext(mocks.context, active());
+    expect(builtin[0]).toEqual({ role: 'system', content: OUTLINE_PROGRESS_PROMPT });
+    mocks.api.prompts.outlineProgress = '只要正文里有人明确说出结论就算满足。\n';
+    const custom = buildProgressContext(mocks.context, active());
+    expect(custom[0]).toEqual({ role: 'system', content: `只要正文里有人明确说出结论就算满足。\n${OUTLINE_PROGRESS_FORMAT}` });
+    expect(custom[1]).toEqual(builtin[1]);
+    // 自定义后发出的请求用的是自定义的系统提示词，回复仍按固定格式读取
+    mocks.request.mockResolvedValue('{"met": true, "reason": "已找到值班簿"}');
+    expect(await checkOutlineProgress()).toBe(true);
+    expect(mocks.request.mock.calls[0][1][0].content).toBe(custom[0].content);
+    expect(outlineProgress).toMatchObject({ met: true, reason: '已找到值班簿' });
   });
 
   it('检查结果记在当前阶段上；切换阶段后不再显示', async () => {

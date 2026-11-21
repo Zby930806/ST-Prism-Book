@@ -64,7 +64,7 @@ defineExpose({ focusName: () => nameInput.value?.focus() });
         <textarea v-model="draft.ties" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：阿黛尔之父；与镇长有旧怨"></textarea>
       </label>
       <label class="bbs-modal-field">
-        <span class="bbs-modal-label">与主角的亲密记录（只记成年角色；累计次数、每次的避孕措施、后果与约定）</span>
+        <span class="bbs-modal-label">与主角的亲密记录（累计次数、每次的避孕措施、后果与约定）</span>
         <textarea v-model="draft.intimacy" v-autosize class="bbs-input bbs-modal-textarea bbs-modal-autogrow" rows="1" placeholder="如：共3次；9/12 她家：戴套；9/19 旅馆 两次：第一次戴套，第二次未戴套、体外；约定此后必须戴套"></textarea>
       </label>
       <label class="bbs-modal-field">

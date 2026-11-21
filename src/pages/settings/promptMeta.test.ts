@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { apiSettings } from '@/api/settings';
 import { RESUMMARY_PROMPT_COMPACT, SUMMARY_PROMPT, SUMMARY_PROMPT_COMPACT } from '@/memory/prompts';
 import { TIME_TAG_PROMPT, TIME_TAG_PROMPT_COMPACT } from '@/memory/timeTag';
-import { builtinLike, PROMPT_METAS, promptSync, taskContextModeAfterSave } from './promptMeta';
+import { OUTLINE_GUIDANCE_TEMPLATE } from '@/outline/injection';
+import { OUTLINE_GUIDE, OUTLINE_PROGRESS_GUIDE, OUTLINE_PROGRESS_PROMPT, OUTLINE_PROMPT } from '@/outline/prompt';
+import { builtinLike, isCustom, PROMPT_METAS, promptSync, taskContextModeAfterSave } from './promptMeta';
 
 describe('保存任务说明后的模式', () => {
   it('原来禁用的保持禁用：查看后点「完成」不会悄悄重新启用', () => {
@@ -61,5 +63,54 @@ describe('内置提示词版本与自定义提示词的同步状态', () => {
     expect(builtinLike(meta('timeTag'), TIME_TAG_PROMPT + '补充')).toBe(TIME_TAG_PROMPT);
     expect(builtinLike(meta('timeTag'), TIME_TAG_PROMPT_COMPACT + '补充')).toBe(TIME_TAG_PROMPT_COMPACT);
     expect(builtinLike(meta('jailbreak'), '任意')).toBe(meta('jailbreak').builtin);
+  });
+});
+
+describe('创作规划的三项提示词', () => {
+  const saved = { style: apiSettings.promptStyle, prompts: { ...apiSettings.prompts }, bases: { ...apiSettings.promptBases } };
+  afterEach(() => {
+    apiSettings.promptStyle = saved.style;
+    Object.assign(apiSettings.prompts, saved.prompts);
+    apiSettings.promptBases = { ...saved.bases };
+  });
+  const meta = (key: string) => PROMPT_METAS.find(m => m.key === key)!;
+
+  it('列表里有规划生成、注入指引、推进条件检查三项:可以改的只是要求,固定部分另外只读展示', () => {
+    expect(PROMPT_METAS.map(m => m.key)).toEqual(['summary', 'resummary', 'resummary2', 'jailbreak', 'timeTag', 'outline', 'outlineGuidance', 'outlineProgress']);
+    const outline = meta('outline'), guidance = meta('outlineGuidance'), progress = meta('outlineProgress');
+    expect(outline.builtin).toBe(OUTLINE_GUIDE);
+    expect(`${outline.builtin}\n${outline.fixed!.text}`).toBe(OUTLINE_PROMPT);
+    expect(progress.builtin).toBe(OUTLINE_PROGRESS_GUIDE);
+    expect(`${progress.builtin}\n${progress.fixed!.text}`).toBe(OUTLINE_PROGRESS_PROMPT);
+    expect(guidance.builtin).toBe(OUTLINE_GUIDANCE_TEMPLATE);
+    expect(guidance.macros.map(m => m.token)).toEqual(['{{pace_rule}}']);
+    expect(guidance.fixed!.text).toContain('（此处是上面编辑的写作要求）');
+    expect(guidance.fixed!.text).toContain('[创作规划结束]');
+    expect(outline.macros).toEqual([]); expect(progress.macros).toEqual([]);
+    // 其余提示词没有固定部分
+    for (const key of ['summary', 'resummary', 'resummary2', 'jailbreak', 'timeTag']) expect(meta(key).fixed).toBeUndefined();
+    // 每一项的内置文本都只有一版,不随「内置提示词版本」变化
+    for (const style of ['classic', 'compact'] as const) {
+      apiSettings.promptStyle = style;
+      expect(meta('outline').builtins).toEqual([OUTLINE_GUIDE]);
+    }
+  });
+
+  it('是否自定义、与内置的同步状态和其他提示词一样判断', () => {
+    for (const key of ['outline', 'outlineGuidance', 'outlineProgress'] as const) {
+      expect(isCustom(key)).toBe(false);
+      expect(promptSync(meta(key))).toBe('default');
+    }
+    apiSettings.prompts.outline = OUTLINE_GUIDE + '\n- 多写日常。';
+    apiSettings.promptBases.outline = OUTLINE_GUIDE;
+    expect(isCustom('outline')).toBe(true);
+    expect(promptSync(meta('outline'))).toBe('synced');
+    expect(builtinLike(meta('outline'), apiSettings.prompts.outline)).toBe(OUTLINE_GUIDE);
+    apiSettings.promptBases.outline = '更早的内置文本';
+    expect(promptSync(meta('outline'))).toBe('outdated');
+    delete apiSettings.promptBases.outline;
+    expect(promptSync(meta('outline'))).toBe('unknown');
+    apiSettings.prompts.outline = '   ';
+    expect(isCustom('outline')).toBe(false);
   });
 });

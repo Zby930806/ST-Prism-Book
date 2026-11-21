@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ApiError, classifyHttpFailure, containsCompleteJson, describeFailure, finishKind, isRetryable,
-  looksLikeUnfinishedJson, sanitizeDetail, truncatedReply, withContext,
+  looksLikeUnfinishedJson, sanitizeDetail, statusFromText, truncatedReply, withContext,
 } from './errors';
 
 describe('上游报错分类', () => {
@@ -45,6 +45,103 @@ describe('上游报错分类', () => {
     expect(classifyHttpFailure({ status: 400, statusText: 'Unauthorized', body: '{}' })).toMatchObject({ kind: 'auth', status: 401 });
   });
 
+  it('状态说明的新旧两种叫法都认得（422、413）', () => {
+    expect(statusFromText('Unprocessable Entity')).toBe(422);
+    expect(statusFromText('Unprocessable Content')).toBe(422);
+    expect(statusFromText('Payload Too Large')).toBe(413);
+    expect(statusFromText(' content too large ')).toBe(413);
+    expect(statusFromText('I am a teapot')).toBeUndefined();
+  });
+
+  it('服务商自己发回的回复（provider）：原话里有 certificate、network 之类的词也不按连接问题归类', () => {
+    const body = { error: { message: 'x509: certificate signed by unknown authority' } };
+    expect(classifyHttpFailure({ status: 500, body })).toMatchObject({ kind: 'network' });
+    expect(classifyHttpFailure({ status: 500, body, provider: true })).toMatchObject({ kind: 'server', status: 500 });
+    expect(classifyHttpFailure({ status: 502, body: { error: { message: 'fetch failed' } }, provider: true })).toMatchObject({ kind: 'server', status: 502 });
+    expect(classifyHttpFailure({ body: { error: { message: 'network error' } }, provider: true })).toMatchObject({ kind: 'upstream' });
+  });
+
+  it('被酒馆改成 400、状态说明又没传过来时（maskedAuth）：原话是密钥、令牌没有通过认证就按 401 归类，更具体的分类优先', () => {
+    const key = '{"error":{"message":"Incorrect API key provided"}}';
+    expect(classifyHttpFailure({ status: 400, body: key, maskedAuth: true })).toMatchObject({ kind: 'auth', status: 401 });
+    expect(classifyHttpFailure({ status: 400, body: key })).toMatchObject({ kind: 'bad-request', status: 400 });
+    expect(classifyHttpFailure({ status: 403, body: key, maskedAuth: true })).toMatchObject({ kind: 'auth', status: 403 });
+    expect(classifyHttpFailure({ status: 400, body: '{"error":{"message":"Invalid token. max_tokens is too large"}}', maskedAuth: true }))
+      .toMatchObject({ kind: 'bad-request', status: 400 });
+    expect(classifyHttpFailure({ status: 400, body: '{"error":{"message":"The model does not exist or the token is invalid"}}', maskedAuth: true }))
+      .toMatchObject({ kind: 'not-found', status: 400 });
+    expect(classifyHttpFailure({ status: 400, body: '{"error":{"message":"Invalid token; the prompt is too long for the context window"}}', maskedAuth: true }))
+      .toMatchObject({ kind: 'context-length', status: 400 });
+  });
+
+  it.each([
+    'Invalid token',
+    'Token is invalid.',
+    'invalid_api_key',
+    'Invalid API key',
+    'Invalid credentials',
+    'API key not valid. Please pass a valid API key.',
+    "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth, or as the password field if you're accessing the API from your browser. You can obtain an API key from your account page.",
+    'Your credentials are expired',
+    'No auth credentials found',
+    'Missing bearer token in Authorization header',
+    'Unauthorized',
+    'unauthenticated request',
+    'Authentication Fails',
+    '无效的令牌',
+    '未提供令牌',
+    '令牌已过期',
+    'API Key 不存在',
+    '密钥错误',
+    'Authorization Token非法，请确认Authorization Token正确传递。',
+    'Header中未收到Authorization参数，无法进行身份验证。',
+    '鉴权失败',
+    '认证失败，请重新登录',
+    '请求未认证',
+    '未授权的访问',
+  ])('maskedAuth 认得的说法：%s', message => {
+    expect(classifyHttpFailure({ status: 400, body: { error: { message } }, maskedAuth: true })).toMatchObject({ kind: 'auth', status: 401 });
+  });
+
+  it('maskedAuth：正文里的 code 是 401 时直接采用，不看原话，也不看状态说明', () => {
+    expect(classifyHttpFailure({ status: 400, body: { error: { message: 'User not found.', code: 401 } }, maskedAuth: true })).toMatchObject({ kind: 'auth', status: 401 });
+    expect(classifyHttpFailure({ status: 400, body: { code: '401', message: 'nope' }, maskedAuth: true })).toMatchObject({ kind: 'auth', status: 401 });
+    // 服务商不发状态说明时，酒馆转出来是 400 Bad Request
+    expect(classifyHttpFailure({ status: 400, statusText: 'Bad Request', body: { error: { message: 'nope', code: 401 } }, maskedAuth: true })).toMatchObject({ kind: 'auth', status: 401 });
+    expect(classifyHttpFailure({ status: 400, body: { error: { message: 'User not found.', code: 404 } }, maskedAuth: true })).toMatchObject({ kind: 'bad-request', status: 400 });
+    expect(classifyHttpFailure({ status: 400, body: { error: { message: 'User not found.', code: 401 } } })).toMatchObject({ kind: 'bad-request', status: 400 });
+  });
+
+  it.each([
+    "[{'type': 'extra_forbidden', 'loc': ('body', 'enable_thinking'), 'msg': 'Extra inputs are not permitted'}]",
+    "role 'system' is forbidden for this model",
+    'You do not have permission to use logit_bias',
+    'Access denied for parameter logprobs',
+    'max_tokens 参数错误',
+    'prompt tokens 过期',
+    'invalid max_tokens',
+    'next_token is invalid',
+    'max_token 不正确',
+    '令牌数超过限制',
+    // 带着 token、unauthorized 字样，说的却是数量、JSON 写法或某个参数
+    'Invalid token: unexpected character at position 5',
+    'Invalid token in JSON at position 12',
+    '输入 token 数量错误：超过模型限制',
+    '输入 token 数量错误',
+    'Token 长度有误',
+    'Unauthorized parameter: logprobs',
+    'invalid token count',
+  ])('maskedAuth 不改判的说法（一般的 400 里也会出现的词）：%s', message => {
+    expect(classifyHttpFailure({ status: 400, body: { error: { message } }, maskedAuth: true }).status).toBe(400);
+  });
+
+  it('maskedAuth：状态说明传过来了就以它为准——Bad Request 时不看原话，认不出的状态说明仍看原话', () => {
+    const key = { error: { message: 'Invalid token' } };
+    expect(classifyHttpFailure({ status: 400, statusText: 'Bad Request', body: key, maskedAuth: true })).toMatchObject({ kind: 'bad-request', status: 400 });
+    expect(classifyHttpFailure({ status: 400, statusText: 'Unauthorized', body: { error: { message: 'nope' } }, maskedAuth: true })).toMatchObject({ kind: 'auth', status: 401 });
+    expect(classifyHttpFailure({ status: 400, statusText: 'Token Rejected', body: key, maskedAuth: true })).toMatchObject({ kind: 'auth', status: 401 });
+  });
+
   it('酒馆非流式错误信封只带 statusText 与配额标记', () => {
     expect(classifyHttpFailure({ status: 404, body: { error: { message: 'Not Found' } } })).toMatchObject({ kind: 'not-found' });
     expect(classifyHttpFailure({ body: { error: { message: 'Too Many Requests' } }, quotaFlag: true })).toMatchObject({ kind: 'quota' });
@@ -57,6 +154,8 @@ describe('上游报错分类', () => {
     ['request to https://api.bad.invalid/v1/chat/completions failed, reason: getaddrinfo ENOTFOUND api.bad.invalid', 'ENOTFOUND', '找不到 API 服务器（域名解析失败）'],
     ['connect ECONNREFUSED 127.0.0.1:5000', 'ECONNREFUSED', 'API 服务器拒绝连接'],
     ['unable to verify the first certificate', '', '连接 API 时证书校验失败'],
+    ["Hostname/IP does not match certificate's altnames: Host: api.bad.invalid. is not in the cert's altnames: DNS:*.other.invalid, DNS:other.invalid", 'ERR_TLS_CERT_ALTNAME_INVALID', '连接 API 时证书校验失败'],
+    ['getaddrinfo ENOTFOUND ssl.bad.invalid', 'ENOTFOUND', '找不到 API 服务器（域名解析失败）'],
     ['socket hang up', 'ECONNRESET', '酒馆连不上 API 服务器'],
   ])('酒馆连上游失败（502 + 网络异常）：%s', (message, code, title) => {
     const error = classifyHttpFailure({ status: 502, body: JSON.stringify({ error: { message, code } }) });
@@ -71,10 +170,11 @@ describe('上游报错分类', () => {
     expect(classifyHttpFailure({ status: 502, body: page }).detail).toBe('HTTP 502 · 返回了一个网页：Bad gateway');
   });
 
-  it('浏览器直连（向量接口）的网络错误提示跨域', () => {
+  it('浏览器直连（向量接口）的网络错误提示跨域，并指出本地模型要在服务那边放行', () => {
     const error = classifyHttpFailure({ status: 0, body: 'Failed to fetch', direct: true });
     expect(error.kind).toBe('network');
     expect(error.hint).toContain('CORS');
+    expect(error.hint).toContain('本地模型服务（如 Ollama）要先在服务那边放行酒馆网页的地址');
   });
 });
 

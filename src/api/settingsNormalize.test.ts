@@ -46,6 +46,29 @@ describe('数值设置的规整', () => {
     expect(normalizeApiSettings({ contentBoundary: 'never' }).contentBoundary).toBe('never');
     for (const bad of ['', 'off', true, false, 1, null]) expect(normalizeApiSettings({ contentBoundary: bad }).contentBoundary).toBe('auto');
   });
+
+  it('Query 重写的请求方式：旧设置没有这一项时为浏览器直连（与 1.4.18 相同），只有明确存成 backend 才经酒馆后端转发', () => {
+    expect(normalizeApiSettings({}).vector.queryRewriteRoute).toBe('direct');
+    expect(normalizeApiSettings({ vector: { enabled: true, queryRewriteMaxTokens: 4096 } }).vector.queryRewriteRoute).toBe('direct');
+    expect(normalizeApiSettings({ vector: { queryRewriteRoute: 'direct' } }).vector.queryRewriteRoute).toBe('direct');
+    expect(normalizeApiSettings({ vector: { queryRewriteRoute: 'backend' } }).vector.queryRewriteRoute).toBe('backend');
+    for (const bad of ['', 'Backend', 'proxy', true, 1, null]) {
+      expect(normalizeApiSettings({ vector: { queryRewriteRoute: bad } }).vector.queryRewriteRoute).toBe('direct');
+    }
+  });
+
+  it('创作规划的三项提示词：旧设置没有时为空串（用内置的），已有的自定义原样保留，类型不对的按空串', () => {
+    // 全新安装（没有任何存档）时三项都是空串
+    expect(normalizeApiSettings(null).prompts).toMatchObject({ outline: '', outlineGuidance: '', outlineProgress: '' });
+    const old = normalizeApiSettings({ prompts: { summary: '我的摘要提示词', jailbreak: '' } });
+    expect(old.prompts).toMatchObject({ summary: '我的摘要提示词', outline: '', outlineGuidance: '', outlineProgress: '' });
+    const kept = normalizeApiSettings({ prompts: { outline: '只规划日常线。', outlineGuidance: '{{pace_rule}}保持文风。', outlineProgress: '从严判断。' } });
+    expect(kept.prompts).toMatchObject({ outline: '只规划日常线。', outlineGuidance: '{{pace_rule}}保持文风。', outlineProgress: '从严判断。', summary: '' });
+    const bad = normalizeApiSettings({ prompts: { outline: 5, outlineGuidance: null, outlineProgress: { text: 'x' } } });
+    expect(bad.prompts).toMatchObject({ outline: '', outlineGuidance: '', outlineProgress: '' });
+    // 基准版本同样只认这些键里的非空字符串
+    expect(normalizeApiSettings({ promptBases: { outline: '旧内置', outlineGuidance: ' ', bogus: 'x' } }).promptBases).toEqual({ outline: '旧内置' });
+  });
 });
 
 describe('跟随主 API 时的最大回复与预填充', () => {

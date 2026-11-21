@@ -166,17 +166,15 @@ describe('亲密记录:摘要请求', () => {
     expect(fmtNpcSummaryList([{ name, brief: true }])).not.toContain('亲密记录');
   });
 
-  it.each([true, false])('内置规则含字段写法和摘要要求;未成年不记只各写一句(发送内容边界=%s)', contentBoundary => {
+  it.each([true, false])('内置规则含字段写法和摘要要求,各出现一次(发送内容边界=%s)', contentBoundary => {
     const { system, user } = buildSummaryPrompt(args, { contentBoundary });
-    expect(system).toContain('- intimacy:该角色与林舟的亲密记录,整体覆盖,写累积后的完整内容;未成年或年龄不明的角色不记。');
+    expect(system).toContain('- intimacy:该角色与林舟的亲密记录,整体覆盖,写累积后的完整内容。');
     expect(system).toContain('"intimacy": "累积后的完整亲密记录');
-    expect(system).toContain('- 亲密情节的硬事实:本楼正文明确写到发生性行为时(未成年或年龄不明的角色除外)');
+    expect(system).toContain('- 亲密情节的硬事实:本楼正文明确写到发生性行为时,用一两句平实的话写清');
     expect(system).not.toContain('{{user}}');
+    expect(system).not.toContain('未成年');
     expect(user).toContain(`与主角的亲密记录:${first}`);
     expect(system.split(RULE_NPC_INTIMACY.replaceAll('{{user}}', '林舟'))).toHaveLength(2);
-    // 这条限制不依赖内容边界那一段(对 DeepSeek 系列默认不发送),字段规则和摘要要求里各一句,不再重复
-    const rules = contentBoundary ? system.slice(system.indexOf('═══ 【任务】')) : system;
-    expect(rules.split('未成年或年龄不明的角色')).toHaveLength(3);
   });
 
   it('输出前核查逐项里有亲密记录一项', () => {
@@ -253,7 +251,6 @@ describe('亲密记录:开关(设置 → 注入设置,默认关闭)', () => {
     none(off.system);
     none(off.user);
     none(buildSummaryThinking('林舟').checklist);
-    expect(off.system).not.toContain('未成年或年龄不明的角色');
     // 去掉的只有这几段:字段规则、两处输出字段、摘要要求
     expect(on.system.length - off.system.length).toBe(
       RULE_NPC_INTIMACY.replaceAll('{{user}}', '林舟').length + 1

@@ -85,6 +85,23 @@ describe('带超时与重试的请求', () => {
     expect(e).toMatchObject({ name: 'EmbedError', kind: 'not-found', status: 404 });
     expect(e.message).toContain('Rerank：接口地址不对');
   });
+
+  it('返回的响应保留原来的状态、正文和响应头;原响应没有 Content-Type 时不会被补上', async () => {
+    const bare = new Response('{"error":{"message":"Forbidden"}}', { status: 403, statusText: 'Forbidden' });
+    bare.headers.delete('content-type');
+    fetchMock.mockResolvedValueOnce(bare);
+    const untyped = await fetchWithTimeoutRetry('u', {}, { timeoutSec: 5, retries: 0, label: 'Query 重写' });
+    expect(untyped.status).toBe(403);
+    expect(untyped.statusText).toBe('Forbidden');
+    expect(untyped.headers.has('content-type')).toBe(false);
+    expect(await untyped.text()).toBe('{"error":{"message":"Forbidden"}}');
+
+    fetchMock.mockResolvedValueOnce(new Response('{"ok":true}', { status: 200, headers: { 'Content-Type': 'application/json', 'X-Request-Id': 'r1' } }));
+    const typed = await fetchWithTimeoutRetry('u', {}, { timeoutSec: 5, retries: 0, label: 'Embedding' });
+    expect(typed.headers.get('content-type')).toBe('application/json');
+    expect(typed.headers.get('x-request-id')).toBe('r1');
+    expect(await typed.json()).toEqual({ ok: true });
+  });
 });
 
 describe('Embedding 返回的向量数量', () => {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/* 自定义提示词：列表（摘要/总结/二次总结/任务说明/时间标签），点开在弹窗里编辑。 */
+/* 自定义提示词：列表（摘要/总结/二次总结/任务说明/时间标签，以及创作规划的生成、注入指引、推进条件检查），点开在弹窗里编辑。 */
 import BbsSelect from '@/components/BbsSelect.vue';
 import Collapsible from '@/components/Collapsible.vue';
 import Icon from '@/components/Icon.vue';
@@ -44,7 +44,7 @@ const dialog = ref<InstanceType<typeof PromptDialog> | null>(null);
     </SettingRow>
     <SettingRow
       kind="num" as="div" label="内容边界"
-      hint="内置规则开头的一段，规定未成年人、成年人亲密内容、非自愿情节等如何记录。默认「自动」：模型名含 deepseek 时不发送，其他模型发送。"
+      hint="内置规则开头的一段，说明各类虚构剧情（包括亲密内容、冲突与非自愿情节等）均按正文正常如实记录。默认「自动」：模型名含 deepseek 时不发送，其他模型发送。"
       details="用于单楼摘要、合并摘要、总结、二次总结、回看原文补档案、角色重新建档和世界书建议；检索改写、创作规划、推进条件检查、规划讨论和双子札记不使用内容边界。选「自动」时按各项所用的模型判断，不区分大小写，带平台前缀或后缀的也算（如 deepseek-ai/DeepSeek-V3、deepseek-r1:14b）；跟随主 API 时看酒馆当前选中的模型。中转站把 DeepSeek 改成不含 deepseek 的别名时无法识别，可改选「不发送」。自定义模板里自己写的内容边界不受此项影响。"
     >
       <BbsSelect v-model="apiSettings.contentBoundary" :options="BOUNDARY_OPTIONS" class="prism-mode-select" aria-label="内容边界" />

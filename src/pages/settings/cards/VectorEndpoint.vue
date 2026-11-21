@@ -3,12 +3,14 @@
  * 向量记忆的一个端点（Embedding / Rerank / Query 重写）：直接填地址、密钥、模型，模型可一键拉取。
  * 卡片自身可折叠（点标题栏），默认收起只露标题；副标显示当前模型，收起也看得出配没配。
  * Rerank/Query 的地址、密钥留空时整体复用 Embedding；模型三者各自填写，从不复用。
+ * Query 重写另有「请求方式」：浏览器直连（默认）或经酒馆后端转发；Embedding 和 Rerank 始终由浏览器直连。
  */
+import BbsSelect from '@/components/BbsSelect.vue';
 import Icon from '@/components/Icon.vue';
 import IconButton from '@/components/IconButton.vue';
 import { fetchModels } from '@/api/client';
 import { describeFailure } from '@/api/errors';
-import { API_KEY_STORAGE_NOTE, apiSettings, resolveVectorModel } from '@/api/settings';
+import { API_KEY_STORAGE_NOTE, apiSettings, resolveVectorModel, type QueryRewriteRoute } from '@/api/settings';
 import { normalizeEndpointRetries, normalizeEndpointTimeout, normalizeQueryRewriteContextChars, normalizeQueryRewriteMaxTokens } from '@/memory/vector/params';
 import { ref, useId } from 'vue';
 import ModelCombo from '../ModelCombo.vue';
@@ -17,6 +19,11 @@ import SettingRow from '../SettingRow.vue';
 
 /** 端点角色：embedding / rerank / queryRewrite */
 type VectorRole = Parameters<typeof resolveVectorModel>[0];
+
+const ROUTE_OPTIONS: { value: QueryRewriteRoute; label: string }[] = [
+  { value: 'direct', label: '浏览器直连' },
+  { value: 'backend', label: '酒馆后端转发' },
+];
 
 const props = defineProps<{ role: VectorRole; label: string }>();
 
@@ -209,7 +216,19 @@ async function pullModels() {
             </label>
           </div>
           <p v-if="role === 'queryRewrite'" class="bbs-field-hint bbs-vec-io-hint">超时后不再重试，服务商出错或限流时按「失败重试次数」重试。思考过程也计入输出上限，设得太小会得到空回复。</p>
-          <p v-if="role === 'queryRewrite'" class="bbs-field-hint bbs-vec-io-hint">附带上下文上限：重写时一起发送的历史摘要、最近几楼全文和状态快照的总字数，默认 16000，最少 2000，填 0 不限制。长聊天的上下文常有两三万字，这时一次重写要十几秒。超出上限时先保留最近几楼（最新一楼一定带上），状态快照只带随身物品、在场的人和最近几楼提到名字的人和物，再从新到旧放入历史摘要。第一次请求 12 秒还没返回时会再发一次，先返回的那次算数。每一步的用时和实际发送的字数可在「召回调试」中查看。</p>
+          <p v-if="role === 'queryRewrite'" class="bbs-field-hint bbs-vec-io-hint">附带上下文上限：重写时一起发送的历史摘要、最近几楼全文和状态快照的总字数，默认 16000，最少 2000，填 0 不限制。长聊天的上下文常有两三万字，这时一次重写要十几秒。超出上限时先保留最近几楼（最新一楼一定带上），状态快照只带随身物品、在场的人和最近几楼提到名字的人和物，再从新到旧放入历史摘要。第一次请求 12 秒还没返回时会再发一次（本机或局域网地址除外），先返回的那次算数。每一步的用时和实际发送的字数可在「召回调试」中查看。</p>
+
+          <!-- 请求方式:仅 Query 重写。默认由浏览器直连;对话接口可以改成交给酒馆后端转发。Embedding、Rerank 始终由浏览器直连:酒馆没有专门转发这两类请求的接口,这里没有给它们做这个选项。 -->
+          <SettingRow
+            v-if="role === 'queryRewrite'"
+            kind="num"
+            as="div"
+            label="请求方式"
+            hint="浏览器直连（默认）：由网页直接请求服务商，1.4.18 及以前都是这样。酒馆后端转发：请求由酒馆服务器发出，不受浏览器跨域限制；用本地模型（如 Ollama），或服务商不允许网页直接访问、Query 重写报「浏览器无法访问这个地址」时，改成这一项。"
+            details="选「浏览器直连」时只由浏览器发出，不经酒馆后端。选「酒馆后端转发」时，请求用流式传输经酒馆转发（回复等全部收完再解析），服务商报错时看得到它的原话；400、422 的原话提到了流式传输时，改用非流式再试一次，原样重发成功了才记住，非流式时酒馆只转来状态说明（如 Bad Request），原文留在运行酒馆的命令行窗口里；服务不支持流式传输、报错里又没有提到流式传输时，请改回「浏览器直连」。上游在流式回复中途断开连接时，酒馆不会结束这次转发，请求要等到超时。选了酒馆后端转发之后，浏览器直连留作后备：酒馆服务器连不上这个地址，会改由浏览器直连再试，直连有答复后本次会话先用直连。公网地址的请求 12 秒没有返回时补发一次：后端在本次会话里还没有取回过答复时，补发的那一次由浏览器直连发出；取回过之后照旧经后端补发。后端从没取回过答复、又一直等到超时的，再由浏览器直连试一次。服务商的拒绝可能只针对酒馆服务器这一路（按地区或来源 IP 限制）：后端转来 403、451，或原话说到地区、来源 IP 不被支持，而后端在本次会话里还没有成功过时，每一轮都由浏览器直连再试一次（最多等 45 秒），成功就用它的结果，之后先用直连。本机或局域网地址（本地模型）不补发请求，被拒绝时也不另由浏览器再试。酒馆不在浏览器所在的电脑上、而模型服务只有浏览器这边能访问时，请用「浏览器直连」。Embedding 和 Rerank 始终由浏览器直连。每次实际用的是哪种方式，可在「召回调试」的查询重写一步查看。"
+          >
+            <BbsSelect v-model="apiSettings.vector.queryRewriteRoute" :options="ROUTE_OPTIONS" class="prism-route-select" aria-label="Query 重写的请求方式" />
+          </SettingRow>
 
           <!-- 破限:仅 Query 重写(三角色里只有它生成文本)。 -->
           <SettingRow
@@ -321,10 +340,20 @@ async function pullModels() {
   width: 100%;
   text-align: left;
 }
-/* 破限开关紧跟在超时/token 那栏(或其下的说明)之后:多留一点上间距,与上一栏拉开(只命中此处,不动通用 switch-row) */
+/* 请求方式、破限开关紧跟在超时/token 那栏(或其下的说明)之后:多留一点上间距,与上一栏拉开(只命中此处,不动通用的设置行) */
 .bbs-vec-io + :deep(.bbs-switch-row),
-.bbs-vec-io-hint + :deep(.bbs-switch-row) {
+.bbs-vec-io-hint + :deep(.bbs-switch-row),
+.bbs-vec-io-hint + :deep(.bbs-num-row) {
   margin-top: 6px;
+}
+/* 请求方式下拉:按选项文字定宽,靠右。带父级压过 BbsSelect 根节点的 width:100% */
+.bbs-num-row .prism-route-select {
+  width: auto;
+  min-width: 140px;
+  max-width: 100%;
+}
+.prism-route-select :deep(.bbs-select-trigger) {
+  font-size: 12px;
 }
 /* 最大输出下方的说明:与输入栏留出间距 */
 .bbs-vec-io-hint {

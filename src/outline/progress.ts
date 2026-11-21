@@ -12,14 +12,14 @@
 import { reactive, watch } from 'vue';
 import { requestCompletion, type ChatMsg } from '@/api/client';
 import { describeFailure } from '@/api/errors';
-import { engineActiveHere } from '@/api/settings';
+import { apiSettings, engineActiveHere } from '@/api/settings';
 import { getContext, type STContext } from '@/st/context';
 import { toast } from '@/st/toast';
 import { cleanBody } from '@/memory/timeTag';
 import { extractJsonObject } from '@/memory/json';
 import { isAiFloor } from '@/memory/engine';
 import { getLeaf, leafValid } from '@/memory/apply';
-import { OUTLINE_PROGRESS_PROMPT } from './prompt';
+import { outlineProgressSystemPrompt } from './prompt';
 import { outlineApiPath, outlineSettings, resolveOutlineChannel } from './settings';
 import { outlineSourceCurrent, outlineState, outlineStorageCurrent, setOutlineChapter } from './store';
 import type { OutlineActive } from './types';
@@ -140,7 +140,8 @@ export function buildProgressContext(ctx: STContext, active: OutlineActive, opts
   }
   const summaryPart = summaries.length ? `[较早楼层的逐楼摘要：原文放不下时的压缩记录，只作辅助证据]\n${summaries.join('\n')}\n\n` : '';
   return [
-    { role: 'system', content: OUTLINE_PROGRESS_PROMPT },
+    // 判断标准可在「设置 → 自定义提示词」里改；输出格式固定接在后面
+    { role: 'system', content: outlineProgressSystemPrompt(apiSettings.prompts.outlineProgress) },
     { role: 'user', content: `${stage}\n\n${summaryPart}[本阶段最近的正文与用户原话，按楼层排序]\n${rows.join('\n\n') || '（无）'}` },
   ];
 }

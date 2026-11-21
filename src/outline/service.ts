@@ -1,7 +1,7 @@
 import { reactive, watch } from 'vue';
 import { requestCompletion } from '@/api/client';
 import { ApiError, apiFailure, describeFailure, looksLikeUnfinishedJson, partialReply } from '@/api/errors';
-import { engineActiveHere } from '@/api/settings';
+import { apiSettings, engineActiveHere } from '@/api/settings';
 import { getContext } from '@/st/context';
 import { toast } from '@/st/toast';
 import { buildOutlineContext, type OutlineChapterCount } from './context';
@@ -145,7 +145,7 @@ export function buildOutlineInjection(): string {
   if (!engineActiveHere() || outlineState.saving || !outlineStorageCurrent()) return '';
   const active = outlineState.active;
   if (!active?.enabled || !outlineSourceCurrent(active)) return '';
-  try { return renderOutlineGuidance(active, outlineSettings.pace); }
+  try { return renderOutlineGuidance(active, outlineSettings.pace, apiSettings.prompts.outlineGuidance); }
   catch { outlineRun.status = '当前阶段太长，没有发给正文；请精简后重新确认。'; return ''; }
 }
 /** 正在生效的规划参考的正文是否还在；从「在」变为「不在」时提示一次（换了规划、重新启用或切换聊天不算）。 */
@@ -280,7 +280,8 @@ export function bindOutlineLifecycle(): void {
     }
     refreshOutlineInjection();
   });
-  const stop = watch(() => [outlineState.revision, outlineState.saving, engineActiveHere()], () => {
+  // 写作要求（设置 → 自定义提示词 → 规划注入指引）改了也马上重新登记，不必等下一次生成开始
+  const stop = watch(() => [outlineState.revision, outlineState.saving, engineActiveHere(), apiSettings.prompts.outlineGuidance], () => {
     if (!engineActiveHere() && outlineRun.busy) cancelOutline();
     if (discussionRun.busy && discussionCurrent && !discussionCurrent()) cancelOutlineDiscussion();
     refreshOutlineInjection();

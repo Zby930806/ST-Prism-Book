@@ -206,13 +206,12 @@ describe('精简版:单楼摘要请求', () => {
 describe('精简版:亲密记录', () => {
   const MARKS = ['intimacy', '亲密记录', '亲密情节', '性行为', '戴套'];
 
-  it('开启时字段规则和摘要要求与旧版共用同一段文字,各出现一次;未成年不记的限制仍在', () => {
+  it('开启时字段规则和摘要要求与旧版共用同一段文字,各出现一次', () => {
     const { system } = buildSummaryPrompt(args, { contentBoundary: false });
     expect(system.split(RULE_NPC_INTIMACY.replaceAll('{{user}}', '林舟'))).toHaveLength(2);
     expect(system.split(INTIMACY_SUMMARY_RULE)).toHaveLength(2);
     expect(system).toContain('"intimacy": "与主角的亲密记录", ');
-    // 这条限制不依赖内容边界那一段(对 DeepSeek 系列默认不发送):字段规则和摘要要求里各一句
-    expect(system.split('未成年或年龄不明的角色')).toHaveLength(3);
+    expect(system).not.toContain('未成年');
     expect(buildSummaryThinking('林舟').checklist).toContain('   亲密记录：本楼正文有没有明确写到林舟和某个角色发生性行为');
     for (const level of [1, 2]) {
       const parts = buildResummaryPrompt({ user: '林舟', char: '苏晚', content: '[1] 摘要', level }, { contentBoundary: false });

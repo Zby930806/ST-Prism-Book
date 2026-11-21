@@ -390,6 +390,27 @@ describe('真实 core：草稿、确认、独立注入与阶段控制', () => {
     expect(text).toContain('不得替用户角色'); expect(text).toContain('用户本轮明确要求与已发生事实优先');
   });
 
+  it('自定义的写作要求随注入生效：标记行和规划内容照旧，改动后马上重新登记，清空后回到内置的', async () => {
+    bindOutlineLifecycle(); await active();
+    const builtin = buildOutlineInjection();
+    expect(latestInjection()).toBe(builtin);
+    api.apiSettings.prompts.outlineGuidance = '按规划的方向写，保持原有文风。{{pace_rule}}';
+    try {
+      const custom = buildOutlineInjection();
+      const lines = custom.split('\n');
+      expect(lines[0]).toBe('[用户已确认的创作规划：未来创作指引，不是已发生事实]');
+      expect(lines[1]).toBe('按规划的方向写，保持原有文风。本阶段要经过多轮回复逐步展开：每轮最多推进一到两个剧情要点，不在一轮写完所有要点，回复停在需要用户回应的地方；');
+      expect(custom).not.toContain('不得替用户角色');
+      expect(custom.slice(custom.indexOf('\n规划：'))).toBe(builtin.slice(builtin.indexOf('\n规划：')));
+      // 没有等到下一次生成开始，设置一改就已经把新的文字交给酒馆
+      expect(latestInjection()).toBe(custom);
+    } finally {
+      api.apiSettings.prompts.outlineGuidance = '';
+    }
+    expect(buildOutlineInjection()).toBe(builtin);
+    expect(latestInjection()).toBe(builtin);
+  });
+
   it('独立 API 模式只使用专用渠道，不改札记配置、不走正文或摘要回退', async () => {
     outlineSettings.apiMode = 'independent';
     Object.assign(outlineSettings.channel, { url: 'https://outline.example.invalid/v1', key: 'outline-secret', model: 'outline-model' });

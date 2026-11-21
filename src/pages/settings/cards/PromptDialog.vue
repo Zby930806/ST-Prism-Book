@@ -2,6 +2,7 @@
 /**
  * 提示词编辑弹窗：草稿 promptDraft，点「完成」才写回 apiSettings，取消则丢弃。
  * 自定义不会跟着内置更新：内置改过时提醒，并能列出差异。由卡片调用 open(meta) 打开。
+ * 创作规划的三项另有不能改的部分（输出格式、插件生成的规划内容），在文本框下方只读展示。
  */
 import Icon from '@/components/Icon.vue';
 import ModalShell from '@/components/ModalShell.vue';
@@ -143,8 +144,8 @@ defineExpose({ open });
         <p class="prism-diff-hint">「+」表示当前内置版本有、对比版本没有的行，「−」相反。同步时将所需改动写入下方文本，点击「完成」保存，再点击「已同步，不再提醒」。</p>
       </div>
 
-      <!-- 可用宏:点一下插入到光标处 -->
-      <div class="bbs-macro-bar">
+      <!-- 可用宏:点一下插入到光标处(没有宏的提示词不显示这一行) -->
+      <div v-if="editingPrompt.macros.length" class="bbs-macro-bar">
         <span class="bbs-macro-tip">点击插入宏：</span>
         <button
           v-for="mac in editingPrompt.macros"
@@ -166,6 +167,12 @@ defineExpose({ open });
         spellcheck="false"
         rows="16"
       ></textarea>
+
+      <!-- 不能改的部分(创作规划的三项):只读展示,发送时由插件接上 -->
+      <details v-if="editingPrompt.fixed" class="bbs-disclosure prism-prompt-fixed">
+        <summary>{{ editingPrompt.fixed.label }}</summary>
+        <pre class="prism-prompt-fixed-text">{{ editingPrompt.fixed.text }}</pre>
+      </details>
 
     </template>
 
@@ -306,6 +313,28 @@ defineExpose({ open });
   .bbs-macro { min-height: 40px; }
 }
 .prism-editor-note { margin: 0; padding: 10px 12px; color: var(--bbs-ink-soft); background: var(--bbs-accent-soft); border-radius: 10px; font-size: 12px; line-height: 1.7; }
+/* 不能改的部分:折叠的只读文本,样式与差异区一致 */
+.prism-prompt-fixed > summary {
+  min-height: 36px;
+  padding: 6px 0;
+  font-size: 12.5px;
+  color: var(--bbs-ink-soft);
+}
+.prism-prompt-fixed-text {
+  max-height: 260px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--bbs-line);
+  border-radius: var(--bbs-radius-sm);
+  background: var(--bbs-bg);
+  color: var(--bbs-ink-soft);
+  font-family: var(--bbs-font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 @media (max-width: 420px) {
   .bbs-prompt-area { min-height: 220px; font-size: 13px; }
 }

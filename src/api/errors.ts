@@ -125,10 +125,11 @@ export function parseUpstreamError(body: unknown): UpstreamError {
   return { message, code: pick(err?.code) || pick(value.code), type: pick(err?.type) || pick(value.type) || pick(err?.status) };
 }
 
+// 413、422 各有新旧两种说法（RFC 9110 改了名字，新版本的服务端用新名字）
 const STATUS_BY_TEXT: Record<string, number> = {
   'bad request': 400, unauthorized: 401, 'payment required': 402, forbidden: 403, 'not found': 404,
-  'method not allowed': 405, 'request timeout': 408, 'payload too large': 413, 'request entity too large': 413,
-  'unprocessable entity': 422, 'too many requests': 429, 'internal server error': 500, 'bad gateway': 502,
+  'method not allowed': 405, 'request timeout': 408, 'payload too large': 413, 'request entity too large': 413, 'content too large': 413,
+  'unprocessable entity': 422, 'unprocessable content': 422, 'too many requests': 429, 'internal server error': 500, 'bad gateway': 502,
   'service unavailable': 503, 'gateway timeout': 504,
 };
 
@@ -141,6 +142,8 @@ const RE = {
   dns: /enotfound|getaddrinfo|eai_again|name not resolved|dns/i,
   refused: /econnrefused|connection refused|connect refused/i,
   tls: /certificate|cert_|self[- ]signed|ssl|tls|unable to verify/i,
+  // 明确在说证书的（不含 ssl、tls 这类也会出现在域名里的词）
+  certificate: /certificate|self[- ]signed|unable to verify/i,
   netTimeout: /etimedout|timed out|timeout|esockettimedout/i,
   network: /econnreset|socket hang up|fetch failed|failed to fetch|load failed|network|other side closed|ehostunreach|enetunreach|epipe|terminated|und_err/i,
   context: /context[_ ]?length|maximum context|context window|too many tokens|prompt is too long|input is too long|reduce the length|token limit|exceeds? (?:the )?(?:model'?s? )?(?:maximum|max)|max_prompt|超出.{0,8}(?:上下文|长度|token)|上下文.{0,6}(?:超|过长|超出)|输入.{0,4}过长/i,
@@ -152,6 +155,11 @@ const RE = {
   prefill: /prefill|last message|final message|must end with|ends with an assistant|assistant message prefill|role.{0,20}(?:user|last)/i,
   // 各家说法：max_tokens is too large / valid range of max_tokens is [1, 8192] / max_tokens: 100000 > 64000 / max_tokens 参数非法……
   maxOutput: /max[_ ]?(?:completion|output|new)?[_ ]?tokens?\b[\s\S]{0,100}?(?:too large|too big|too high|exceed|range|invalid|not valid|maximum|at most|should be|must be|less than|<=|≤|>|超过|超出|范围|非法|不合法|上限|过大)|(?:valid range|maximum allowed|at most)[\s\S]{0,80}?max[_ ]?(?:completion|output)?[_ ]?tokens?/i,
+  // 服务商回 401 时的说法：密钥、令牌无效、缺失、过期，或没有通过认证。只用来认被酒馆改成 400 的 401（见 maskedAuth），
+  // 所以比 auth 窄：forbidden、permission 这类词在一般的 400 里也常见（如参数校验的 extra_forbidden），不收。
+  credential: /unauthori[sz]ed|authenticat|invalid[_ ]?(?:api[_ ]?)?(?:key|token|credentials?)|incorrect[_ ]api[_ ]?key|provide (?:an?|your|a valid) api[_ ]?key|(?:^|[^a-z_])(?:api[_ ]?key|token|credentials?)\s+(?:is\s+|are\s+|has\s+)?(?:invalid|incorrect|expired|missing|not\s+(?:valid|found|provided))|no auth credentials|missing\s+(?:api[_ ]?key|authorization|bearer)|(?:无效|错误|过期|不存在|未提供)的?\s*(?:令牌|密钥|api[_ ]?key|token)|(?:令牌|密钥|(?:^|[^a-z_])api[_ ]?key|(?:^|[^a-z_])token)(?!s)[^，。,.]{0,6}(?:无效|非法|错误|不正确|不存在|过期|失效|有误|不可用|已禁用)|鉴权失败|认证失败|未授权|未认证|身份验证/i,
+  // 带着这些词的多半不是密钥问题：token 的数量、长度超了，JSON 写错了（Invalid token…），或在说某个参数
+  notCredential: /数量|个数|长度|超过|超出|上限|\b(?:limit|exceeds?|exceeded|count|length|unexpected|parse|parsing|syntax|json|parameters?|arguments?)\b/i,
 };
 
 export interface HttpFailureInput {
@@ -162,6 +170,18 @@ export interface HttpFailureInput {
   direct?: boolean;
   /** 酒馆代理报告的配额错误。 */
   quotaFlag?: boolean;
+  /**
+   * 这是服务商自己发回的 HTTP 回复（浏览器直连拿到的，或酒馆流式转发原样转来的），不是酒馆连上游时抛的异常：
+   * 正文里出现 certificate、network 之类的词也不按连接问题归类。
+   */
+  provider?: boolean;
+  /**
+   * 酒馆流式转发会把服务商的 401 改成 400，状态说明（Unauthorized）照常传来时据此还原。
+   * 状态说明认不出来时（酒馆前面有 HTTP/2 的反向代理，传不过来），只能看原话：
+   * 原话说的是密钥、令牌没有通过认证，又不属于更具体的分类，就按 401 归类。状态说明是 Bad Request 时不看原话。
+   * 正文里的 code 是 401 的，不管状态说明是什么都按 401 归类（有的服务商不发状态说明，酒馆转出来会变成 Bad Request）。
+   */
+  maskedAuth?: boolean;
 }
 
 /** 把一次失败的 HTTP 响应翻译成 ApiError。 */
@@ -174,6 +194,8 @@ export function classifyHttpFailure(input: HttpFailureInput): ApiError {
   // 网关或网站首页返回的整页 HTML 里什么词都可能出现，只按状态码判断。
   const html = /<\s*(?:!doctype|html|head|body)\b/i.test(upstream.message);
   const haystack = html ? '' : [upstream.message, upstream.code, upstream.type].join(' ');
+  if (input.maskedAuth && status === 400 && (upstream.code === '401' || (!fromText && RE.credential.test(haystack) && !RE.notCredential.test(haystack)
+    && !RE.maxOutput.test(haystack) && !RE.context.test(haystack) && !RE.model.test(haystack)))) status = 401;
   const parts = [status ? `HTTP ${status}` : '', upstream.code && upstream.code !== String(status) ? upstream.code : '', html ? sanitizeDetail(upstream.message) : upstream.message];
   const detail = sanitizeDetail(parts.filter(Boolean).join(' · '));
   const code = status ? `（HTTP ${status}）` : '';
@@ -181,7 +203,7 @@ export function classifyHttpFailure(input: HttpFailureInput): ApiError {
   if (html && (!status || status < 400)) return invalidResponse(upstream.message);
 
   // 酒馆连上游时抛出的网络异常会以 500/502 + 错误信封返回。
-  if ((!status || status === 500 || status === 502) && (RE.dns.test(haystack) || RE.refused.test(haystack) || RE.tls.test(haystack) || (RE.network.test(haystack) && !RE.context.test(haystack)))) {
+  if (!input.provider && (!status || status === 500 || status === 502) && (RE.dns.test(haystack) || RE.refused.test(haystack) || RE.tls.test(haystack) || (RE.network.test(haystack) && !RE.context.test(haystack)))) {
     return networkFailure(haystack, { direct: input.direct, detail });
   }
   if (input.quotaFlag || status === 402 || ((status === 429 || status === 403 || !status) && RE.quota.test(haystack))) {
@@ -239,17 +261,18 @@ export function networkFailure(message: string, opts: { direct?: boolean; toHost
     return apiFailure('network', '连不上酒馆服务器', '请确认酒馆还在运行、网页没有断线，然后重试。', { detail });
   }
   if (opts.direct) {
-    return apiFailure('network', '浏览器无法访问这个地址', '可能是地址写错、网络不通，或服务商不允许网页直接访问（跨域 CORS 限制）。', { detail });
+    return apiFailure('network', '浏览器无法访问这个地址', '可能是地址写错、网络不通，或服务商不允许网页直接访问（跨域 CORS 限制）。本地模型服务（如 Ollama）要先在服务那边放行酒馆网页的地址，做法见常见问题「向量记忆用本地模型」。', { detail });
   }
+  const certificate = () => apiFailure('network', '连接 API 时证书校验失败', '请确认地址的 http / https 写对了；自建服务需要有效证书。', { detail });
+  // 证书域名不符的报错里列着证书上的名字（DNS:example.com），要先于域名解析失败判断
+  if (RE.certificate.test(message)) return certificate();
   if (RE.dns.test(message)) {
     return apiFailure('network', '找不到 API 服务器（域名解析失败）', '请检查 API 地址有没有拼错；需要代理才能访问的服务，请确认运行酒馆的电脑能连上它。', { detail });
   }
   if (RE.refused.test(message)) {
     return apiFailure('network', 'API 服务器拒绝连接', '地址或端口可能不对，或者本地模型服务还没启动。', { detail });
   }
-  if (RE.tls.test(message)) {
-    return apiFailure('network', '连接 API 时证书校验失败', '请确认地址的 http / https 写对了；自建服务需要有效证书。', { detail });
-  }
+  if (RE.tls.test(message)) return certificate();
   if (RE.netTimeout.test(message)) {
     return apiFailure('network', '连接 API 服务器超时', '网络不稳或需要代理才能访问，请检查网络后重试。', { detail });
   }

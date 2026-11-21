@@ -99,6 +99,10 @@ export interface RecallRewriteStats {
   trimmed: boolean;
   /** 第一次请求太久没返回,补发过一次(先返回的那次算数) */
   hedged?: boolean;
+  /** 这次的回复由哪条路取得:backend = 经酒馆后端转发,direct = 浏览器直连。旧快照没有此字段 */
+  route?: 'backend' | 'direct';
+  /** 设置的是酒馆后端转发,这次的回复却是浏览器直连取得的(本次会话里酒馆服务器连不上这个地址、迟迟没有返回,或被服务商按来路拒绝) */
+  fellBack?: boolean;
   promptTokens?: number;
   completionTokens?: number;
   reasoningTokens?: number;

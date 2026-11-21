@@ -550,7 +550,7 @@ async function startAutoGeneration(confirmed = false, fromEmpty = false) {
     <OutlineDiscussion :disabled="locked" :unsaved="dirty" :configuration-issue="configurationIssue" :api-dirty="apiDirty" @view-draft="showDraftEditor" @open-api="showApiSettings" />
     <details ref="workbenchEl" class="bbs-disclosure is-card planner-workbench">
       <summary>{{ active ? '修改或重新生成规划' : '生成规划草稿' }}<span v-if="dirty" class="bbs-disclosure-meta">有未保存的修改</span></summary>
-      <p class="hint">写下你希望故事怎么发展，模型会结合当前剧情给出分阶段的草稿；你可以修改，确认加入计划后才生效。</p>
+      <p class="hint">写下你希望故事怎么发展，模型会结合当前剧情给出分阶段的草稿；你可以修改，确认加入计划后才生效。生成规划、注入正文和检查推进条件所用的提示词，可在「设置 → 自定义提示词」中修改。</p>
       <section class="planner-section" aria-label="生成规划草稿">
         <fieldset :disabled="locked">
           <label>你希望怎么发展<textarea v-model="brief" class="bbs-input" rows="4" maxlength="8000" placeholder="比如人物关系往哪走、想要的转折、节奏、不想出现的情节……会结合当前剧情来规划。" /></label>

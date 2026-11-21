@@ -3,8 +3,9 @@ import type { STContext } from '@/st/context';
 import { cleanBody } from '@/memory/timeTag';
 import { memory, memoryWriteIssue } from '@/memory/store';
 import { selectHistoryNodesBefore } from '@/memory/inject';
+import { apiSettings } from '@/api/settings';
 import { fitHistoryNodes, fitNewestLines, memoryBudgetLimited, memoryStateDigest } from '@/notes/memoryDigest';
-import { OUTLINE_PROMPT } from './prompt';
+import { outlineSystemPrompt } from './prompt';
 import { outlineRecentIndices } from './sources';
 
 const TRUNCATED = '\n[资料按预算截断，未展示部分不可臆造]';
@@ -100,7 +101,8 @@ export function buildOutlineContext(ctx: STContext, brief: string, chapterCount:
     : `严格输出 ${chapterCount} 个规划阶段（chapters 数组长度必须为 ${chapterCount}）`;
   const request = auto ? `[一键生成：用户没有填写创作要求]\n${AUTO_OUTLINE_REQUEST}` : `[本次最新用户 input；优先于旧创作方向]\n${brief.trim()}`;
   return [
-    { role: 'system', content: OUTLINE_PROMPT },
+    // 规划要求可在「设置 → 自定义提示词」里改；输出格式固定接在后面
+    { role: 'system', content: outlineSystemPrompt(apiSettings.prompts.outline) },
     { role: 'user', content: '[角色卡；设定不等于已发生剧情]\n' + clip(card, L.card) },
     ...(worldInfo ? [{ role: 'user' as const, content: '[世界书：当前启用的设定条目（常驻条目与最近正文触发的条目）；设定不等于已发生剧情]\n' + clip(worldInfo, L.worldInfo) }] : []),
     { role: 'user', content: memoryText },
